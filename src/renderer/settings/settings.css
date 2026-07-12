@@ -1753,6 +1753,11 @@ body {
   box-shadow: 0 0 0 2px var(--rb-pink-100);
 }
 
+.chat-sessions__item.is-active .chat-sessions__title:not(.is-editing) {
+  color: var(--rb-pink-700);
+  -webkit-text-fill-color: var(--rb-pink-700);
+}
+
 /* 左侧：标题 + meta 纵向堆叠，吃满剩余宽度 */
 .chat-sessions__main {
   flex: 1 1 auto;
@@ -1773,7 +1778,10 @@ body {
 
 .chat-sessions__title.is-editing {
   outline: 1px solid var(--rb-pink-500);
-  background: var(--rb-card-bg);
+  background: #fff7fb;
+  color: #2b1830;
+  caret-color: #d92f83;
+  -webkit-text-fill-color: #2b1830;
   border-radius: 6px;
   padding: 2px 6px;
   user-select: text;

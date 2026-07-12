@@ -25,6 +25,7 @@ import "./orchestrator/built-in-tools";
 // 触发 fs-tools 的副作用注册（read_file / list_dir / write_file / read_image）
 import "./orchestrator/fs-tools";
 import "./orchestrator/qq-tools";
+import { registerNovelAiIpc } from "./novelai/service";
 import { initMcpManager, addMcpServer, removeMcpServer, listMcpServers, pruneMcpServersByIds } from "./orchestrator/mcp-manager";
 import { syncPlaywrightMcp, PLAYWRIGHT_MCP_ID, REMOVED_BUILTIN_MCP_IDS } from "./sync-mcp-builtin";
 import { buildEnvironmentContext } from "./orchestrator/environment";
@@ -90,6 +91,7 @@ let tasksWindow: BrowserWindow | null = null;
 let settingsWindow: BrowserWindow | null = null;
 let stickerManagerWindow: BrowserWindow | null = null;
 let callWindow: BrowserWindow | null = null;
+let novelAiWindow: BrowserWindow | null = null;
 let schedulerEngine: SchedulerEngine | null = null;
 // 聊天窗口当前活跃的会话 id（通过 IPC 由聊天窗口上报）；
 // 设置面板"删除当前会话"差异化提示用。聊天窗口关闭时由 closed 事件置 null。
@@ -2551,6 +2553,43 @@ function flushPetWindowMove(): void {
   }
 }
 
+function createNovelAiWindow(): void {
+  if (novelAiWindow && !novelAiWindow.isDestroyed()) {
+    novelAiWindow.show();
+    novelAiWindow.focus();
+    return;
+  }
+  const { workArea } = screen.getPrimaryDisplay();
+  const width = Math.min(1320, workArea.width);
+  const height = Math.min(880, workArea.height);
+  novelAiWindow = new BrowserWindow({
+    x: workArea.x + Math.max(0, Math.floor((workArea.width - width) / 2)),
+    y: workArea.y + Math.max(0, Math.floor((workArea.height - height) / 2)),
+    width,
+    height,
+    minWidth: 980,
+    minHeight: 680,
+    title: "昔涟 · NovelAI 绘图",
+    icon: APP_ICON_PATH,
+    backgroundColor: "#100d20",
+    autoHideMenuBar: true,
+    show: false,
+    frame: false,
+    transparent: false,
+    webPreferences: {
+      preload: path.join(__dirname, "..", "..", "preload", "preload", "index.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+  attachExternalLinkHandler(novelAiWindow);
+  if (isDev) novelAiWindow.loadURL("http://localhost:5173/novelai/");
+  else novelAiWindow.loadFile(path.join(__dirname, "..", "..", "renderer", "novelai", "index.html"));
+  novelAiWindow.once("ready-to-show", () => novelAiWindow?.show());
+  novelAiWindow.on("closed", () => { novelAiWindow = null; });
+}
+
 ipcMain.on(IPC.WINDOW_MOVE_TO, (_event, x: number, y: number) => {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   const next = normalizeWindowPosition(x, y);
@@ -4008,6 +4047,11 @@ app.whenReady().then(async () => {
   registerPermissionIpc();
   registerChoiceIpc();
   registerCallIpc();
+  registerNovelAiIpc(
+    () => createNovelAiWindow(),
+    () => novelAiWindow?.minimize(),
+    () => novelAiWindow?.close(),
+  );
   console.log("[Cyrene] 当前 agent 权限档位:", getCurrentLevel());
   try {
     const modelSettings = loadModelSettings();

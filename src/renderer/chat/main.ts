@@ -22,6 +22,7 @@ interface Message {
   sticker?: string | null;
   thinking?: boolean;
   ttsCacheKey?: string;
+  novelAiImage?: { id:string; prompt?:string; model?:string; width?:number; height?:number };
 }
 
 interface ChatReplyPayload {
@@ -381,6 +382,7 @@ interface ChatStoreSession {
     at: number;
     sticker?: string | null;
     ttsCacheKey?: string;
+    novelAiImage?: { id:string; prompt?:string; model?:string; width?:number; height?:number };
   }>;
   createdAt: number;
   updatedAt: number;
@@ -415,7 +417,7 @@ declare global {
 // - 过滤空 content / 渲染中的 thinking 占位（thinking=true 时通常 content 为空，但保险起见双重过滤）
 // - 丢弃 thinking 字段（持久化层不存这种瞬态状态）
 function toPersistableMessages(arr: Message[]): Array<{
-  id: string; role: Role; content: string; at: number; sticker?: StickerId | null; ttsCacheKey?: string;
+  id: string; role: Role; content: string; at: number; sticker?: StickerId | null; ttsCacheKey?: string; novelAiImage?: Message["novelAiImage"];
 }> {
   return arr
     .filter((m) => {
@@ -429,6 +431,7 @@ function toPersistableMessages(arr: Message[]): Array<{
       at: m.at,
       sticker: m.sticker ?? null,
       ttsCacheKey: m.ttsCacheKey,
+      novelAiImage: m.novelAiImage,
     }));
 }
 
@@ -454,6 +457,7 @@ function loadSessionIntoUI(session: ChatStoreSession): void {
       at: m.at,
       sticker: m.sticker ?? null,
       ttsCacheKey: m.ttsCacheKey,
+      novelAiImage: m.novelAiImage,
     });
   }
   // 上报活跃 sessionId（设置面板"删除当前会话"差异化提示用）
@@ -523,6 +527,7 @@ const inspectorBridge = window as unknown as {
     onChanged: (callback: (state: InspectorRuntimeState) => void) => () => void;
   };
   sidebar?: { openCall: () => void; openSettings: (section?: string) => void };
+  novelai?: { open: () => void; image: (id:string) => Promise<Record<string,unknown>|null> };
 };
 
 function selectInspectorTab(name: "overview" | "schedule" | "status"): void {
@@ -638,6 +643,7 @@ document.querySelectorAll<HTMLElement>("[data-shell-action]").forEach((element) 
     if (action === "tasks") selectInspectorTab("schedule");
     if (action === "memory") window.sidebar?.openSettings("memory");
     if (action === "channels") window.sidebar?.openSettings("channels");
+    if (action === "novelai") window.novelai?.open();
     if (action === "settings") window.sidebar?.openSettings("general");
     if (action === "task-settings") window.sidebar?.openSettings("tasks");
     if (action === "api") window.sidebar?.openSettings("api");
@@ -1120,6 +1126,37 @@ function buildWeatherCardEl(data: Record<string, unknown>): HTMLElement {
   return card;
 }
 
+function buildNovelAiImageCard(data: Record<string, unknown>): HTMLElement {
+  const card = document.createElement("figure");
+  card.className = "novelai-chat-card";
+  const image = document.createElement("img");
+  image.src = String(data.dataUrl || "");
+  image.alt = String(data.prompt || "NovelAI 生成图片");
+  image.draggable = false;
+  const caption = document.createElement("figcaption");
+  const promptText = document.createElement("span");
+  promptText.textContent = String(data.prompt || "NovelAI 作品");
+  const meta = document.createElement("small");
+  meta.textContent = `${String(data.model || "NovelAI")} · ${Number(data.width) || "?"} × ${Number(data.height) || "?"}`;
+  const openButton = document.createElement("button");
+  openButton.type = "button";
+  openButton.textContent = "在绘图工作台查看";
+  openButton.addEventListener("click", () => window.novelai?.open());
+  caption.append(promptText, meta, openButton);
+  card.append(image, caption);
+  image.addEventListener("load", () => { messagesEl.scrollTop = messagesEl.scrollHeight; });
+  return card;
+}
+
+function buildStoredNovelAiImageCard(meta: NonNullable<Message["novelAiImage"]>): HTMLElement {
+  const host=document.createElement("div");host.className="novelai-chat-card-host";
+  const loading=document.createElement("div");loading.className="novelai-chat-card-loading";loading.textContent="正在载入绘图作品…";host.appendChild(loading);
+  void window.novelai?.image(meta.id).then((data)=>{
+    host.replaceChildren(data?buildNovelAiImageCard(data):document.createTextNode("绘图作品文件已被移动或删除。"));
+  }).catch(()=>{host.textContent="绘图作品载入失败。"});
+  return host;
+}
+
 /** AQI → 颜文字。 */
 function aqiKaomojiText(aqi: number): string {
   if (aqi <= 50) return "(◕‿◕)";
@@ -1225,6 +1262,10 @@ function render(): void {
         });
         body.appendChild(sticker);
       }
+    }
+
+    if (m.novelAiImage) {
+      body.appendChild(buildStoredNovelAiImageCard(m.novelAiImage));
     }
 
     // actions 行：喇叭 / 复制 / 时间三个控件水平排在气泡下方。
@@ -2371,6 +2412,7 @@ async function triggerCyreneGreeting(): Promise<void> {
     let pendingTtsCachePromise: Promise<{ cacheKey: string } | null> | null = null;
     let sticker: string | null = null;
     let pendingWeatherCard: Record<string, unknown> | null = null;
+    let pendingNovelAiImage: Record<string, unknown> | null = null;
 
     let finishRun!: () => void;
     let failRun!: (err: Error) => void;
@@ -2487,6 +2529,8 @@ async function triggerCyreneGreeting(): Promise<void> {
               sticker = (event.value as StickerId | null) ?? null;
             } else if (event.name === "cyrene.weather") {
               pendingWeatherCard = event.value as Record<string, unknown>;
+            } else if (event.name === "cyrene.novelai-image") {
+              pendingNovelAiImage = event.value as Record<string, unknown>;
             } else if (event.name === "cyrene.todos") {
               renderTodoPanel(event.value as TodoState | null);
             } else if (event.name === "cyrene.choice") {
@@ -2530,6 +2574,9 @@ async function triggerCyreneGreeting(): Promise<void> {
       msg.thinking = false;
       msg.content = streamContent;
       msg.sticker = sticker;
+      if(pendingNovelAiImage){
+        msg.novelAiImage={id:String(pendingNovelAiImage.id||""),prompt:String(pendingNovelAiImage.prompt||""),model:String(pendingNovelAiImage.model||""),width:Number(pendingNovelAiImage.width)||undefined,height:Number(pendingNovelAiImage.height)||undefined};
+      }
     }
     void saveSession();
     const finishedMsgId = streamMsgId;
@@ -2547,6 +2594,7 @@ async function triggerCyreneGreeting(): Promise<void> {
       messagesEl.scrollTop = messagesEl.scrollHeight;
       pendingWeatherCard = null;
     }
+    pendingNovelAiImage = null;
   } catch (err) {
     const message = err instanceof Error ? err.message : "模型请求失败";
     const msg = messages.find(m => m.id === streamMsgId);
@@ -2659,6 +2707,7 @@ async function send(): Promise<void> {
     let pendingTtsCachePromise: Promise<{ cacheKey: string } | null> | null = null;
     let sticker: string | null = null;
     let pendingWeatherCard: Record<string, unknown> | null = null;
+    let pendingNovelAiImage: Record<string, unknown> | null = null;
 
     // 终态信号：由事件流的 RUN_FINISHED/RUN_ERROR 触发 resolve，
     // 不依赖 invoke 的 resolve（invoke 只做 ack，可能与事件投递存在顺序竞争）。
@@ -2793,6 +2842,8 @@ async function send(): Promise<void> {
               // 暂存天气数据，等 runDone 后 render 再插入（避免 render 的 replaceChildren 清掉卡片）
               console.log("[Chat] 收到天气卡片数据:", JSON.stringify(event.value)?.slice(0, 100));
               pendingWeatherCard = event.value as Record<string, unknown>;
+            } else if (event.name === "cyrene.novelai-image") {
+              pendingNovelAiImage = event.value as Record<string, unknown>;
             } else if (event.name === "cyrene.todos") {
               renderTodoPanel(event.value as TodoState | null);
             } else if (event.name === "cyrene.choice") {
@@ -2842,6 +2893,9 @@ async function send(): Promise<void> {
       msg.thinking = false;
       msg.content = streamContent;
       msg.sticker = sticker;
+      if(pendingNovelAiImage){
+        msg.novelAiImage={id:String(pendingNovelAiImage.id||""),prompt:String(pendingNovelAiImage.prompt||""),model:String(pendingNovelAiImage.model||""),width:Number(pendingNovelAiImage.width)||undefined,height:Number(pendingNovelAiImage.height)||undefined};
+      }
     }
     void saveSession();
     const finishedMsgId = streamMsgId;
@@ -2861,6 +2915,7 @@ async function send(): Promise<void> {
       messagesEl.scrollTop = messagesEl.scrollHeight;
       pendingWeatherCard = null;
     }
+    pendingNovelAiImage = null;
     // TTS 已在 TEXT_MESSAGE_END 时触发，这里不再重复朗读
   } catch (err) {
     const message = err instanceof Error ? err.message : "模型请求失败";

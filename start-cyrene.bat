@@ -13,6 +13,13 @@ if not exist "node_modules\electron\package.json" (
   goto :failed
 )
 
+if exist "..\novelai-gateway\.venv\Scripts\python.exe" (
+  echo [Cyrene] Checking NovelAI Gateway...
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start-novelai-gateway.ps1"
+) else (
+  echo [Cyrene] NovelAI Gateway is not installed; drawing will remain offline.
+)
+
 echo [Cyrene] Building the application...
 call npm.cmd run build
 if errorlevel 1 goto :failed

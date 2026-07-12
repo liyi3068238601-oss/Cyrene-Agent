@@ -50,6 +50,34 @@ const chatApi = {
 contextBridge.exposeInMainWorld("cyrene", cyreneApi);
 contextBridge.exposeInMainWorld("chat", chatApi);
 
+const novelaiApi = {
+  open: () => ipcRenderer.send(IPC.NOVELAI_OPEN),
+  minimize: () => ipcRenderer.send(IPC.NOVELAI_MINIMIZE),
+  close: () => ipcRenderer.send(IPC.NOVELAI_CLOSE),
+  loadConfig: () => ipcRenderer.invoke(IPC.NOVELAI_LOAD_CONFIG),
+  saveConfig: (config: unknown) => ipcRenderer.invoke(IPC.NOVELAI_SAVE_CONFIG, config),
+  test: (config?: unknown) => ipcRenderer.invoke(IPC.NOVELAI_TEST, config),
+  models: (config?: unknown) => ipcRenderer.invoke(IPC.NOVELAI_MODELS, config),
+  capabilities: (kind: string) => ipcRenderer.invoke(IPC.NOVELAI_CAPABILITIES, kind),
+  generate: (input: unknown) => ipcRenderer.invoke(IPC.NOVELAI_GENERATE, input),
+  history: () => ipcRenderer.invoke(IPC.NOVELAI_HISTORY),
+  image: (id: string) => ipcRenderer.invoke(IPC.NOVELAI_GET_IMAGE, id),
+  openOutput: () => ipcRenderer.invoke(IPC.NOVELAI_OPEN_OUTPUT),
+  pickImage: () => ipcRenderer.invoke(IPC.NOVELAI_PICK_IMAGE),
+  tasks: () => ipcRenderer.invoke(IPC.NOVELAI_TASKS),
+  cancelTask: (id: string) => ipcRenderer.invoke(IPC.NOVELAI_TASK_CANCEL, id),
+  retryTask: (id: string) => ipcRenderer.invoke(IPC.NOVELAI_TASK_RETRY, id),
+  onTasksChanged: (callback: (tasks: unknown[]) => void) => {
+    const listener = (_event: unknown, tasks: unknown[]) => callback(tasks);
+    ipcRenderer.on(IPC.NOVELAI_TASKS_CHANGED, listener);
+    return () => ipcRenderer.off(IPC.NOVELAI_TASKS_CHANGED, listener);
+  },
+  assets: () => ipcRenderer.invoke(IPC.NOVELAI_ASSETS),
+  importAsset: () => ipcRenderer.invoke(IPC.NOVELAI_ASSET_IMPORT),
+  deleteAsset: (id: string) => ipcRenderer.invoke(IPC.NOVELAI_ASSET_DELETE, id),
+};
+contextBridge.exposeInMainWorld("novelai", novelaiApi);
+
 // AG-UI 事件流：发起一次 agent run，通过 onEvent 回调收 AG-UI 标准事件，
 // 返回 Promise<{success,error}> 表示整轮结束。onEvent 返回的取消订阅函数用于停止监听。
 const aguiApi = {

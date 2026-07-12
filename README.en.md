@@ -74,7 +74,7 @@ artwork, story content, and trademarks are the intellectual property of
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/Playa-0v0/Cyrene-Agent.git
+git clone -b liyi-Cyrene --single-branch https://github.com/liyi3068238601-oss/Cyrene-Agent.git
 cd Cyrene-Agent
 ```
 

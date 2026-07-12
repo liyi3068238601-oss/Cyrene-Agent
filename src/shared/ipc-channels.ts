@@ -22,6 +22,28 @@ export const IPC = {
   CHAT_STREAM_CHUNK: "chat:stream-chunk",
   CHAT_STREAM_DONE: "chat:stream-done",
 
+  // NovelAI drawing studio
+  NOVELAI_OPEN: "novelai:open",
+  NOVELAI_MINIMIZE: "novelai:minimize",
+  NOVELAI_CLOSE: "novelai:close",
+  NOVELAI_LOAD_CONFIG: "novelai:load-config",
+  NOVELAI_SAVE_CONFIG: "novelai:save-config",
+  NOVELAI_TEST: "novelai:test",
+  NOVELAI_MODELS: "novelai:models",
+  NOVELAI_CAPABILITIES: "novelai:capabilities",
+  NOVELAI_GENERATE: "novelai:generate",
+  NOVELAI_HISTORY: "novelai:history",
+  NOVELAI_GET_IMAGE: "novelai:get-image",
+  NOVELAI_OPEN_OUTPUT: "novelai:open-output",
+  NOVELAI_PICK_IMAGE: "novelai:pick-image",
+  NOVELAI_TASKS: "novelai:tasks",
+  NOVELAI_TASK_CANCEL: "novelai:task-cancel",
+  NOVELAI_TASK_RETRY: "novelai:task-retry",
+  NOVELAI_TASKS_CHANGED: "novelai:tasks-changed",
+  NOVELAI_ASSETS: "novelai:assets",
+  NOVELAI_ASSET_IMPORT: "novelai:asset-import",
+  NOVELAI_ASSET_DELETE: "novelai:asset-delete",
+
   // AG-UI 事件流（替换上面的 chat:stream-* 的新通道）
   AGUI_RUN: "agui:run",
   AGUI_EVENT: "agui:event",

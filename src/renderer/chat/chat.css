@@ -1944,6 +1944,60 @@ body {
   border-color: rgba(220,40,80,0.36);
 }
 
+.novelai-chat-card {
+  width: min(560px, calc(100% - 92px));
+  margin: 10px 0 18px 76px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 182, 220, 0.2);
+  border-radius: 8px;
+  background: rgba(20, 16, 35, 0.92);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.28);
+}
+
+.novelai-chat-card img {
+  display: block;
+  width: 100%;
+  max-height: 620px;
+  object-fit: contain;
+  background: #0b0912;
+}
+
+.novelai-chat-card figcaption {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 5px 14px;
+  align-items: center;
+  padding: 12px 14px;
+}
+
+.novelai-chat-card figcaption > span {
+  overflow: hidden;
+  color: var(--rb-text-default, #f0eaf8);
+  font-size: 13px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.novelai-chat-card figcaption > small {
+  grid-column: 1;
+  color: var(--rb-text-faint, #958aaa);
+  font-size: 11px;
+}
+
+.novelai-chat-card figcaption > button {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  padding: 8px 11px;
+  border: 1px solid rgba(255, 182, 220, 0.18);
+  border-radius: 6px;
+  color: #f6eaf4;
+  background: rgba(213, 81, 151, 0.18);
+}
+
+.novelai-chat-card figcaption > button:hover {
+  background: rgba(213, 81, 151, 0.3);
+}
+
 .msg__bubble--continuation {
   margin-top: 8px;
 }

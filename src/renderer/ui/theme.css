@@ -136,6 +136,34 @@
   color: rgba(240, 234, 248, 0.48);
 }
 
+/* Settings-wide readability fallback for controls outside the standard field wrappers. */
+[data-ui-theme="polished-pink"] .settings-shell input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
+[data-ui-theme="polished-pink"] .settings-shell textarea,
+[data-ui-theme="polished-pink"] .settings-shell select {
+  color: var(--rb-text-strong);
+  caret-color: #ff6ec7;
+}
+
+[data-ui-theme="polished-pink"] .settings-shell input::placeholder,
+[data-ui-theme="polished-pink"] .settings-shell textarea::placeholder {
+  color: rgba(240, 234, 248, 0.48);
+  opacity: 1;
+}
+
+[data-ui-theme="polished-pink"] .settings-shell [contenteditable="true"] {
+  color: #2b1830;
+  background: #fff7fb;
+  caret-color: #d92f83;
+  -webkit-text-fill-color: #2b1830;
+}
+
+[data-ui-theme="polished-pink"] .settings-shell input:-webkit-autofill,
+[data-ui-theme="polished-pink"] .settings-shell textarea:-webkit-autofill {
+  -webkit-text-fill-color: var(--rb-text-strong);
+  box-shadow: 0 0 0 1000px #18142f inset;
+  caret-color: #ff6ec7;
+}
+
 [data-ui-theme="polished-pink"] .field span,
 [data-ui-theme="polished-pink"] .tts-field label,
 [data-ui-theme="polished-pink"] .memory-field label {
@@ -627,6 +655,28 @@
 [data-ui-theme="pearl-white"] #input::placeholder,
 [data-ui-theme="pearl-white"] .choice-card__custom-input::placeholder {
   color: var(--rb-input-placeholder);
+}
+
+[data-ui-theme="pearl-white"] .settings-shell input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
+[data-ui-theme="pearl-white"] .settings-shell textarea,
+[data-ui-theme="pearl-white"] .settings-shell select,
+[data-ui-theme="pearl-white"] .settings-shell [contenteditable="true"] {
+  color: var(--rb-input-text);
+  caret-color: var(--rb-pink-600);
+  -webkit-text-fill-color: var(--rb-input-text);
+}
+
+[data-ui-theme="pearl-white"] .settings-shell input::placeholder,
+[data-ui-theme="pearl-white"] .settings-shell textarea::placeholder {
+  color: var(--rb-input-placeholder);
+  opacity: 1;
+}
+
+[data-ui-theme="pearl-white"] .settings-shell input:-webkit-autofill,
+[data-ui-theme="pearl-white"] .settings-shell textarea:-webkit-autofill {
+  -webkit-text-fill-color: var(--rb-input-text);
+  box-shadow: 0 0 0 1000px var(--rb-input-bg) inset;
+  caret-color: var(--rb-pink-600);
 }
 
 [data-ui-theme="pearl-white"] .field span,

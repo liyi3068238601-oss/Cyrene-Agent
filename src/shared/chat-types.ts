@@ -32,6 +32,14 @@ export interface ChatMessage {
   sticker?: string | null;
   /** TTS 缓存 key。只存 key，不存绝对路径，避免 userData 路径变化后 session JSON 失效。 */
   ttsCacheKey?: string;
+  /** Agent 生成的本地绘图作品。仅保存轻量元数据，图片按 id 从 NovelAI 输出目录读取。 */
+  novelAiImage?: {
+    id: string;
+    prompt?: string;
+    model?: string;
+    width?: number;
+    height?: number;
+  };
 }
 
 export interface ChatSession {

@@ -8,6 +8,38 @@
 
 </div>
 
+## 🌸 liyi-Cyrene 分支增强内容
+
+> 当前维护分支：[liyi3068238601-oss/Cyrene-Agent · liyi-Cyrene](https://github.com/liyi3068238601-oss/Cyrene-Agent/tree/liyi-Cyrene)
+
+本分支在原版 Cyrene-Agent 基础上完成了以下改造，按用户可感知功能逐项列出：
+
+- **QQ / NapCat 双向接入**：支持 OneBot v11 WebSocket 私聊与群聊、主人 QQ、白名单、群聊触发规则、消息去重、发送回执和主动发消息。
+- **QQ 远程指挥 Agent**：可从 QQ 发起 Agent 任务，并按权限策略调用联网、文件、命令及其他工具。
+- **真人式智能分段**：桌面聊天与 QQ 共用内容感知分段，不拆代码块、列表、表格、任务步骤或长篇说明，并结合昔涟角色语气控制节奏。
+- **群聊主动参与**：可按关键词、概率、冷却时间和上下文决定是否回复群消息，默认关闭以避免打扰。
+- **主窗口 UI 重构**：将状态、日程和连接信息整合进主聊天窗口右侧陪伴面板，减少独立小窗口。
+- **响应式布局修复**：修复侧栏折叠后界面挤压、错位和窄窗口画面扭曲。
+- **Live2D 拖动稳定性**：修复快速拖动后模型继续漂移、任务栏抽搐、主进程参数转换异常和偶发白屏。
+- **设置界面可读性**：统一输入框、下拉框、自动填充和会话标题的文字/背景对比度，修复非编辑状态标题不可见。
+- **独立 AI 绘图工作台**：提供提示词、模型、尺寸、采样参数、连接测试、结果预览、本地作品历史和输出目录。
+- **Agent 主动绘图与会话恢复**：注册 `generate_novelai_image` 工具，Agent 可在聊天或 QQ 任务中调用绘图；图片卡片会随聊天会话持久化，重启后仍可从本地作品库恢复显示。
+- **多协议绘图供应商**：支持本地 NovelAI Gateway、OpenAI Images、Chat Completions 生图中转、NovelAI 原生兼容和异步任务轮询中转。
+- **能力驱动参数界面**：根据供应商能力动态显示负面提示词、Steps、CFG、采样器和 Seed，避免向不支持的中转发送错误参数。
+- **角色一致性档案**：Photo 模式统一注入角色基础外观、固定特征和角色负面词；Drawing 模式保持自由创作，不强制出现昔涟。
+- **衣柜与自然语言换装**：支持穿搭预设、当前穿搭和 `change_visual_outfit` Agent 工具，换装后续角色图会自动沿用。
+- **参考图创作**：支持图生图、Vibe 风格参考和 NovelAI 原生 Director 角色/风格参考，并在界面明确显示当前协议支持范围及禁用原因。
+- **历史详情与参数复刻**：点击历史作品可查看原始/最终提示词、负面词、模型、尺寸、Steps、CFG、采样器、种子、穿搭和参考模式，并可一键载入后重新绘制。
+- **统一绘图任务队列**：手动、Agent 与 QQ 绘图共用串行队列，工作台显示等待、生成中、完成、失败和取消状态，并支持取消及失败重试，避免并发请求挤占接口。
+- **参考素材库**：可将常用角色图、服装图和风格图复制到本机素材库，随后一键套用为当前参考图或删除；素材与作品都不会写入项目仓库。
+- **本地密钥保护**：QQ Token、绘图 API Key 等敏感配置使用 Electron `safeStorage` 加密，不写入仓库。
+- **一键启动增强**：`start-cyrene.bat` 会检测并后台启动同级目录中的 NovelAI Gateway，已有依赖时不会重复安装。
+- **README 与安全规范**：补充 QQ、绘图、Gateway、分支启动方式和 API Key 防泄漏说明。
+
+以下章节保留并更新了原项目说明，便于对照上游功能。
+
+---
+
 **Cyrene-Agent 是一个 Windows 桌面 Live2D AI 伴侣，支持聊天、记忆、语音、工具调用和多平台接入。**
 
 > 基于 Electron + TypeScript 开发的桌面端 Live2D 智能对话 Agent，
@@ -54,7 +86,7 @@
 ### 1. 克隆仓库
 
 ```bash
-git clone https://github.com/Playa-0v0/Cyrene-Agent.git
+git clone -b liyi-Cyrene --single-branch https://github.com/liyi3068238601-oss/Cyrene-Agent.git
 cd Cyrene-Agent
 ```
 
@@ -136,6 +168,49 @@ QQ 设置还支持主人 QQ、用户/群白名单、`@` / 前缀 / 关键词 / �
 桌面端把这些段落作为连续气泡流式呈现。任务结果、步骤、代码和长篇说明不会被机械拆散。
 
 外部渠道默认会使用工具沙箱；如果要允许 QQ 里执行联网、文件或命令类任务，请在设置中谨慎调整外部渠道工具权限。
+
+### NovelAI 绘图工作台
+
+聊天窗口左侧的 **绘图** 入口会打开独立的 NovelAI 工作台，支持 Gateway 连接检测、模型读取、
+文生图参数设置、生成预览和本地历史。NovelAI API Key 由 Electron `safeStorage` 加密保存在本机，
+不会写入仓库；Agent 也可通过内置工具 `generate_novelai_image` 主动绘图。
+
+绘图服务使用独立的 [novelai-gateway](https://github.com/fuilyha56-wq/novelai-gateway) 仓库，推荐目录结构：
+
+```text
+Cyrene agent/
+├─ Cyrene-Agent/
+└─ novelai-gateway/
+```
+
+首次进入 Gateway 目录运行 `uv sync` 安装依赖。之后使用 `start-cyrene.bat` 时会检测并在后台启动
+`http://127.0.0.1:31555`，不再重复安装依赖。绘图页面也可以连接其他兼容地址。
+
+连接配置支持五种协议模板：
+
+- **本地 NovelAI Gateway**：使用本机 Gateway 转发 NovelAI 官方接口，默认地址为 `http://127.0.0.1:31555`。
+- **OpenAI Images 中转**：调用 `/v1/images/generations`，支持 URL 或 Base64 图片响应。
+- **Chat Completions 生图中转**：调用 `/v1/chat/completions`，从 Markdown、纯 URL、Data URL 或 JSON 中提取图片。
+- **NovelAI 原生兼容**：调用 `/ai/generate-image`，支持 NovelAI 专属采样参数及 ZIP/PNG 响应。
+- **异步任务型中转**：提交任务获得 `job_id` / `task_id`，再按配置路径轮询图片结果。
+
+Base URL 带不带末尾 `/v1` 均可。模型列表路径、生图路径和异步轮询路径可以在工作台中调整；
+模型列表不可用时仍可手动填写模型名称。
+
+工作台的 **角色档案与风格** 可以分别配置基础外观、固定特征、角色负面词、Photo 风格和 Drawing 风格。
+Photo 模式会组合当前角色档案与衣柜；Drawing 模式只使用自由画作风格和本次提示词。
+
+在 **衣柜与当前穿搭** 中可以新增穿搭名称、自然语言说明和实际绘图 Tags。Agent 可调用
+`change_visual_outfit` 切换已配置的预设，再调用 `generate_novelai_image` 生成使用该穿搭的角色图。
+
+参考图面板支持：
+
+- **图生图**：以原图结构为基础重新创作，参考强度控制变化幅度。
+- **Vibe 风格参考**：提取参考图风格与视觉信息，适用于保持一组作品的画风。
+- **Director Reference**：在 NovelAI 原生兼容模式下选择角色、风格或两者参考。
+
+参考图片通过 Electron 文件选择器读取，不向渲染页面暴露任意本地路径。不同供应商支持范围不同，
+工作台会按能力矩阵自动禁用不可用模式。历史作品右上角的复刻按钮只载入参数，不会自动扣费生图。
 
 ---
 
@@ -470,6 +545,11 @@ MIT 仅约束本仓库的源代码，不适用于角色、Live2D 模型与美术
 - **Live2D 模型**：由 [@是依七哒](https://space.bilibili.com/457683484) 制作 —
   详见 [MODEL_LICENSE.md](./MODEL_LICENSE.md)
 - **Live2D Cubism SDK**：© Live2D Cubism
+- **绘图协议与交互参考**：[tt-P607/image_generator_plugin-neo](https://github.com/tt-P607/image_generator_plugin-neo)（AGPL-3.0）
+- **角色视觉表达与衣柜设计参考**：[bingyv92/nai_artist](https://github.com/bingyv92/nai_artist)
+- **NovelAI 协议参考**：[caru-ini/novelai-sdk](https://github.com/caru-ini/novelai-sdk)
+
+本分支的绘图供应商适配层为独立 TypeScript 实现，没有直接复制上述 Python 插件源码。
 
 特别感谢模型原作者慷慨授权本项目使用、修改并再分发其作品。
 
