@@ -13,6 +13,7 @@ export interface ImageProviderCapabilities {
   sampler: boolean;
   seed: boolean;
   img2img: boolean;
+  inpaint: boolean;
   vibe: boolean;
   directorReference: boolean;
   multiCharacter: boolean;
@@ -39,7 +40,7 @@ export interface NovelAiConfig {
   outfits: OutfitPreset[];
 }
 
-export interface OutfitPreset { id: string; name: string; description: string; tags: string }
+export interface OutfitPreset { id: string; name: string; description: string; tags: string; negativeTags?: string }
 export type VisualMode = "photo" | "drawing";
 
 export interface ImageGenerationInput {
@@ -52,11 +53,16 @@ export interface ImageGenerationInput {
   scale: number;
   sampler: string;
   seed: number;
-  referenceMode: "none" | "img2img" | "vibe" | "director-character" | "director-style" | "director-both";
+  referenceMode: "none" | "img2img" | "inpaint" | "outpaint" | "vibe" | "director-character" | "director-style" | "director-both";
   referenceImage?: string;
+  maskImage?: string;
+  referenceImages?: Array<{ image:string; strength:number; informationExtracted:number }>;
   referenceStrength: number;
   referenceInformationExtracted: number;
+  characters?: CharacterComposition[];
 }
+
+export interface CharacterComposition { id:string; name:string; prompt:string; negativePrompt:string; x:number; y:number }
 
 export interface ProviderImageResult {
   bytes: Buffer;

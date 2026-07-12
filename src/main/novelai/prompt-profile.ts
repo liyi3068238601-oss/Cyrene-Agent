@@ -16,6 +16,7 @@ function joinTags(...values: Array<string | undefined>): string {
 
 export function getActiveOutfit(config: NovelAiConfig, requestedId?: string): OutfitPreset | null {
   if (!config.wardrobeEnabled) return null;
+  if (requestedId === "__none__") return null;
   const id = String(requestedId || config.activeOutfitId || "").trim();
   return config.outfits.find((outfit) => outfit.id === id) || null;
 }
@@ -24,20 +25,13 @@ export function compileVisualPrompt(
   config: NovelAiConfig,
   prompt: string,
   negativePrompt: string,
-  mode: VisualMode,
+  _mode: VisualMode,
   outfitId?: string,
 ): { prompt: string; negativePrompt: string; outfit: OutfitPreset | null } {
-  if (mode === "drawing") {
-    return {
-      prompt: joinTags(config.drawingStyleTags, prompt),
-      negativePrompt: joinTags(config.defaultNegativePrompt, negativePrompt),
-      outfit: null,
-    };
-  }
   const outfit = getActiveOutfit(config, outfitId);
   return {
     prompt: joinTags(config.photoStyleTags, config.characterBaseTags, config.characterFixedTags, outfit?.tags, prompt),
-    negativePrompt: joinTags(config.defaultNegativePrompt, config.characterNegativeTags, negativePrompt),
+    negativePrompt: joinTags(config.defaultNegativePrompt, config.characterNegativeTags, outfit?.negativeTags, negativePrompt),
     outfit,
   };
 }
@@ -55,6 +49,6 @@ export function normalizeOutfits(value: unknown): OutfitPreset[] {
     if (!id) id = `outfit-${index + 1}`;
     while (used.has(id)) id += "-2";
     used.add(id);
-    return [{ id, name, description: String(raw.description || "").trim(), tags }];
+    return [{ id, name, description: String(raw.description || "").trim(), tags, negativeTags: String(raw.negativeTags || "").trim() }];
   });
 }

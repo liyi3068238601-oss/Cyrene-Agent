@@ -4,10 +4,10 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>昔涟 · NovelAI 绘图</title>
-  <script type="module" crossorigin src="../assets/novelai-BU_DVXvC.js"></script>
+  <script type="module" crossorigin src="../assets/novelai-D7wrKD5Y.js"></script>
   <link rel="modulepreload" crossorigin href="../assets/fonts-vjqe38vQ.js">
   <link rel="stylesheet" crossorigin href="../assets/fonts-Bm2yK1FS.css">
-  <link rel="stylesheet" crossorigin href="../assets/novelai-C4LG0q6J.css">
+  <link rel="stylesheet" crossorigin href="../assets/novelai-DUhYGqO5.css">
 </head>
 <body data-ui-theme="polished-pink">
   <main class="studio">
@@ -16,11 +16,11 @@
       <div class="titlebar__actions"><button id="minimize" title="最小化">−</button><button id="close" title="关闭">×</button></div>
     </header>
     <aside class="controls">
-      <section>
+      <nav class="studio-tabs"><button type="button" class="is-active" data-studio-tab="generate">生成</button><button type="button" data-studio-tab="character">角色</button><button type="button" data-studio-tab="reference">参考</button><button type="button" data-studio-tab="connection">连接</button></nav>
+      <section data-studio-panel="generate">
         <div class="section-head"><h2>创作参数</h2><span id="connection-badge" class="badge">未检测</span></div>
-        <label>提示词<textarea id="prompt" rows="7" placeholder="描述主体、构图、服装、表情、光线与画风..."></textarea></label>
-        <label>视觉模式<select id="visual-mode"><option value="photo">角色照片 · 注入人设与当前穿搭</option><option value="drawing">自由画作 · 不绑定角色</option></select></label>
-        <label id="outfit-select-field">本次穿搭<select id="outfit-select"></select></label>
+        <label>画面描述<textarea id="natural-prompt" rows="4" placeholder="用自然语言描述人物、动作、服装、环境和光线..."></textarea></label><button id="translate-prompt" type="button" class="secondary-wide">构建 NovelAI Prompt</button><label>NovelAI Prompt<textarea id="prompt" rows="6" placeholder="转换后的英文 Tags，也可以直接编辑..."></textarea></label>
+        <label id="outfit-select-field">本次绘图服装<select id="outfit-select"></select><small class="field-note">选择“未选择”时不会注入任何服装 Tags</small></label>
         <label data-capability="negativePrompt">负面提示词<textarea id="negative" rows="3"></textarea></label>
         <label>模型<input id="model" list="model-options" value="nai-v4.5-full" autocomplete="off" /><datalist id="model-options"><option value="nai-v4.5-full"></option></datalist></label>
         <div class="field-grid">
@@ -32,7 +32,7 @@
         <label data-capability="sampler">采样器<select id="sampler"><option value="k_euler_ancestral">Euler Ancestral</option><option value="k_euler">Euler</option><option value="k_dpmpp_2m">DPM++ 2M</option><option value="k_dpmpp_sde">DPM++ SDE</option></select></label>
         <label data-capability="seed">种子<input id="seed" inputmode="numeric" placeholder="留空为随机" /></label>
         <div id="reference-panel" class="reference-panel">
-          <label>参考图模式<select id="reference-mode"><option value="none">不使用参考图</option><option value="img2img">图生图</option><option value="vibe">Vibe 风格参考</option><option value="director-character">Director · 角色参考</option><option value="director-style">Director · 风格参考</option><option value="director-both">Director · 角色与风格</option></select></label>
+          <label>参考图模式<select id="reference-mode"><option value="none">不使用参考图</option><option value="img2img">图生图</option><option value="inpaint">局部重绘</option><option value="outpaint">扩展画布</option><option value="vibe">Vibe 风格参考</option><option value="director-character">Director · 角色参考</option><option value="director-style">Director · 风格参考</option><option value="director-both">Director · 角色与风格</option></select></label>
           <p id="reference-capability-hint" class="field-hint"></p>
           <div id="reference-picker" hidden>
             <button id="pick-reference" type="button" class="reference-pick"><span>选择参考图片</span><small id="reference-name">尚未选择</small></button>
@@ -42,11 +42,13 @@
               <label>信息提取<input id="reference-info" type="number" min="0" max="1" step="0.05" value="1" /></label>
             </div>
           </div>
+          <div id="mask-editor" class="mask-editor" hidden><div class="mask-toolbar"><button id="mask-brush" type="button" class="is-active">画笔</button><button id="mask-eraser" type="button">橡皮</button><label>大小<input id="mask-size" type="range" min="8" max="160" value="48" /></label><button id="mask-undo" type="button" title="撤销">↶</button><button id="mask-clear" type="button">清空</button></div><div class="mask-stage"><img id="mask-source" alt="局部重绘底图" /><canvas id="mask-canvas"></canvas></div><p>红色区域会被重新绘制，未涂抹区域尽量保持不变。</p></div>
+          <div id="outpaint-editor" class="outpaint-editor" hidden><div class="field-grid"><label>向左<input id="outpaint-left" type="number" min="0" max="768" step="64" value="0" /></label><label>向右<input id="outpaint-right" type="number" min="0" max="768" step="64" value="256" /></label><label>向上<input id="outpaint-top" type="number" min="0" max="768" step="64" value="0" /></label><label>向下<input id="outpaint-bottom" type="number" min="0" max="768" step="64" value="0" /></label></div><button id="outpaint-preview" type="button" class="secondary-wide">更新扩图预览</button><div class="outpaint-preview"><canvas id="outpaint-canvas"></canvas></div><p id="outpaint-size-label">选择底图后显示新尺寸</p></div>
         </div>
-        <button id="generate" class="primary"><span>✦</span><span>开始绘制</span></button>
+        <label>生成变体数量<select id="variant-count"><option value="1">1 张</option><option value="2">2 张</option><option value="3">3 张</option><option value="4">4 张</option></select></label><button id="generate" class="primary"><span>✦</span><span>开始绘制</span></button>
         <div id="status" class="status">准备好了，写下你想看到的画面。</div>
       </section>
-      <details class="settings" open>
+      <details class="settings" data-studio-panel="connection" open>
         <summary>连接与 API 配置</summary>
         <label>协议模板<select id="provider-mode"><option value="novelai-gateway">本地 NovelAI Gateway</option><option value="openai-images">OpenAI Images 中转</option><option value="chat-completions-image">Chat Completions 生图中转</option><option value="novelai-native">NovelAI 原生兼容</option><option value="async-task">异步任务型中转</option></select></label>
         <label><span id="base-url-label">Gateway 地址</span><input id="gateway-url" value="http://127.0.0.1:31555" placeholder="http://127.0.0.1:31555" /></label>
@@ -60,24 +62,27 @@
         <div class="button-row"><button id="test">测试连接</button><button id="save">保存配置</button></div>
         <p id="connection-help">本地 Gateway 默认地址为 http://127.0.0.1:31555。API Key 不会写入项目仓库。</p>
       </details>
-      <details class="settings">
-        <summary>角色档案与风格</summary>
+      <details class="settings" data-studio-panel="character" open>
+        <summary>角色档案与绘图风格</summary>
         <label>角色名称<input id="character-name" value="昔涟" /></label>
         <label>基础外观<textarea id="character-base-tags" rows="3" placeholder="角色名、发色、瞳色、发型等稳定外观"></textarea></label>
         <label>固定特征<textarea id="character-fixed-tags" rows="2" placeholder="每张角色图都要保留的特征"></textarea></label>
         <label>角色负面特征<textarea id="character-negative-tags" rows="2" placeholder="错误发色、错误角色等"></textarea></label>
-        <label>Photo 风格<textarea id="photo-style-tags" rows="2"></textarea></label>
-        <label>Drawing 风格<textarea id="drawing-style-tags" rows="2"></textarea></label>
+        <label>默认绘图风格<textarea id="photo-style-tags" rows="2" placeholder="例如 anime illustration, soft shading"></textarea></label>
+        <textarea id="drawing-style-tags" hidden></textarea>
+        <p>不再区分自拍和绘画模式。自拍、镜头和构图需求请直接写入画面描述。</p>
       </details>
-      <details class="settings">
-        <summary>衣柜与当前穿搭</summary>
-        <label class="toggle-line"><input id="wardrobe-enabled" type="checkbox" checked /><span>Photo 模式使用衣柜</span></label>
+      <details class="settings" data-studio-panel="character" open>
+        <summary>角色服装设定</summary>
+        <input id="wardrobe-enabled" type="checkbox" checked hidden />
         <div id="outfit-editor" class="outfit-editor"></div>
-        <button id="add-outfit" type="button" class="secondary-wide">添加穿搭预设</button>
-        <p>名称供 Agent 理解，Tags 会实际注入 Photo 提示词。当前穿搭可在上方选择。</p>
+        <button id="add-outfit" type="button" class="secondary-wide">新建服装预设</button>
+        <p>可以保存多套绘图服装并在生成页自由选择。这里只影响 AI 绘图，不会修改 Live2D 模型。</p>
       </details>
-      <details class="settings" open>
+      <details class="settings" data-studio-panel="reference" open>
         <summary>参考素材库</summary>
+        <div class="library-filter"><input id="asset-search" placeholder="搜索素材" /><select id="asset-category"><option value="all">全部分类</option><option value="character">角色</option><option value="outfit">服装</option><option value="pose">姿势</option><option value="style">画风</option><option value="other">其他</option><option value="favorite">收藏</option></select></div>
+        <div class="composition-actions"><button id="add-character" type="button">添加构图角色</button><button id="layout-characters" type="button">均匀排列</button></div><div id="composition-board" class="composition-board"><span>拖动角色标记调整位置</span></div><div id="character-editor" class="character-editor"></div>
         <div class="asset-actions"><button id="import-asset" type="button">导入参考图</button><span id="asset-count">0 张</span></div>
         <div id="asset-library" class="asset-library"></div>
         <p>点击素材即可作为当前参考图；素材会复制到本机用户数据目录。</p>
@@ -85,16 +90,26 @@
     </aside>
     <section class="canvas-area">
       <div class="canvas-toolbar"><div><h1>画布</h1><p>生成结果会自动保存到本机</p></div><button id="open-output">打开图片目录</button></div>
+      <section class="prompt-inspector"><div class="prompt-inspector__head"><h2>系统理解</h2><button id="copy-final-prompt" type="button">复制最终 Prompt</button></div><div class="prompt-inspector__tabs"><button type="button" class="is-active" data-prompt-tab="final">最终 Prompt</button><button type="button" data-prompt-tab="translated">翻译结果</button><button type="button" data-prompt-tab="outfit">服装注入</button></div><pre id="prompt-inspector-content">等待构建提示词</pre></section>
       <section id="result-summary" class="result-summary" hidden>
-        <div class="result-summary__head"><div><span>当前作品</span><strong id="result-title">生成参数</strong></div><button id="load-result-params" type="button" title="将这张作品的参数载入左侧">☷</button></div>
+        <div class="result-summary__head"><div><span>当前作品</span><strong id="result-title">生成参数</strong></div><div class="result-summary__actions"><button id="open-upscale" type="button">高清放大</button><button id="edit-result" type="button">继续编辑</button><button id="load-result-params" type="button">载入参数</button></div></div>
         <div id="result-chips" class="result-chips"></div>
         <details><summary>查看完整提示词与参数</summary><dl id="result-details"></dl></details>
       </section>
       <div id="preview" class="preview"><div class="empty"><span>✦</span><strong>等待灵感落笔</strong><p>在左侧填写提示词，然后开始绘制。</p></div></div>
       <section class="task-panel"><div class="history-head"><h2>生成任务</h2><span id="task-count">0 项</span></div><div id="task-list" class="task-list"><p class="task-empty">暂无任务</p></div></section>
-      <div class="history-head"><h2>最近作品</h2><span id="history-count">0 张</span></div>
+      <div class="history-head"><h2>最近作品</h2><span id="history-count">0 张</span></div><div class="history-filter"><input id="history-search" placeholder="搜索提示词或模型" /><label><input id="history-favorites" type="checkbox" /> 仅收藏</label></div>
       <div id="history" class="history"></div>
     </section>
   </main>
+  <dialog id="upscale-dialog" class="upscale-dialog">
+    <form method="dialog">
+      <div class="dialog-head"><div><strong>高清放大</strong><small>生成一张更高分辨率的新作品</small></div><button value="cancel" title="关闭">×</button></div>
+      <div class="upscale-source"><span>当前尺寸</span><strong id="upscale-source-size">—</strong></div>
+      <fieldset><legend>放大倍率</legend><label><input type="radio" name="upscale-scale" value="2" checked /><span>2×<small id="upscale-2-size">适合常规高清输出</small></span></label><label><input type="radio" name="upscale-scale" value="4" /><span>4×<small id="upscale-4-size">适合大尺寸输出</small></span></label></fieldset>
+      <p>高清放大会创建新图片，可能消耗额外额度。原图不会被覆盖。</p>
+      <div class="dialog-actions"><button value="cancel">取消</button><button id="upscale-result" value="confirm" class="dialog-primary">开始放大</button></div>
+    </form>
+  </dialog>
 </body>
 </html>

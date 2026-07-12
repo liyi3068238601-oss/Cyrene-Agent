@@ -3,10 +3,10 @@ import * as fs from "fs";
 import * as path from "path";
 import { IPC } from "../../shared/ipc-channels";
 import { toolRegistry } from "../orchestrator/tool-registry";
-import { getImageProvider, getProviderCapabilities } from "./providers";
+import { getImageProvider, getProviderCapabilities, upscaleWithGateway } from "./providers";
 import { compileVisualPrompt, normalizeOutfits } from "./prompt-profile";
 import { ImageTaskQueue, type ImageTask } from "./task-queue";
-import type { ImageProviderKind, NovelAiConfig, VisualMode } from "./types";
+import type { CharacterComposition, ImageProviderKind, NovelAiConfig, VisualMode } from "./types";
 export type { NovelAiConfig } from "./types";
 
 interface StoredConfig extends Omit<NovelAiConfig, "apiKey"> { encryptedApiKey?: string; apiKeyPlain?: string }
@@ -55,7 +55,7 @@ export function loadNovelAiConfig(): NovelAiConfig {
     const providerMode: ImageProviderKind = legacyMode === "openai-compatible" ? "openai-images" : legacyMode as ImageProviderKind;
     const merged = { ...defaults, ...stored, providerMode, apiKey, gatewayUrl: cleanUrl(stored.gatewayUrl) };
     merged.outfits = normalizeOutfits(stored.outfits ?? defaults.outfits);
-    if (!merged.outfits.some((outfit) => outfit.id === merged.activeOutfitId)) merged.activeOutfitId = merged.outfits[0]?.id || "";
+    if (merged.activeOutfitId !== "__none__" && !merged.outfits.some((outfit) => outfit.id === merged.activeOutfitId)) merged.activeOutfitId = "__none__";
     return merged;
   } catch { return { ...defaults }; }
 }
@@ -105,18 +105,29 @@ async function performNovelAiImage(raw: Record<string, unknown>, isCancelled: ()
   const negativePrompt = String(raw.negativePrompt || config.defaultNegativePrompt || "");
   const model = String(raw.model || config.model);
   const mode: VisualMode = raw.mode === "drawing" ? "drawing" : "photo";
-  const compiled = compileVisualPrompt(config, prompt, negativePrompt, mode, String(raw.outfitId || ""));
   const provider = getImageProvider(config.providerMode);
+  const characters:CharacterComposition[]=Array.isArray(raw.characters)?raw.characters.slice(0,6).flatMap((entry,index)=>{if(!entry||typeof entry!=="object")return[];const item=entry as Record<string,unknown>;const characterPrompt=String(item.prompt||"").trim();if(!characterPrompt)return[];const x=Number(item.x),y=Number(item.y);return[{id:String(item.id||`character-${index+1}`),name:String(item.name||`角色 ${index+1}`),prompt:characterPrompt,negativePrompt:String(item.negativePrompt||""),x:Math.max(0,Math.min(1,Number.isFinite(x)?x:0.5)),y:Math.max(0,Math.min(1,Number.isFinite(y)?y:0.5))}]}):[];
+  const fallbackCharacters=!provider.capabilities.multiCharacter&&characters.length?`, ${characters.map((item)=>`${item.name}: ${item.prompt}, positioned at ${Math.round(item.x*100)}% from left and ${Math.round(item.y*100)}% from top`).join(", ")}`:"";
+  const compiled = compileVisualPrompt(config, prompt+fallbackCharacters, negativePrompt, mode, String(raw.outfitId || ""));
+  const referenceImages = Array.isArray(raw.referenceImages) ? raw.referenceImages.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const item = entry as Record<string, unknown>;
+    const image = String(item.image || "").replace(/^data:image\/[^;]+;base64,/, "");
+    return image ? [{ image, strength: Math.max(0, Math.min(1, Number(item.strength) || 0.7)), informationExtracted: Math.max(0, Math.min(1, Number(item.informationExtracted) || 1)) }] : [];
+  }) : [];
   const result = await provider.generate(config, {
     prompt: compiled.prompt, negativePrompt: compiled.negativePrompt, model, width, height,
     steps: Math.max(1, Math.min(50, Number(raw.steps) || 28)),
     scale: Math.max(0, Math.min(10, Number(raw.scale) || 5)),
     sampler: String(raw.sampler || "k_euler_ancestral"),
     seed: Number.isFinite(Number(raw.seed)) && String(raw.seed).trim() ? Number(raw.seed) : -1,
-    referenceMode: ["img2img", "vibe", "director-character", "director-style", "director-both"].includes(String(raw.referenceMode)) ? raw.referenceMode as any : "none",
+    referenceMode: ["img2img", "inpaint", "outpaint", "vibe", "director-character", "director-style", "director-both"].includes(String(raw.referenceMode)) ? raw.referenceMode as any : "none",
     referenceImage: String(raw.referenceImage || "").replace(/^data:image\/[^;]+;base64,/, "") || undefined,
+    maskImage: String(raw.maskImage || "").replace(/^data:image\/[^;]+;base64,/, "") || undefined,
+    referenceImages,
     referenceStrength: Math.max(0, Math.min(1, Number(raw.referenceStrength) || 0.7)),
     referenceInformationExtracted: Math.max(0, Math.min(1, Number(raw.referenceInformationExtracted) || 1)),
+    characters,
   });
   if (isCancelled()) throw new Error("绘图任务已取消");
   ensureDirs();
@@ -131,6 +142,8 @@ async function performNovelAiImage(raw: Record<string, unknown>, isCancelled: ()
     referenceMode: String(raw.referenceMode || "none"),
     referenceStrength: Number(raw.referenceStrength) || null,
     referenceInformationExtracted: Number(raw.referenceInformationExtracted) || null,
+    characters,
+    parentId: String(raw.parentId || "") || null,
     width, height,
     steps: Math.max(1, Math.min(50, Number(raw.steps) || 28)),
     scale: Math.max(0, Math.min(10, Number(raw.scale) || 5)),
@@ -191,8 +204,11 @@ function loadImageById(rawId: unknown): Record<string, unknown> | null {
     return { ...meta, dataUrl: `data:${meta.mimeType || "image/png"};base64,${bytes.toString("base64")}` };
   } catch { return null; }
 }
+function updateHistoryMeta(rawId:unknown,rawPatch:unknown):Record<string,unknown>|null{const id=String(rawId||"");if(!/^[a-zA-Z0-9-]+$/.test(id))return null;try{const filePath=path.join(outputDir(),`${id}.json`);const meta=JSON.parse(fs.readFileSync(filePath,"utf8"));const patch=(rawPatch&&typeof rawPatch==="object"?rawPatch:{}) as Record<string,unknown>;if("favorite" in patch)meta.favorite=Boolean(patch.favorite);fs.writeFileSync(filePath,JSON.stringify(meta,null,2),"utf8");return meta}catch{return null}}
+function deleteHistoryItem(rawId:unknown):boolean{const id=String(rawId||"");if(!/^[a-zA-Z0-9-]+$/.test(id))return false;try{const metaPath=path.join(outputDir(),`${id}.json`);const meta=JSON.parse(fs.readFileSync(metaPath,"utf8"));fs.unlinkSync(path.join(outputDir(),path.basename(String(meta.file))));fs.unlinkSync(metaPath);return true}catch{return false}}
+async function upscaleImageById(rawId:unknown,rawScale:unknown):Promise<Record<string,unknown>>{const source=loadImageById(rawId);if(!source)throw new Error("未找到要放大的作品");const config=loadNovelAiConfig();if(config.providerMode!=="novelai-gateway")throw new Error("当前仅本地 NovelAI Gateway 支持高清放大");const scale=Number(rawScale)===2?2:4;const result=await upscaleWithGateway(config,String(source.dataUrl||"").replace(/^data:image\/[^;]+;base64,/,""),Number(source.width)||1024,Number(source.height)||1024,scale);ensureDirs();const id=`${Date.now()}-upscale-${Math.random().toString(16).slice(2,7)}`;const file=`${id}.png`;fs.writeFileSync(path.join(outputDir(),file),result.bytes);const meta={...source,id,file,mimeType:result.mimeType,width:(Number(source.width)||1024)*scale,height:(Number(source.height)||1024)*scale,createdAt:new Date().toISOString(),upscaledFrom:source.id,upscaleScale:scale};delete (meta as any).dataUrl;fs.writeFileSync(path.join(outputDir(),`${id}.json`),JSON.stringify(meta,null,2),"utf8");return{...meta,dataUrl:`data:${result.mimeType};base64,${result.bytes.toString("base64")}`}}
 
-interface ImageAsset { id:string; name:string; file:string; mimeType:string; createdAt:string; dataUrl?:string }
+interface ImageAsset { id:string; name:string; file:string; mimeType:string; createdAt:string; category?:string; favorite?:boolean; dataUrl?:string }
 function assetMetaPath(id:string):string{return path.join(assetsDir(),`${id}.json`)}
 function loadAssets():ImageAsset[]{
   ensureDirs();
@@ -204,6 +220,7 @@ function deleteAsset(rawId:unknown):boolean{
   const id=String(rawId||"");if(!/^[a-zA-Z0-9-]+$/.test(id))return false;
   try{const meta=JSON.parse(fs.readFileSync(assetMetaPath(id),"utf8")) as ImageAsset;fs.unlinkSync(path.join(assetsDir(),path.basename(meta.file)));fs.unlinkSync(assetMetaPath(id));return true}catch{return false}
 }
+function updateAsset(rawId:unknown,rawPatch:unknown):ImageAsset|null{const id=String(rawId||"");if(!/^[a-zA-Z0-9-]+$/.test(id))return null;try{const filePath=assetMetaPath(id);const meta=JSON.parse(fs.readFileSync(filePath,"utf8")) as ImageAsset;const patch=(rawPatch&&typeof rawPatch==="object"?rawPatch:{}) as Record<string,unknown>;if("name" in patch)meta.name=String(patch.name||meta.name).trim().slice(0,80)||meta.name;if("category" in patch&&["character","outfit","pose","style","other"].includes(String(patch.category)))meta.category=String(patch.category);if("favorite" in patch)meta.favorite=Boolean(patch.favorite);fs.writeFileSync(filePath,JSON.stringify(meta,null,2),"utf8");return meta}catch{return null}}
 async function importAsset():Promise<ImageAsset|null>{
   ensureDirs();
   const picked=await dialog.showOpenDialog({properties:["openFile"],filters:[{name:"图片",extensions:["png","jpg","jpeg","webp"]}]});
@@ -247,6 +264,10 @@ export function registerNovelAiIpc(openWindow: () => void, minimizeWindow: () =>
   ipcMain.handle(IPC.NOVELAI_ASSETS, () => loadAssets());
   ipcMain.handle(IPC.NOVELAI_ASSET_IMPORT, () => importAsset());
   ipcMain.handle(IPC.NOVELAI_ASSET_DELETE, (_event, id) => deleteAsset(id));
+  ipcMain.handle(IPC.NOVELAI_UPSCALE, (_event, id, scale) => upscaleImageById(id, scale));
+  ipcMain.handle(IPC.NOVELAI_ASSET_UPDATE, (_event,id,patch) => updateAsset(id,patch));
+  ipcMain.handle(IPC.NOVELAI_HISTORY_UPDATE, (_event,id,patch) => updateHistoryMeta(id,patch));
+  ipcMain.handle(IPC.NOVELAI_HISTORY_DELETE, (_event,id) => deleteHistoryItem(id));
 }
 
 toolRegistry.register({
@@ -262,22 +283,23 @@ toolRegistry.register({
       negativePrompt: { type: "string", description: "可选的负面提示词" },
       width: { type: "number", description: "宽度，默认 1024" },
       height: { type: "number", description: "高度，默认 1024" },
-      mode: { type: "string", enum: ["photo", "drawing"], description: "photo 会画当前角色并注入衣柜；drawing 是自由画作。默认 photo。" },
-      outfitId: { type: "string", description: "可选穿搭预设 ID；留空使用当前穿搭。" },
+      outfitId: { type: "string", description: "可选服装预设 ID；留空使用当前选择，传 __none__ 则不注入服装。" },
+      characters: { type: "array", description: "可选的多角色构图，坐标范围 0 到 1。", items: { type: "object", properties: { name:{type:"string"}, prompt:{type:"string"}, negativePrompt:{type:"string"}, x:{type:"number"}, y:{type:"number"} }, required:["prompt","x","y"] } },
+      count: { type: "number", description: "生成变体数量，1 到 4，默认 1。" },
     },
     required: ["prompt"],
   },
   execute: async (args) => {
-    const result = await generateNovelAiImage(args);
-    broadcastGeneratedImage(result);
-    return `[ok] 图片已生成并保存到 NovelAI 绘图工作台。文件: ${result.file}; 提示词: ${result.prompt}`;
+    const count=Math.max(1,Math.min(4,Number(args.count)||1));const results:Record<string,unknown>[]=[];
+    for(let index=0;index<count;index++){const result=await generateNovelAiImage({...args,count:undefined,seed:args.seed===undefined?undefined:Number(args.seed)+index});results.push(result);broadcastGeneratedImage(result)}
+    return `[ok] 已生成 ${results.length} 张图片并保存到 NovelAI 绘图工作台。文件: ${results.map((item)=>item.file).join("、")}; 提示词: ${results[0]?.prompt}`;
   },
 });
 
 toolRegistry.register({
   id: "change_visual_outfit",
   name: "切换绘图穿搭",
-  description: "切换角色在后续 photo 模式绘图中使用的穿搭。仅选择已在绘图工作台衣柜中配置的预设。",
+  description: "切换后续绘图使用的角色服装预设，也可以传 __none__ 取消服装注入。",
   enabled: true,
   inputSchema: {
     type: "object",
@@ -290,9 +312,10 @@ toolRegistry.register({
     const config = loadNovelAiConfig();
     const id = String(args.outfitId || "").trim();
     const name = String(args.outfitName || "").trim().toLowerCase();
+    if (id === "__none__" || name === "未选择") { saveNovelAiConfig({ ...config, activeOutfitId: "__none__" }); return "[ok] 已取消服装选择，后续绘图不会注入服装 Tags。"; }
     const outfit = config.outfits.find((item) => item.id === id) || config.outfits.find((item) => item.name.toLowerCase().includes(name) && name);
     if (!outfit) return `[error] 未找到穿搭。可用穿搭：${config.outfits.map((item) => `${item.name}(${item.id})`).join("、") || "无"}`;
     saveNovelAiConfig({ ...config, activeOutfitId: outfit.id });
-    return `[ok] 已切换为“${outfit.name}”。后续 photo 模式绘图会使用：${outfit.tags}`;
+    return `[ok] 已切换为“${outfit.name}”。后续绘图会使用：${outfit.tags}`;
   },
 });

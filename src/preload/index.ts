@@ -75,6 +75,11 @@ const novelaiApi = {
   assets: () => ipcRenderer.invoke(IPC.NOVELAI_ASSETS),
   importAsset: () => ipcRenderer.invoke(IPC.NOVELAI_ASSET_IMPORT),
   deleteAsset: (id: string) => ipcRenderer.invoke(IPC.NOVELAI_ASSET_DELETE, id),
+  upscale: (id: string, scale: number) => ipcRenderer.invoke(IPC.NOVELAI_UPSCALE, id, scale),
+  translatePrompt: (description: string) => ipcRenderer.invoke(IPC.CHAT_SEND_MESSAGE, [{ role:"system", content:"Convert the user's Chinese image description into concise NovelAI English comma-separated tags. Preserve subject, appearance, clothing, pose, expression, composition, environment, lighting and style. Output tags only; no explanation, Markdown, quotes, or roleplay." }, { role:"user", content:description }]),
+  updateAsset: (id:string, patch:unknown) => ipcRenderer.invoke(IPC.NOVELAI_ASSET_UPDATE,id,patch),
+  updateHistory: (id:string, patch:unknown) => ipcRenderer.invoke(IPC.NOVELAI_HISTORY_UPDATE,id,patch),
+  deleteHistory: (id:string) => ipcRenderer.invoke(IPC.NOVELAI_HISTORY_DELETE,id),
 };
 contextBridge.exposeInMainWorld("novelai", novelaiApi);
 

@@ -11,19 +11,19 @@ const config = {
   drawingStyleTags: "watercolor",
   wardrobeEnabled: true,
   activeOutfitId: "casual",
-  outfits: [{ id: "casual", name: "日常", description: "", tags: "white dress" }],
+  outfits: [{ id: "casual", name: "日常", description: "", tags: "white dress", negativeTags: "school uniform" }],
 } as NovelAiConfig;
 
 describe("visual prompt profile", () => {
-  it("injects character and active outfit only in photo mode", () => {
+  it("uses one drawing flow and allows explicitly disabling outfit injection", () => {
     const photo = compileVisualPrompt(config, "by the sea", "blurry", "photo");
     expect(photo.prompt).toContain("pink hair");
     expect(photo.prompt).toContain("white dress");
-    expect(photo.negativePrompt).toBe("bad hands, text, wrong hair, blurry");
+    expect(photo.negativePrompt).toBe("bad hands, text, wrong hair, school uniform, blurry");
 
-    const drawing = compileVisualPrompt(config, "a quiet lake", "", "drawing");
-    expect(drawing.prompt).toBe("watercolor, a quiet lake");
-    expect(drawing.prompt).not.toContain("pink hair");
+    const drawing = compileVisualPrompt(config, "a quiet lake", "", "drawing", "__none__");
+    expect(drawing.prompt).toContain("anime illustration, 1girl, pink hair");
+    expect(drawing.prompt).not.toContain("white dress");
   });
 
   it("normalizes invalid and duplicate outfit ids", () => {
@@ -32,8 +32,8 @@ describe("visual prompt profile", () => {
       { id: "summer look", name: "夏日二", tags: "hat" },
       { name: "缺失 tags" },
     ])).toEqual([
-      { id: "summer-look", name: "夏日", description: "", tags: "sun dress" },
-      { id: "summer-look-2", name: "夏日二", description: "", tags: "hat" },
+      { id: "summer-look", name: "夏日", description: "", tags: "sun dress", negativeTags: "" },
+      { id: "summer-look-2", name: "夏日二", description: "", tags: "hat", negativeTags: "" },
     ]);
   });
 });

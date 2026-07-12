@@ -9,12 +9,12 @@ import type {
 
 const BASIC: ImageProviderCapabilities = {
   negativePrompt: false, dimensions: true, steps: false, scale: false,
-  sampler: false, seed: false, img2img: false, vibe: false,
+  sampler: false, seed: false, img2img: false, inpaint:false, vibe: false,
   directorReference: false, multiCharacter: false,
 };
 const NAI: ImageProviderCapabilities = {
   negativePrompt: true, dimensions: true, steps: true, scale: true,
-  sampler: true, seed: true, img2img: true, vibe: true,
+  sampler: true, seed: true, img2img: true, inpaint:true, vibe: true,
   directorReference: true, multiCharacter: true,
 };
 const GATEWAY: ImageProviderCapabilities = { ...NAI, directorReference: false };
@@ -47,11 +47,14 @@ async function request(config: NovelAiConfig, pathname: string, init: RequestIni
 
 async function responseError(response: Response): Promise<string> {
   const text = await response.text();
+  let message=text;
   try {
     const json = JSON.parse(text);
-    return json?.error?.message || json?.detail || json?.message || text;
-  } catch { return text || `HTTP ${response.status}`; }
+    message=json?.error?.message || json?.detail || json?.message || text;
+  } catch { /* use raw text */ }
+  return diagnoseImageError(response.status,String(message||`HTTP ${response.status}`));
 }
+export function diagnoseImageError(status:number,message:string):string{const lower=message.toLowerCase();const requestId=message.match(/request id[:：]?\s*([\w-]+)/i)?.[1];const suffix=requestId?`（请求 ID：${requestId}）`:"";if(status===401||status===403)return`API Key 无效、已过期或没有该模型权限。${suffix}`;if(status===429||lower.includes("rate limit"))return`请求过于频繁或中转站限流，请稍后重试。${suffix}`;if(lower.includes("model_not_found")||lower.includes("no available channel")||lower.includes("model not found"))return`当前分组没有可用的绘图模型通道。请检查模型名称、中转站分组和渠道映射。${suffix}`;if(lower.includes("balance")||lower.includes("insufficient")||lower.includes("quota"))return`账户余额或绘图额度不足，请检查中转站余额与 NovelAI 权限。${suffix}`;if(status===404)return`绘图端点不存在。请检查协议模板、Base URL 和生图路径是否匹配。${suffix}`;return`${message}${suffix&&!message.includes(requestId!)?suffix:""}`}
 
 async function assertOk(response: Response): Promise<Response> {
   if (!response.ok) throw new Error(await responseError(response));
@@ -77,6 +80,7 @@ async function parseJsonImage(config: NovelAiConfig, json: any): Promise<Provide
   if (typeof url === "string" && url.trim()) return downloadImage(config, url.trim());
   throw new Error("接口成功返回，但没有找到图片 URL 或 Base64 数据");
 }
+export async function upscaleWithGateway(config:NovelAiConfig,image:string,width:number,height:number,scale:number):Promise<ProviderImageResult>{const response=await assertOk(await request(config,"/v1/images/upscale",{method:"POST",body:JSON.stringify({image,width,height,scale:scale===2?2:4})}));return{bytes:Buffer.from(await response.arrayBuffer()),mimeType:response.headers.get("content-type")||"image/png"}}
 
 function extractTextImage(content: string): { url?: string; dataUrl?: string } {
   const data = content.match(/data:image\/[^;]+;base64,[A-Za-z0-9+/=\r\n]+/)?.[0];
@@ -119,15 +123,23 @@ class GatewayProvider implements ImageProvider {
       width: input.width, height: input.height, steps: input.steps, scale: input.scale,
       sampler: input.sampler, seed: input.seed, n: 1, response_format: "b64_json",
     };
-    if (input.referenceImage && input.referenceMode === "img2img") {
+    if(input.characters?.length){const charCaptions=input.characters.map((item)=>({char_caption:item.prompt,centers:[{x:item.x,y:item.y}]}));body.characterPrompts=input.characters.map((item)=>({prompt:item.prompt,uc:item.negativePrompt,center:{x:item.x,y:item.y}}));body.use_coords=true;body.v4_prompt={caption:{base_caption:input.prompt,char_captions:charCaptions},use_coords:true,use_order:true};body.v4_negative_prompt={caption:{base_caption:input.negativePrompt,char_captions:input.characters.map((item)=>({char_caption:item.negativePrompt,centers:[{x:item.x,y:item.y}]}))},legacy_uc:false}}
+    if(input.referenceImage&&input.maskImage&&["inpaint","outpaint"].includes(input.referenceMode)){
+      generationPath="/v1/images/inpainting";body.image=input.referenceImage;body.mask=input.maskImage;body.strength=input.referenceStrength;
+      if(!String(body.model).includes("inpaint"))body.model=String(body.model).replace(/-full$/,"-full-inpainting");
+    } else if (input.referenceImage && input.referenceMode === "img2img") {
       generationPath = "/v1/images/img2img";
       body.image = input.referenceImage;
       body.strength = input.referenceStrength;
-    } else if (input.referenceImage && input.referenceMode === "vibe") {
+    } else if ((input.referenceImages?.length || input.referenceImage) && input.referenceMode === "vibe") {
       generationPath = "/v1/images/vibe-transfer";
-      body.reference_image = input.referenceImage;
-      body.reference_strength = input.referenceStrength;
-      body.reference_information_extracted = input.referenceInformationExtracted;
+      const references=input.referenceImages?.length?input.referenceImages:[{image:input.referenceImage!,strength:input.referenceStrength,informationExtracted:input.referenceInformationExtracted}];
+      body.reference_images = references.map((item)=>item.image);
+      body.reference_strengths = references.map((item)=>item.strength);
+      body.reference_information_extracted_multiple = references.map((item)=>item.informationExtracted);
+      body.reference_image = references[0].image;
+      body.reference_strength = references[0].strength;
+      body.reference_information_extracted = references[0].informationExtracted;
     }
     const response = await assertOk(await request(config, generationPath, {
       method: "POST", body: JSON.stringify({
@@ -185,24 +197,29 @@ class NovelAiNativeProvider implements ImageProvider {
       v4_prompt: { caption: { base_caption: input.prompt, char_captions: [] }, use_coords: false, use_order: true },
       v4_negative_prompt: { caption: { base_caption: input.negativePrompt, char_captions: [] }, legacy_uc: false },
     });
-    if (input.referenceImage && input.referenceMode === "img2img") {
+    if(isV4&&input.characters?.length){const captions=input.characters.map((item)=>({char_caption:item.prompt,centers:[{x:item.x,y:item.y}]}));parameters.characterPrompts=input.characters.map((item)=>({prompt:item.prompt,uc:item.negativePrompt,center:{x:item.x,y:item.y}}));parameters.use_coords=true;parameters.v4_prompt={caption:{base_caption:input.prompt,char_captions:captions},use_coords:true,use_order:true};parameters.v4_negative_prompt={caption:{base_caption:input.negativePrompt,char_captions:input.characters.map((item)=>({char_caption:item.negativePrompt,centers:[{x:item.x,y:item.y}]}))},legacy_uc:false}}
+    if(input.referenceImage&&input.maskImage&&["inpaint","outpaint"].includes(input.referenceMode)){
+      parameters.image=input.referenceImage;parameters.mask=input.maskImage;parameters.strength=input.referenceStrength;
+    } else if (input.referenceImage && input.referenceMode === "img2img") {
       parameters.image = input.referenceImage;
       parameters.strength = input.referenceStrength;
-    } else if (input.referenceImage && input.referenceMode === "vibe") {
-      parameters.reference_image_multiple = [input.referenceImage];
-      parameters.reference_strength_multiple = [input.referenceStrength];
-      parameters.reference_information_extracted_multiple = [input.referenceInformationExtracted];
-    } else if (input.referenceImage && input.referenceMode.startsWith("director-")) {
+    } else if ((input.referenceImages?.length || input.referenceImage) && input.referenceMode === "vibe") {
+      const references=input.referenceImages?.length?input.referenceImages:[{image:input.referenceImage!,strength:input.referenceStrength,informationExtracted:input.referenceInformationExtracted}];
+      parameters.reference_image_multiple = references.map((item)=>item.image);
+      parameters.reference_strength_multiple = references.map((item)=>item.strength);
+      parameters.reference_information_extracted_multiple = references.map((item)=>item.informationExtracted);
+    } else if ((input.referenceImages?.length || input.referenceImage) && input.referenceMode.startsWith("director-")) {
       const type = input.referenceMode.replace("director-", "");
-      parameters.director_reference_images = [input.referenceImage];
-      parameters.director_reference_information_extracted = [input.referenceInformationExtracted];
-      parameters.director_reference_strength_values = [input.referenceStrength];
-      parameters.director_reference_descriptions = [{ caption: { base_caption: input.prompt, char_captions: [] }, legacy_uc: false }];
-      parameters.director_reference_secondary_strength_values = [type === "both" ? input.referenceStrength : type === "style" ? 1 : 0];
+      const references=input.referenceImages?.length?input.referenceImages:[{image:input.referenceImage!,strength:input.referenceStrength,informationExtracted:input.referenceInformationExtracted}];
+      parameters.director_reference_images = references.map((item)=>item.image);
+      parameters.director_reference_information_extracted = references.map((item)=>item.informationExtracted);
+      parameters.director_reference_strength_values = references.map((item)=>item.strength);
+      parameters.director_reference_descriptions = references.map(()=>({ caption: { base_caption: input.prompt, char_captions: [] }, legacy_uc: false }));
+      parameters.director_reference_secondary_strength_values = references.map((item)=>type === "both" ? item.strength : type === "style" ? 1 : 0);
     }
     const response = await assertOk(await request(config, config.generationPath, {
       method: "POST", headers: { Accept: "image/png, application/zip" },
-      body: JSON.stringify({ input: input.prompt, model: input.model, action: "generate", parameters }),
+      body: JSON.stringify({ input: input.prompt, model: ["inpaint","outpaint"].includes(input.referenceMode)&&!input.model.includes("inpaint")?`${input.model}-inpainting`:input.model, action: ["inpaint","outpaint"].includes(input.referenceMode)?"infill":"generate", parameters }),
     }));
     const contentType = response.headers.get("content-type") || "";
     const bytes = Buffer.from(await response.arrayBuffer());

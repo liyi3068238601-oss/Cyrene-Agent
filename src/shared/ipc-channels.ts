@@ -43,6 +43,10 @@ export const IPC = {
   NOVELAI_ASSETS: "novelai:assets",
   NOVELAI_ASSET_IMPORT: "novelai:asset-import",
   NOVELAI_ASSET_DELETE: "novelai:asset-delete",
+  NOVELAI_UPSCALE: "novelai:upscale",
+  NOVELAI_ASSET_UPDATE: "novelai:asset-update",
+  NOVELAI_HISTORY_UPDATE: "novelai:history-update",
+  NOVELAI_HISTORY_DELETE: "novelai:history-delete",
 
   // AG-UI 事件流（替换上面的 chat:stream-* 的新通道）
   AGUI_RUN: "agui:run",
