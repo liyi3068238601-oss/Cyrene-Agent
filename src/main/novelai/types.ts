@@ -38,9 +38,13 @@ export interface NovelAiConfig {
   wardrobeEnabled: boolean;
   activeOutfitId: string;
   outfits: OutfitPreset[];
+  activeCharacterId: string;
+  characters: DrawingCharacterProfile[];
+  outfitTemplates: OutfitPreset[];
 }
 
 export interface OutfitPreset { id: string; name: string; description: string; tags: string; negativeTags?: string }
+export interface DrawingCharacterProfile { id:string; name:string; source:string; baseTags:string; fixedTags:string; negativeTags:string; protected?:boolean; activeOutfitId:string; outfits:OutfitPreset[] }
 export type VisualMode = "photo" | "drawing";
 
 export interface ImageGenerationInput {

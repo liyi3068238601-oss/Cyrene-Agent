@@ -4,7 +4,7 @@ import * as path from "path";
 import { IPC } from "../../shared/ipc-channels";
 import { toolRegistry } from "../orchestrator/tool-registry";
 import { getImageProvider, getProviderCapabilities, upscaleWithGateway } from "./providers";
-import { compileVisualPrompt, normalizeOutfits } from "./prompt-profile";
+import { compileVisualPrompt, normalizeCharacters, normalizeOutfits } from "./prompt-profile";
 import { ImageTaskQueue, type ImageTask } from "./task-queue";
 import type { CharacterComposition, ImageProviderKind, NovelAiConfig, VisualMode } from "./types";
 export type { NovelAiConfig } from "./types";
@@ -30,6 +30,9 @@ const defaults: NovelAiConfig = {
   wardrobeEnabled: true,
   activeOutfitId: "default",
   outfits: [{ id: "default", name: "默认服装", description: "昔涟的日常默认穿搭", tags: "white and purple dress, floral ornament" }],
+  activeCharacterId:"cyrene",
+  characters:[{id:"cyrene",name:"昔涟",source:"崩坏：星穹铁道",baseTags:"1girl, Cyrene (Honkai: Star Rail), pink hair, long hair, purple eyes",fixedTags:"detailed eyes, gentle expression",negativeTags:"different character, wrong hair color, wrong eye color",protected:true,activeOutfitId:"default",outfits:[{id:"default",name:"默认服装",description:"昔涟的日常默认穿搭",tags:"white and purple dress, floral ornament"}]}],
+  outfitTemplates:[],
 };
 
 function rootDir(): string { return path.join(app.getPath("userData"), "novelai"); }
@@ -56,6 +59,11 @@ export function loadNovelAiConfig(): NovelAiConfig {
     const merged = { ...defaults, ...stored, providerMode, apiKey, gatewayUrl: cleanUrl(stored.gatewayUrl) };
     merged.outfits = normalizeOutfits(stored.outfits ?? defaults.outfits);
     if (merged.activeOutfitId !== "__none__" && !merged.outfits.some((outfit) => outfit.id === merged.activeOutfitId)) merged.activeOutfitId = "__none__";
+    merged.characters=normalizeCharacters(stored.characters);
+    if(!merged.characters.length)merged.characters=normalizeCharacters([{id:"cyrene",name:merged.characterName||"昔涟",source:"崩坏：星穹铁道",baseTags:merged.characterBaseTags,fixedTags:merged.characterFixedTags,negativeTags:merged.characterNegativeTags,protected:true,activeOutfitId:merged.activeOutfitId,outfits:merged.outfits}]);
+    merged.activeCharacterId=String(stored.activeCharacterId||merged.characters[0]?.id||"__none__");
+    if(merged.activeCharacterId!=="__none__"&&!merged.characters.some((item)=>item.id===merged.activeCharacterId))merged.activeCharacterId="__none__";
+    merged.outfitTemplates=normalizeOutfits(stored.outfitTemplates);
     return merged;
   } catch { return { ...defaults }; }
 }
@@ -80,6 +88,9 @@ export function saveNovelAiConfig(raw: Partial<NovelAiConfig>): NovelAiConfig {
     wardrobeEnabled: next.wardrobeEnabled !== false,
     activeOutfitId: String(next.activeOutfitId || "").trim(),
     outfits: normalizeOutfits(next.outfits),
+    activeCharacterId:String(next.activeCharacterId||"__none__"),
+    characters:normalizeCharacters(next.characters),
+    outfitTemplates:normalizeOutfits(next.outfitTemplates),
   };
   if (next.apiKey) {
     if (safeStorage.isEncryptionAvailable()) stored.encryptedApiKey = safeStorage.encryptString(next.apiKey).toString("base64");
@@ -108,7 +119,7 @@ async function performNovelAiImage(raw: Record<string, unknown>, isCancelled: ()
   const provider = getImageProvider(config.providerMode);
   const characters:CharacterComposition[]=Array.isArray(raw.characters)?raw.characters.slice(0,6).flatMap((entry,index)=>{if(!entry||typeof entry!=="object")return[];const item=entry as Record<string,unknown>;const characterPrompt=String(item.prompt||"").trim();if(!characterPrompt)return[];const x=Number(item.x),y=Number(item.y);return[{id:String(item.id||`character-${index+1}`),name:String(item.name||`角色 ${index+1}`),prompt:characterPrompt,negativePrompt:String(item.negativePrompt||""),x:Math.max(0,Math.min(1,Number.isFinite(x)?x:0.5)),y:Math.max(0,Math.min(1,Number.isFinite(y)?y:0.5))}]}):[];
   const fallbackCharacters=!provider.capabilities.multiCharacter&&characters.length?`, ${characters.map((item)=>`${item.name}: ${item.prompt}, positioned at ${Math.round(item.x*100)}% from left and ${Math.round(item.y*100)}% from top`).join(", ")}`:"";
-  const compiled = compileVisualPrompt(config, prompt+fallbackCharacters, negativePrompt, mode, String(raw.outfitId || ""));
+  const compiled = compileVisualPrompt(config, prompt+fallbackCharacters, negativePrompt, mode, raw.outfitId===undefined?undefined:String(raw.outfitId),raw.characterId===undefined?undefined:String(raw.characterId));
   const referenceImages = Array.isArray(raw.referenceImages) ? raw.referenceImages.flatMap((entry) => {
     if (!entry || typeof entry !== "object") return [];
     const item = entry as Record<string, unknown>;
@@ -138,6 +149,7 @@ async function performNovelAiImage(raw: Record<string, unknown>, isCancelled: ()
   const meta = {
     id, prompt, compiledPrompt: compiled.prompt, negativePrompt: compiled.negativePrompt,
     model, providerMode: config.providerMode, mode,
+    characterId:compiled.character?.id||null,characterName:compiled.character?.name||null,
     outfitId: compiled.outfit?.id || null, outfitName: compiled.outfit?.name || null,
     referenceMode: String(raw.referenceMode || "none"),
     referenceStrength: Number(raw.referenceStrength) || null,
@@ -283,6 +295,7 @@ toolRegistry.register({
       negativePrompt: { type: "string", description: "可选的负面提示词" },
       width: { type: "number", description: "宽度，默认 1024" },
       height: { type: "number", description: "高度，默认 1024" },
+      characterId:{type:"string",description:"绘图角色档案 ID；传 __none__ 不注入角色，留空使用工作台当前选择。"},
       outfitId: { type: "string", description: "可选服装预设 ID；留空使用当前选择，传 __none__ 则不注入服装。" },
       characters: { type: "array", description: "可选的多角色构图，坐标范围 0 到 1。", items: { type: "object", properties: { name:{type:"string"}, prompt:{type:"string"}, negativePrompt:{type:"string"}, x:{type:"number"}, y:{type:"number"} }, required:["prompt","x","y"] } },
       count: { type: "number", description: "生成变体数量，1 到 4，默认 1。" },
@@ -304,18 +317,24 @@ toolRegistry.register({
   inputSchema: {
     type: "object",
     properties: {
+      characterId:{type:"string",description:"角色档案 ID；留空使用当前绘图角色"},
       outfitId: { type: "string", description: "穿搭预设 ID" },
       outfitName: { type: "string", description: "不知道 ID 时可传穿搭名称" },
     },
   },
   execute: async (args) => {
     const config = loadNovelAiConfig();
+    const characterId=String(args.characterId||config.activeCharacterId||"");
+    const character=config.characters.find((item)=>item.id===characterId);
+    if(!character)return `[error] 当前没有可用绘图角色。请先选择角色；可用角色：${config.characters.map((item)=>`${item.name}(${item.id})`).join("、")||"无"}`;
     const id = String(args.outfitId || "").trim();
     const name = String(args.outfitName || "").trim().toLowerCase();
-    if (id === "__none__" || name === "未选择") { saveNovelAiConfig({ ...config, activeOutfitId: "__none__" }); return "[ok] 已取消服装选择，后续绘图不会注入服装 Tags。"; }
-    const outfit = config.outfits.find((item) => item.id === id) || config.outfits.find((item) => item.name.toLowerCase().includes(name) && name);
-    if (!outfit) return `[error] 未找到穿搭。可用穿搭：${config.outfits.map((item) => `${item.name}(${item.id})`).join("、") || "无"}`;
-    saveNovelAiConfig({ ...config, activeOutfitId: outfit.id });
-    return `[ok] 已切换为“${outfit.name}”。后续绘图会使用：${outfit.tags}`;
+    const activeOutfitId=id==="__none__"||name==="未选择"?"__none__":character.outfits.find((item)=>item.id===id)?.id||character.outfits.find((item)=>item.name.toLowerCase().includes(name)&&name)?.id;
+    if(!activeOutfitId)return `[error] 未找到 ${character.name} 的服装。可用服装：${character.outfits.map((item)=>`${item.name}(${item.id})`).join("、")||"无"}`;
+    const characters=config.characters.map((item)=>item.id===character.id?{...item,activeOutfitId}:item);saveNovelAiConfig({...config,characters,activeCharacterId:character.id});
+    if(activeOutfitId==="__none__")return `[ok] 已取消 ${character.name} 的服装选择。`;
+    const outfit=character.outfits.find((item)=>item.id===activeOutfitId)!;return `[ok] 已为 ${character.name} 切换为“${outfit.name}”。后续绘图会使用：${outfit.tags}`;
   },
 });
+
+toolRegistry.register({id:"change_drawing_character",name:"切换绘图角色",description:"切换后续 AI 绘图的画面主体；不会改变 Agent 自身身份。",enabled:true,inputSchema:{type:"object",properties:{characterId:{type:"string",description:"角色档案 ID，传 __none__ 不注入角色"},characterName:{type:"string",description:"角色名称"}}},execute:async(args)=>{const config=loadNovelAiConfig();const id=String(args.characterId||"").trim(),name=String(args.characterName||"").trim().toLowerCase();if(id==="__none__"||name==="不指定角色"){saveNovelAiConfig({...config,activeCharacterId:"__none__"});return"[ok] 后续绘图不注入固定角色。"}const character=config.characters.find((item)=>item.id===id)||config.characters.find((item)=>item.name.toLowerCase().includes(name)&&name);if(!character)return`[error] 未找到绘图角色。可用角色：${config.characters.map((item)=>`${item.name}(${item.id})`).join("、")||"无"}`;saveNovelAiConfig({...config,activeCharacterId:character.id});return`[ok] 后续绘图主体已切换为“${character.name}”。`}});

@@ -1,7 +1,8 @@
 type ProviderKind = "novelai-gateway" | "openai-images" | "chat-completions-image" | "novelai-native" | "async-task";
 interface Capabilities { negativePrompt:boolean; dimensions:boolean; steps:boolean; scale:boolean; sampler:boolean; seed:boolean; img2img:boolean; inpaint:boolean; vibe:boolean; directorReference:boolean; multiCharacter:boolean }
-interface NovelAiResult { id:string; prompt:string; compiledPrompt?:string; model:string; providerMode?:ProviderKind; createdAt:string; dataUrl:string; width?:number; height?:number; steps?:number; scale?:number; sampler?:string; seed?:number; mode?:"photo"|"drawing"; outfitId?:string|null; outfitName?:string|null; negativePrompt?:string; referenceMode?:string; referenceStrength?:number|null; referenceInformationExtracted?:number|null; characters?:CharacterComposition[]; favorite?:boolean; upscaledFrom?:string }
+interface NovelAiResult { id:string; prompt:string; compiledPrompt?:string; model:string; providerMode?:ProviderKind; createdAt:string; dataUrl:string; width?:number; height?:number; steps?:number; scale?:number; sampler?:string; seed?:number; mode?:"photo"|"drawing"; characterId?:string|null; characterName?:string|null; outfitId?:string|null; outfitName?:string|null; negativePrompt?:string; referenceMode?:string; referenceStrength?:number|null; referenceInformationExtracted?:number|null; characters?:CharacterComposition[]; favorite?:boolean; upscaledFrom?:string }
 interface OutfitPreset { id:string; name:string; description:string; tags:string; negativeTags?:string }
+interface DrawingCharacterProfile { id:string; name:string; source:string; baseTags:string; fixedTags:string; negativeTags:string; protected?:boolean; activeOutfitId:string; outfits:OutfitPreset[] }
 interface ImageTask { id:string; status:"queued"|"running"|"completed"|"failed"|"cancelled"; prompt:string; createdAt:string; error?:string; resultId?:string }
 interface ImageAsset { id:string; name:string; dataUrl:string; createdAt:string; category?:string; favorite?:boolean }
 interface CharacterComposition { id:string; name:string; prompt:string; negativePrompt:string; x:number; y:number }
@@ -10,6 +11,7 @@ interface NovelAiConfig {
   modelsPath:string; generationPath:string; asyncResultPath:string; pollIntervalMs:number;
   characterName:string; characterBaseTags:string; characterFixedTags:string; characterNegativeTags:string;
   photoStyleTags:string; drawingStyleTags:string; wardrobeEnabled:boolean; activeOutfitId:string; outfits:OutfitPreset[];
+  activeCharacterId:string;characters:DrawingCharacterProfile[];outfitTemplates:OutfitPreset[];
 }
 declare global {
   interface Window {
@@ -42,6 +44,7 @@ const badge = $("connection-badge");
 const preview = $("preview");
 const history = $("history");
 let outfits:OutfitPreset[]=[];
+let characterProfiles:DrawingCharacterProfile[]=[];let outfitTemplates:OutfitPreset[]=[];let activeCharacterId="__none__";
 let currentCapabilities:Capabilities|null=null;
 let referenceImageDataUrl="";
 let referenceImages:Array<{id:string;name:string;dataUrl:string;strength:number;informationExtracted:number}>=[];
@@ -64,25 +67,28 @@ const presets: Record<ProviderKind, Pick<NovelAiConfig,"gatewayUrl"|"modelsPath"
 function setStatus(text:string,error=false):void { status.textContent=text; status.classList.toggle("error",error); }
 function getKind():ProviderKind { return providerMode.value as ProviderKind; }
 function configFromForm():Partial<NovelAiConfig> {
+  syncProfileFromForm();const active=characterProfiles.find((item)=>item.id===activeCharacterId);
   return {
     providerMode:getKind(), gatewayUrl:gateway.value.trim(), apiKey:apiKey.value.trim(), model:model.value.trim(),
     defaultNegativePrompt:negative.value.trim(), modelsPath:$<HTMLInputElement>("models-path").value.trim(),
     generationPath:$<HTMLInputElement>("generation-path").value.trim(),
     asyncResultPath:$<HTMLInputElement>("async-result-path").value.trim(),
     pollIntervalMs:Number($<HTMLInputElement>("poll-interval").value) || 5000,
-    characterName:$<HTMLInputElement>("character-name").value.trim(),
-    characterBaseTags:$<HTMLTextAreaElement>("character-base-tags").value.trim(),
-    characterFixedTags:$<HTMLTextAreaElement>("character-fixed-tags").value.trim(),
-    characterNegativeTags:$<HTMLTextAreaElement>("character-negative-tags").value.trim(),
     photoStyleTags:$<HTMLTextAreaElement>("photo-style-tags").value.trim(),
     drawingStyleTags:$<HTMLTextAreaElement>("drawing-style-tags").value.trim(),
     wardrobeEnabled:$<HTMLInputElement>("wardrobe-enabled").checked,
-    activeOutfitId:$<HTMLSelectElement>("outfit-select").value,
-    outfits,
+    activeOutfitId:$<HTMLSelectElement>("outfit-select").value,outfits,
+    activeCharacterId,characters:characterProfiles,outfitTemplates,
+    characterName:active?.name||$<HTMLInputElement>("character-name").value.trim(),characterBaseTags:active?.baseTags||"",characterFixedTags:active?.fixedTags||"",characterNegativeTags:active?.negativeTags||"",
   };
 }
 
 function slug(value:string):string{return value.trim().toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g,"-").replace(/^-|-$/g,"")||`outfit-${Date.now()}`}
+function activeProfile():DrawingCharacterProfile|undefined{return characterProfiles.find((item)=>item.id===activeCharacterId)}
+function syncProfileFromForm():void{const profile=activeProfile();if(!profile)return;profile.name=$<HTMLInputElement>("character-name").value.trim()||profile.name;profile.source=$<HTMLInputElement>("character-source").value.trim();profile.baseTags=$<HTMLTextAreaElement>("character-base-tags").value.trim();profile.fixedTags=$<HTMLTextAreaElement>("character-fixed-tags").value.trim();profile.negativeTags=$<HTMLTextAreaElement>("character-negative-tags").value.trim();profile.activeOutfitId=$<HTMLSelectElement>("outfit-select").value;profile.outfits=outfits}
+function renderCharacterSelectors():void{for(const id of ["drawing-character-select","profile-character-select"]){const select=$<HTMLSelectElement>(id);select.replaceChildren();const none=document.createElement("option");none.value="__none__";none.textContent="不指定角色";select.appendChild(none);for(const profile of characterProfiles){const option=document.createElement("option");option.value=profile.id;option.textContent=profile.protected?`${profile.name} · Agent 本体`:profile.name;select.appendChild(option)}select.value=activeCharacterId}const profile=activeProfile();$("delete-profile").toggleAttribute("disabled",!profile||Boolean(profile.protected))}
+function loadActiveProfile():void{const profile=activeProfile();const disabled=!profile;for(const id of ["character-name","character-source","character-base-tags","character-fixed-tags","character-negative-tags"]){($<HTMLInputElement>(id)).disabled=disabled}$<HTMLInputElement>("character-name").value=profile?.name||"";$<HTMLInputElement>("character-source").value=profile?.source||"";$<HTMLTextAreaElement>("character-base-tags").value=profile?.baseTags||"";$<HTMLTextAreaElement>("character-fixed-tags").value=profile?.fixedTags||"";$<HTMLTextAreaElement>("character-negative-tags").value=profile?.negativeTags||"";outfits=profile?.outfits||[];renderOutfits(profile?.activeOutfitId||"__none__");renderCharacterSelectors();$("outfit-select-field").toggleAttribute("hidden",!profile)}
+function selectCharacter(id:string):void{syncProfileFromForm();activeCharacterId=id;loadActiveProfile();updateOutfitInspector()}
 function refreshOutfitSelect(activeId?:string):void{
   const select=$<HTMLSelectElement>("outfit-select");select.replaceChildren();
   const none=document.createElement("option");none.value="__none__";none.textContent="未选择 · 不注入服装";select.appendChild(none);
@@ -105,6 +111,7 @@ function renderOutfits(activeId?:string):void{
   });
   refreshOutfitSelect(activeId);
 }
+function renderTemplates():void{const editor=$("template-editor");editor.replaceChildren();outfitTemplates.forEach((template,index)=>{const row=document.createElement("div");row.className="outfit-row";const head=document.createElement("div");head.className="outfit-row__head";const name=document.createElement("input");name.value=template.name;name.placeholder="通用模板名称";const remove=document.createElement("button");remove.type="button";remove.textContent="×";remove.title="删除模板";const tags=document.createElement("textarea");tags.rows=2;tags.value=template.tags;tags.placeholder="通用服装 Tags，不要包含角色外貌";const actions=document.createElement("div");actions.className="template-actions";const copy=document.createElement("button");copy.type="button";copy.textContent="复制到当前角色";copy.disabled=!activeProfile();copy.onclick=()=>{const profile=activeProfile();if(!profile)return;const clone={...template,id:slug(`${profile.id}-${template.name}-${Date.now()}`),name:template.name};profile.outfits.push(clone);outfits=profile.outfits;renderOutfits(clone.id);setStatus(`已将“${template.name}”复制到 ${profile.name} 的衣柜。`)};const sync=()=>{outfitTemplates[index]={...outfitTemplates[index],name:name.value.trim()||`通用模板 ${index+1}`,tags:tags.value.trim()}};name.oninput=sync;tags.oninput=sync;remove.onclick=()=>{outfitTemplates.splice(index,1);renderTemplates()};head.append(name,remove);actions.appendChild(copy);row.append(head,tags,actions);editor.appendChild(row)})}
 
 function updateProviderLabels():void {
   const kind=getKind();
@@ -178,7 +185,7 @@ function loadResultParams(item:NovelAiResult):void {
   if(item.seed!==undefined)$<HTMLInputElement>("seed").value=item.seed<0?"":String(item.seed);
   negative.value=item.negativePrompt||negative.value;
   if(item.characters){characters=item.characters.map((character)=>({...character}));renderCharacters()}
-  refreshOutfitSelect(item.outfitId||undefined);
+  selectCharacter(item.characterId||"__none__");refreshOutfitSelect(item.outfitId||"__none__");
   setStatus("已载入历史作品参数，可以修改后重新绘制。");
 }
 function addDetail(list:HTMLElement,label:string,value:unknown):void{
@@ -191,17 +198,17 @@ function showResult(item:NovelAiResult):void {
   preview.replaceChildren();
   const img=document.createElement("img"); img.src=item.dataUrl; img.alt=item.prompt; preview.appendChild(img);
   $("result-summary").hidden=false;
-  $("result-title").textContent=item.outfitName?`${item.outfitName} · AI 绘图`:"AI 绘图 · 未选择服装";
+  $("result-title").textContent=`${item.characterName||"未指定角色"} · ${item.outfitName||"未选择服装"}`;
   const chips=$("result-chips");chips.replaceChildren();
   [`${item.width||"?"}×${item.height||"?"}`,item.model,item.steps?`${item.steps} steps`:"",item.scale!==undefined?`CFG ${item.scale}`:"",item.referenceMode&&item.referenceMode!=="none"?item.referenceMode:""].filter(Boolean).forEach((text)=>{const chip=document.createElement("span");chip.textContent=String(text);chips.appendChild(chip)});
   const details=$("result-details");details.replaceChildren();
   addDetail(details,"画面描述",item.prompt);addDetail(details,"最终 Prompt",item.compiledPrompt);addDetail(details,"负面 Prompt",item.negativePrompt);
   addDetail(details,"模型",item.model);addDetail(details,"协议",item.providerMode);addDetail(details,"尺寸",`${item.width||"?"} × ${item.height||"?"}`);
   addDetail(details,"步数",item.steps);addDetail(details,"CFG",item.scale);addDetail(details,"采样器",item.sampler);addDetail(details,"种子",item.seed===-1?"随机":item.seed);
-  addDetail(details,"穿搭",item.outfitName);addDetail(details,"参考模式",item.referenceMode&&item.referenceMode!=="none"?item.referenceMode:"未使用");addDetail(details,"生成时间",new Date(item.createdAt).toLocaleString());
+  addDetail(details,"绘图角色",item.characterName||"未指定");addDetail(details,"穿搭",item.outfitName||"未选择");addDetail(details,"参考模式",item.referenceMode&&item.referenceMode!=="none"?item.referenceMode:"未使用");addDetail(details,"生成时间",new Date(item.createdAt).toLocaleString());
   inspector.final=item.compiledPrompt||item.prompt;renderInspector();
 }
-function updateOutfitInspector():void{const outfit=outfits.find((item)=>item.id===$<HTMLSelectElement>("outfit-select").value);inspector.outfit=outfit?`${outfit.name}\n正向：${outfit.tags}${outfit.negativeTags?`\n负向：${outfit.negativeTags}`:""}`:"未选择服装，本次不会注入服装 Tags";if(inspector.translated)inspector.final=[inspector.translated,outfit?.tags].filter(Boolean).join(", ");renderInspector()}
+function updateOutfitInspector():void{const character=activeProfile(),outfit=outfits.find((item)=>item.id===$<HTMLSelectElement>("outfit-select").value);inspector.outfit=`绘图主体：${character?.name||"不指定角色"}\n角色注入：${character?"已启用":"未启用"}\n服装注入：${outfit?.name||"未选择"}${outfit?`\n正向：${outfit.tags}${outfit.negativeTags?`\n负向：${outfit.negativeTags}`:""}`:""}\nAgent 身份：昔涟（仅负责理解和绘制）`;if(inspector.translated)inspector.final=[$<HTMLTextAreaElement>("photo-style-tags").value,character?.baseTags,character?.fixedTags,outfit?.tags,inspector.translated].filter(Boolean).join(", ");renderInspector()}
 function renderInspector():void{$("prompt-inspector-content").textContent=inspector[inspectorTab]||"暂无内容";document.querySelectorAll<HTMLElement>("[data-prompt-tab]").forEach((button)=>button.classList.toggle("is-active",button.dataset.promptTab===inspectorTab))}
 function editFromResult(item:NovelAiResult):void{
   loadResultParams(item);referenceImages=[{id:`history-${item.id}`,name:"历史作品",dataUrl:item.dataUrl,strength:0.7,informationExtracted:1}];syncReferenceDisplay();
@@ -273,14 +280,10 @@ async function init():Promise<void>{
     $<HTMLInputElement>("generation-path").value=config.generationPath||"/v1/images/generations";
     $<HTMLInputElement>("async-result-path").value=config.asyncResultPath||"/api/get_result/{id}";
     $<HTMLInputElement>("poll-interval").value=String(config.pollIntervalMs||5000);
-    $<HTMLInputElement>("character-name").value=config.characterName||"昔涟";
-    $<HTMLTextAreaElement>("character-base-tags").value=config.characterBaseTags||"";
-    $<HTMLTextAreaElement>("character-fixed-tags").value=config.characterFixedTags||"";
-    $<HTMLTextAreaElement>("character-negative-tags").value=config.characterNegativeTags||"";
     $<HTMLTextAreaElement>("photo-style-tags").value=config.photoStyleTags||"";
     $<HTMLTextAreaElement>("drawing-style-tags").value=config.drawingStyleTags||"";
     $<HTMLInputElement>("wardrobe-enabled").checked=config.wardrobeEnabled!==false;
-    outfits=Array.isArray(config.outfits)?config.outfits:[];renderOutfits(config.activeOutfitId);
+    characterProfiles=Array.isArray(config.characters)?config.characters:[];outfitTemplates=Array.isArray(config.outfitTemplates)?config.outfitTemplates:[];activeCharacterId=config.activeCharacterId||"__none__";loadActiveProfile();renderTemplates();
     updateProviderLabels(); await applyCapabilities(); await Promise.all([refreshHistory(),refreshTasks(),refreshAssets()]); void testConnection();
   }catch(e){setStatus(String(e),true)}
   const theme=await window.cyreneTheme?.get?.(); if(theme)document.body.dataset.uiTheme=theme;
@@ -313,8 +316,15 @@ $("import-asset").onclick=async()=>{const asset=await window.novelai.importAsset
 $("add-character").onclick=()=>{if(characters.length>=6)return;const index=characters.length;characters.push({id:`character-${Date.now()}`,name:`角色 ${index+1}`,prompt:"",negativePrompt:"",x:(index+1)/(characters.length+2),y:.55});renderCharacters()};
 $("layout-characters").onclick=()=>{characters.forEach((character,index)=>{character.x=(index+1)/(characters.length+1);character.y=.55});renderCharacters()};
 $<HTMLSelectElement>("outfit-select").onchange=updateOutfitInspector;
+$<HTMLSelectElement>("drawing-character-select").onchange=(event)=>selectCharacter((event.currentTarget as HTMLSelectElement).value);
+$<HTMLSelectElement>("profile-character-select").onchange=(event)=>selectCharacter((event.currentTarget as HTMLSelectElement).value);
+$<HTMLInputElement>("character-name").oninput=()=>{syncProfileFromForm();renderCharacterSelectors()};
+$<HTMLInputElement>("character-source").oninput=syncProfileFromForm;$<HTMLTextAreaElement>("character-base-tags").oninput=syncProfileFromForm;$<HTMLTextAreaElement>("character-fixed-tags").oninput=syncProfileFromForm;$<HTMLTextAreaElement>("character-negative-tags").oninput=syncProfileFromForm;
+$<HTMLButtonElement>("add-profile").onclick=()=>{syncProfileFromForm();const name=`新角色 ${characterProfiles.length+1}`,id=slug(`${name}-${Date.now()}`);characterProfiles.push({id,name,source:"",baseTags:"",fixedTags:"",negativeTags:"",activeOutfitId:"__none__",outfits:[]});activeCharacterId=id;loadActiveProfile();renderTemplates()};
+$<HTMLButtonElement>("delete-profile").onclick=()=>{const profile=activeProfile();if(!profile||profile.protected)return;if(!confirm(`删除角色“${profile.name}”及其独立衣柜？`))return;characterProfiles=characterProfiles.filter((item)=>item.id!==profile.id);activeCharacterId=characterProfiles[0]?.id||"__none__";loadActiveProfile();renderTemplates()};
 $<HTMLInputElement>("wardrobe-enabled").onchange=()=>refreshOutfitSelect($<HTMLSelectElement>("outfit-select").value);
 $("add-outfit").onclick=()=>{const name=`新服装 ${outfits.length+1}`;outfits.push({id:slug(name+Date.now()),name,description:"",tags:"",negativeTags:""});renderOutfits(outfits[outfits.length-1].id)};
+$("add-template").onclick=()=>{const name=`通用模板 ${outfitTemplates.length+1}`;outfitTemplates.push({id:slug(name+Date.now()),name,description:"",tags:"",negativeTags:""});renderTemplates()};
 providerMode.onchange=()=>{
   const preset=presets[getKind()]; gateway.value=preset.gatewayUrl; $<HTMLInputElement>("models-path").value=preset.modelsPath;
   $<HTMLInputElement>("generation-path").value=preset.generationPath; $<HTMLInputElement>("async-result-path").value=preset.asyncResultPath;
@@ -327,7 +337,7 @@ $("generate").onclick=async()=>{
     await window.novelai.saveConfig(configFromForm());
     const referenceMode=$<HTMLSelectElement>("reference-mode").value;if($<HTMLSelectElement>("reference-mode").selectedOptions[0]?.dataset.supported==="false")throw new Error("当前协议不支持所选参考模式，请先切换协议模板");if(referenceMode!=="none"&&!referenceImages.length)throw new Error("请先选择参考图片");if(referenceMode==="inpaint"&&!maskImageDataUrl)throw new Error("请先涂抹需要重绘的区域");if(referenceMode==="outpaint")await prepareOutpaint();
     const strength=Number($<HTMLInputElement>("reference-strength").value);const informationExtracted=Number($<HTMLInputElement>("reference-info").value);
-    const draft={prompt:prompt.value,negativePrompt:negative.value,model:model.value,outfitId:$<HTMLSelectElement>("outfit-select").value,width:referenceMode==="outpaint"?outpaintWidth:$<HTMLSelectElement>("width").value,height:referenceMode==="outpaint"?outpaintHeight:$<HTMLSelectElement>("height").value,steps:$<HTMLInputElement>("steps").value,scale:$<HTMLInputElement>("scale").value,sampler:$<HTMLSelectElement>("sampler").value,referenceMode,referenceImage:referenceMode==="outpaint"?outpaintImageDataUrl:referenceImages[0]?.dataUrl,maskImage:referenceMode==="outpaint"?outpaintMaskDataUrl:maskImageDataUrl,referenceImages:referenceImages.map((item)=>({image:item.dataUrl,strength,informationExtracted})),referenceStrength:strength,referenceInformationExtracted:informationExtracted,characters:characters.filter((item)=>item.prompt.trim())};
+    const draft={prompt:prompt.value,negativePrompt:negative.value,model:model.value,characterId:activeCharacterId,outfitId:$<HTMLSelectElement>("outfit-select").value,width:referenceMode==="outpaint"?outpaintWidth:$<HTMLSelectElement>("width").value,height:referenceMode==="outpaint"?outpaintHeight:$<HTMLSelectElement>("height").value,steps:$<HTMLInputElement>("steps").value,scale:$<HTMLInputElement>("scale").value,sampler:$<HTMLSelectElement>("sampler").value,referenceMode,referenceImage:referenceMode==="outpaint"?outpaintImageDataUrl:referenceImages[0]?.dataUrl,maskImage:referenceMode==="outpaint"?outpaintMaskDataUrl:maskImageDataUrl,referenceImages:referenceImages.map((item)=>({image:item.dataUrl,strength,informationExtracted})),referenceStrength:strength,referenceInformationExtracted:informationExtracted,characters:characters.filter((item)=>item.prompt.trim())};
     if(referenceImages[0]?.id.startsWith("history-"))(draft as Record<string,unknown>).parentId=referenceImages[0].id.slice(8);const count=Math.max(1,Math.min(4,Number($<HTMLSelectElement>("variant-count").value)||1));const requestedSeed=$<HTMLInputElement>("seed").value.trim();const results=await Promise.all(Array.from({length:count},(_,index)=>window.novelai.generate({...draft,seed:requestedSeed?Number(requestedSeed)+index:""})));showResult(results[results.length-1]);await refreshHistory();setStatus(`${count} 张变体绘制完成，作品已保存。`);
   }catch(e){setStatus(e instanceof Error?e.message:String(e),true)}finally{button.disabled=false}
 };

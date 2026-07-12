@@ -5,6 +5,9 @@
 .outfit-row__head { display: grid; grid-template-columns: 1fr 32px; gap: 8px; }
 .outfit-row__head button { border: 0; border-radius: 5px; background: rgba(210, 74, 130, 0.16); color: #f4b4cf; }
 .outfit-row label { margin-top: 8px; }
+.template-actions { display:flex; justify-content:flex-end; margin-top:8px; }
+.template-actions button { padding:7px 10px; border:1px solid rgba(255,182,220,.17); border-radius:5px; color:#eadfed; background:#30243e; }
+.template-actions button:disabled { opacity:.45; cursor:not-allowed; }
 .secondary-wide { width: 100%; margin-top: 11px; padding: 10px; border: 1px dashed rgba(255, 182, 220, 0.25); border-radius: 6px; background: rgba(255, 255, 255, 0.035); color: #ebdfea; }
 .settings [hidden], [data-capability][hidden] { display: none !important; }
 .reference-panel { margin-top: 4px; }

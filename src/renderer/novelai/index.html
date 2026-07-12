@@ -20,7 +20,8 @@
       <section data-studio-panel="generate">
         <div class="section-head"><h2>创作参数</h2><span id="connection-badge" class="badge">未检测</span></div>
         <label>画面描述<textarea id="natural-prompt" rows="4" placeholder="用自然语言描述人物、动作、服装、环境和光线..."></textarea></label><button id="translate-prompt" type="button" class="secondary-wide">构建 NovelAI Prompt</button><label>NovelAI Prompt<textarea id="prompt" rows="6" placeholder="转换后的英文 Tags，也可以直接编辑..."></textarea></label>
-        <label id="outfit-select-field">本次绘图服装<select id="outfit-select"></select><small class="field-note">选择“未选择”时不会注入任何服装 Tags</small></label>
+        <label>绘图角色<select id="drawing-character-select"></select><small class="field-note">仅决定画面主体，不会改变 Agent 的昔涟身份</small></label>
+        <label id="outfit-select-field">本次绘图服装<select id="outfit-select"></select><small class="field-note">每个角色拥有独立衣柜；选择“未选择”时不注入服装 Tags</small></label>
         <label data-capability="negativePrompt">负面提示词<textarea id="negative" rows="3"></textarea></label>
         <label>模型<input id="model" list="model-options" value="nai-v4.5-full" autocomplete="off" /><datalist id="model-options"><option value="nai-v4.5-full"></option></datalist></label>
         <div class="field-grid">
@@ -64,7 +65,10 @@
       </details>
       <details class="settings" data-studio-panel="character" open>
         <summary>角色档案与绘图风格</summary>
+        <label>管理角色<select id="profile-character-select"></select></label>
+        <div class="button-row"><button id="add-profile" type="button">新建角色</button><button id="delete-profile" type="button">删除角色</button></div>
         <label>角色名称<input id="character-name" value="昔涟" /></label>
+        <label>角色来源<input id="character-source" placeholder="作品名称或原创角色" /></label>
         <label>基础外观<textarea id="character-base-tags" rows="3" placeholder="角色名、发色、瞳色、发型等稳定外观"></textarea></label>
         <label>固定特征<textarea id="character-fixed-tags" rows="2" placeholder="每张角色图都要保留的特征"></textarea></label>
         <label>角色负面特征<textarea id="character-negative-tags" rows="2" placeholder="错误发色、错误角色等"></textarea></label>
@@ -78,6 +82,12 @@
         <div id="outfit-editor" class="outfit-editor"></div>
         <button id="add-outfit" type="button" class="secondary-wide">新建服装预设</button>
         <p>可以保存多套绘图服装并在生成页自由选择。这里只影响 AI 绘图，不会修改 Live2D 模型。</p>
+      </details>
+      <details class="settings" data-studio-panel="character" open>
+        <summary>通用服装模板</summary>
+        <div id="template-editor" class="outfit-editor"></div>
+        <button id="add-template" type="button" class="secondary-wide">新建通用模板</button>
+        <p>模板不直接参与绘图。点击“复制到当前角色”后会生成独立副本，后续修改不会影响其他角色。</p>
       </details>
       <details class="settings" data-studio-panel="reference" open>
         <summary>参考素材库</summary>

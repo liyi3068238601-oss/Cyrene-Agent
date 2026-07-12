@@ -21,6 +21,9 @@ const baseConfig: NovelAiConfig = {
   wardrobeEnabled: true,
   activeOutfitId: "default",
   outfits: [{ id: "default", name: "默认", description: "", tags: "white dress" }],
+  activeCharacterId:"cyrene",
+  characters:[{id:"cyrene",name:"昔涟",source:"",baseTags:"pink hair",fixedTags:"purple eyes",negativeTags:"wrong hair",activeOutfitId:"default",outfits:[{id:"default",name:"默认",description:"",tags:"white dress"}]}],
+  outfitTemplates:[],
 };
 
 const input: ImageGenerationInput = {
