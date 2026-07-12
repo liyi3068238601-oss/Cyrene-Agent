@@ -9,6 +9,8 @@
 .template-actions button { padding:7px 10px; border:1px solid rgba(255,182,220,.17); border-radius:5px; color:#eadfed; background:#30243e; }
 .template-actions button:disabled { opacity:.45; cursor:not-allowed; }
 .secondary-wide { width: 100%; margin-top: 11px; padding: 10px; border: 1px dashed rgba(255, 182, 220, 0.25); border-radius: 6px; background: rgba(255, 255, 255, 0.035); color: #ebdfea; }
+.save-section { width:100%; margin-top:12px; padding:10px; border:1px solid rgba(240,138,188,.38); border-radius:6px; color:#fff; background:#56324f; font-weight:700; }
+.save-section:disabled { opacity:.55; cursor:wait; }
 .settings [hidden], [data-capability][hidden] { display: none !important; }
 .reference-panel { margin-top: 4px; }
 .reference-pick { width: 100%; display: flex; justify-content: space-between; align-items: center; margin-top: 12px; padding: 10px 12px; border: 1px dashed rgba(255, 182, 220, 0.25); border-radius: 6px; color: #eadfed; background: rgba(255, 255, 255, 0.035); }

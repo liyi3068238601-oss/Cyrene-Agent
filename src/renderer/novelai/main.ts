@@ -65,6 +65,7 @@ const presets: Record<ProviderKind, Pick<NovelAiConfig,"gatewayUrl"|"modelsPath"
 };
 
 function setStatus(text:string,error=false):void { status.textContent=text; status.classList.toggle("error",error); }
+async function saveLocalConfig(buttonId:string,message:string):Promise<void>{const button=$<HTMLButtonElement>(buttonId);button.disabled=true;try{await window.novelai.saveConfig(configFromForm());setStatus(message)}catch(error){setStatus(error instanceof Error?error.message:String(error),true)}finally{button.disabled=false}}
 function getKind():ProviderKind { return providerMode.value as ProviderKind; }
 function configFromForm():Partial<NovelAiConfig> {
   syncProfileFromForm();const active=characterProfiles.find((item)=>item.id===activeCharacterId);
@@ -325,6 +326,8 @@ $<HTMLButtonElement>("delete-profile").onclick=()=>{const profile=activeProfile(
 $<HTMLInputElement>("wardrobe-enabled").onchange=()=>refreshOutfitSelect($<HTMLSelectElement>("outfit-select").value);
 $("add-outfit").onclick=()=>{const name=`新服装 ${outfits.length+1}`;outfits.push({id:slug(name+Date.now()),name,description:"",tags:"",negativeTags:""});renderOutfits(outfits[outfits.length-1].id)};
 $("add-template").onclick=()=>{const name=`通用模板 ${outfitTemplates.length+1}`;outfitTemplates.push({id:slug(name+Date.now()),name,description:"",tags:"",negativeTags:""});renderTemplates()};
+$("save-character").onclick=()=>void saveLocalConfig("save-character","角色档案已保存到本机。");
+$("save-wardrobe").onclick=()=>void saveLocalConfig("save-wardrobe","角色衣柜与通用服装模板已保存到本机。");
 providerMode.onchange=()=>{
   const preset=presets[getKind()]; gateway.value=preset.gatewayUrl; $<HTMLInputElement>("models-path").value=preset.modelsPath;
   $<HTMLInputElement>("generation-path").value=preset.generationPath; $<HTMLInputElement>("async-result-path").value=preset.asyncResultPath;
