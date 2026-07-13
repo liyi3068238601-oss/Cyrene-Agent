@@ -110,8 +110,10 @@
       </section>
       <div id="preview" class="preview"><div class="empty"><span>✦</span><strong>等待灵感落笔</strong><p>在左侧填写提示词，然后开始绘制。</p></div></div>
       <section class="task-panel"><div class="history-head"><h2>生成任务</h2><span id="task-count">0 项</span></div><div id="task-list" class="task-list"><p class="task-empty">暂无任务</p></div></section>
-      <div class="history-head"><h2>最近作品</h2><span id="history-count">0 张</span></div><div class="history-filter"><input id="history-search" placeholder="搜索提示词或模型" /><label><input id="history-favorites" type="checkbox" /> 仅收藏</label></div>
-      <div id="history" class="history"></div>
+      <section class="history-panel">
+        <div class="history-panel__toolbar"><div class="history-head"><h2>历史创作</h2><span id="history-count">0 张</span></div><div class="history-filter"><input id="history-search" placeholder="搜索提示词或模型" /><label><input id="history-favorites" type="checkbox" /> 仅收藏</label></div></div>
+        <div id="history" class="history"></div>
+      </section>
     </section>
   </main>
   <dialog id="upscale-dialog" class="upscale-dialog">

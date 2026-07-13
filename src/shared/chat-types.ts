@@ -53,6 +53,8 @@ export interface ChatSession {
   // 用户是否手动改过名；true 时不再根据消息内容自动派生 title。
   // 没有此字段的老数据视为 false（向后兼容）。
   titleIsCustom?: boolean;
+  /** 系统主会话：主动消息固定写入，可清空但不可删除。 */
+  isMain?: boolean;
 }
 
 // index.json 里的轻量元数据（列表渲染用）。
@@ -63,6 +65,7 @@ export interface ChatSessionMeta {
   createdAt: number;
   updatedAt: number;
   messageCount: number;
+  isMain?: boolean;
 }
 
 export const CHAT_SCHEMA_VERSION = 1 as const;

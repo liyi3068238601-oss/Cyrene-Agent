@@ -20,7 +20,7 @@ declare global {
       saveConfig(config:Partial<NovelAiConfig>):Promise<NovelAiConfig>;
       test(config?:Partial<NovelAiConfig>):Promise<{ok:boolean;capabilities:Capabilities}>;
       models(config?:Partial<NovelAiConfig>):Promise<string[]>; capabilities(kind:ProviderKind):Promise<Capabilities>;
-      generate(input:Record<string,unknown>):Promise<NovelAiResult>; history():Promise<NovelAiResult[]>; image(id:string):Promise<NovelAiResult|null>; openOutput():Promise<void>; pickImage():Promise<{name:string;dataUrl:string}|null>;
+      generate(input:Record<string,unknown>):Promise<NovelAiResult>; history(offset?:number,limit?:number):Promise<NovelAiResult[]>; image(id:string):Promise<NovelAiResult|null>; openOutput():Promise<void>; pickImage():Promise<{name:string;dataUrl:string}|null>;
       tasks():Promise<ImageTask[]>;cancelTask(id:string):Promise<boolean>;retryTask(id:string):Promise<NovelAiResult>;onTasksChanged(cb:(tasks:ImageTask[])=>void):()=>void;
       assets():Promise<ImageAsset[]>;importAsset():Promise<ImageAsset|null>;deleteAsset(id:string):Promise<boolean>;
       upscale(id:string,scale:number):Promise<NovelAiResult>;
@@ -54,6 +54,7 @@ let maskImageDataUrl="";let maskDrawing=false;let maskErase=false;let maskHistor
 let outpaintImageDataUrl="";let outpaintMaskDataUrl="";let outpaintWidth=0;let outpaintHeight=0;
 let characters:CharacterComposition[]=[];
 let allHistory:NovelAiResult[]=[];let allAssets:ImageAsset[]=[];
+const HISTORY_PAGE_SIZE=40;let historyHasMore=true;let historyLoading=false;
 let inspector={final:"",translated:"",outfit:""};let inspectorTab:"final"|"translated"|"outfit"="final";
 
 const presets: Record<ProviderKind, Pick<NovelAiConfig,"gatewayUrl"|"modelsPath"|"generationPath"|"asyncResultPath">> = {
@@ -216,20 +217,21 @@ function editFromResult(item:NovelAiResult):void{
   const mode=$<HTMLSelectElement>("reference-mode");const img2img=Array.from(mode.options).find((option)=>option.value==="img2img"&&!option.disabled);if(img2img)mode.value="img2img";updateReferencePanel();setStatus("已将当前作品设为图生图底图，可以修改提示词后继续创作。");
 }
 function renderHistory(items:NovelAiResult[]):void {
-  history.replaceChildren(); $("history-count").textContent=`${items.length} 张`;
+  history.replaceChildren(); $("history-count").textContent=historyHasMore?`${items.length} 张 · 下滑加载更多`:`${items.length} 张 · 已全部加载`;
   for(const item of items){
     const button=document.createElement("div"); button.className="history-item"; button.title=item.prompt;button.tabIndex=0;button.setAttribute("role","button");
     const img=document.createElement("img"); img.src=item.dataUrl; img.alt=item.prompt;
     const caption=document.createElement("div"); caption.textContent=item.prompt;
     const replay=document.createElement("button");replay.type="button";replay.className="history-item__replay";replay.textContent="☷";replay.title="载入这张作品的参数";
     replay.onclick=(event)=>{event.stopPropagation();loadResultParams(item);};
-    const favorite=document.createElement("button");favorite.type="button";favorite.className="history-item__favorite";favorite.textContent=item.favorite?"★":"☆";favorite.title="收藏作品";favorite.onclick=async(event)=>{event.stopPropagation();await window.novelai.updateHistory(item.id,{favorite:!item.favorite});await refreshHistory(false)};
-    const remove=document.createElement("button");remove.type="button";remove.className="history-item__delete";remove.textContent="×";remove.title="删除作品";remove.onclick=async(event)=>{event.stopPropagation();if(!confirm("删除这张作品及其本地图片？"))return;await window.novelai.deleteHistory(item.id);await refreshHistory(false)};
+    const favorite=document.createElement("button");favorite.type="button";favorite.className="history-item__favorite";favorite.textContent=item.favorite?"★":"☆";favorite.title="收藏作品";favorite.onclick=async(event)=>{event.stopPropagation();const next=!item.favorite;await window.novelai.updateHistory(item.id,{favorite:next});item.favorite=next;applyHistoryFilter()};
+    const remove=document.createElement("button");remove.type="button";remove.className="history-item__delete";remove.textContent="×";remove.title="删除作品";remove.onclick=async(event)=>{event.stopPropagation();if(!confirm("删除这张作品及其本地图片？"))return;if(await window.novelai.deleteHistory(item.id)){allHistory=allHistory.filter((entry)=>entry.id!==item.id);applyHistoryFilter()}};
     button.append(img,caption,replay,favorite,remove); button.onclick=()=>showResult(item); history.appendChild(button);
   }
 }
 function applyHistoryFilter():void{const query=$<HTMLInputElement>("history-search").value.trim().toLowerCase(),favorites=$<HTMLInputElement>("history-favorites").checked;renderHistory(allHistory.filter((item)=>(!favorites||item.favorite)&&(!query||`${item.prompt} ${item.model}`.toLowerCase().includes(query))))}
-async function refreshHistory(selectFirst=true):Promise<void>{try{allHistory=await window.novelai.history();applyHistoryFilter();if(selectFirst&&allHistory[0])showResult(allHistory[0])}catch(e){console.error(e)}}
+async function refreshHistory(selectFirst=true):Promise<void>{if(historyLoading)return;historyLoading=true;try{const firstPage=await window.novelai.history(0,HISTORY_PAGE_SIZE);allHistory=firstPage;historyHasMore=firstPage.length===HISTORY_PAGE_SIZE;applyHistoryFilter();if(selectFirst&&allHistory[0])showResult(allHistory[0])}catch(e){console.error(e)}finally{historyLoading=false}}
+async function loadMoreHistory():Promise<void>{if(historyLoading||!historyHasMore)return;historyLoading=true;try{const page=await window.novelai.history(allHistory.length,HISTORY_PAGE_SIZE);const known=new Set(allHistory.map((item)=>item.id));allHistory.push(...page.filter((item)=>!known.has(item.id)));historyHasMore=page.length===HISTORY_PAGE_SIZE;applyHistoryFilter()}catch(e){console.error(e)}finally{historyLoading=false}}
 
 function renderTasks(tasks:ImageTask[]):void{
   const list=$("task-list");list.replaceChildren();$("task-count").textContent=`${tasks.length} 项`;
@@ -298,6 +300,7 @@ $("open-output").onclick=()=>void window.novelai.openOutput();
 $("load-result-params").onclick=()=>{if(selectedResult)loadResultParams(selectedResult)};
 $("edit-result").onclick=()=>{if(selectedResult)editFromResult(selectedResult)};
 $<HTMLInputElement>("asset-search").oninput=()=>void refreshAssets();$<HTMLSelectElement>("asset-category").onchange=()=>void refreshAssets();$<HTMLInputElement>("history-search").oninput=applyHistoryFilter;$<HTMLInputElement>("history-favorites").onchange=applyHistoryFilter;
+document.querySelector<HTMLElement>(".history-panel")!.onscroll=(event)=>{const panel=event.currentTarget as HTMLElement;if(panel.scrollTop+panel.clientHeight>=panel.scrollHeight-120)void loadMoreHistory()};
 document.querySelectorAll<HTMLButtonElement>("[data-studio-tab]").forEach((button)=>button.onclick=()=>{document.querySelectorAll<HTMLElement>("[data-studio-tab]").forEach((item)=>item.classList.toggle("is-active",item===button));document.querySelectorAll<HTMLElement>("[data-studio-panel]").forEach((panel)=>panel.toggleAttribute("hidden",panel.dataset.studioPanel!==button.dataset.studioTab))});
 document.querySelectorAll<HTMLButtonElement>("[data-prompt-tab]").forEach((button)=>button.onclick=()=>{inspectorTab=button.dataset.promptTab as typeof inspectorTab;renderInspector()});
 $("copy-final-prompt").onclick=()=>void navigator.clipboard.writeText(inspector.final||prompt.value);

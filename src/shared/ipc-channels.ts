@@ -21,6 +21,10 @@ export const IPC = {
   CHAT_INGEST_FILES: "chat:ingest-files",
   CHAT_STREAM_CHUNK: "chat:stream-chunk",
   CHAT_STREAM_DONE: "chat:stream-done",
+  CHAT_PROACTIVE_MESSAGE: "chat:proactive-message",
+  SCREEN_OBSERVATION_GET_STATUS: "screen-observation:get-status",
+  SCREEN_OBSERVATION_PAUSE: "screen-observation:pause",
+  SCREEN_OBSERVATION_RESUME: "screen-observation:resume",
 
   // NovelAI drawing studio
   NOVELAI_OPEN: "novelai:open",

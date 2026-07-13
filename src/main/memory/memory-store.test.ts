@@ -107,6 +107,26 @@ describe("memoryStore", () => {
     expect(persisted.l2.find((m: { id: string }) => m.id === pinned.id).status).toBe("active")
   })
 
+  it("gradually archives memories that have not been recalled for a long time", async () => {
+    const { memoryStore } = await import("./memory-store")
+    const memory = await memoryStore.addL2Memory({
+      content: "A branch memory",
+      triggerText: "remember this",
+      sourceConversationId: "deleted-branch",
+      ragId: "rag_branch",
+      isPinned: false,
+    })
+    const store = await memoryStore.load()
+    const entry = store.l2.find((item) => item.id === memory.id)!
+    entry.lastAccessedAt = Date.now() - 40 * 24 * 60 * 60 * 1000
+    await memoryStore.save(store)
+
+    await memoryStore.decayInactiveL2Weights(Date.now(), 7)
+    const updated = (await memoryStore.getAllL2()).find((item) => item.id === memory.id)!
+    expect(updated.weight).toBe(0)
+    expect(updated.status).toBe("archived")
+  })
+
   it("updates L0 and L2 through atomic write APIs", async () => {
     const { memoryStore } = await import("./memory-store")
     await memoryStore.upsertL0Field("preferredName", "伙伴")
@@ -126,9 +146,9 @@ describe("memoryStore", () => {
 
     expect(l0.preferredName).toBe("伙伴")
     expect(l0.updatedAt).toBeGreaterThan(0)
-    expect(updated.weight).toBe(12)
+    expect(updated.weight).toBe(42)
     expect(updated.accessCount).toBe(1)
-    expect(updated.status).toBe("aging")
+    expect(updated.status).toBe("active")
     expect(traceEvents.some((event) => event.op === "l0.update")).toBe(true)
     expect(traceEvents.some((event) => event.op === "l2.weight.update" && event.l2Id === memory.id)).toBe(true)
   })
@@ -509,8 +529,8 @@ describe("memoryStore", () => {
     const persisted = JSON.parse(fs.readFileSync(memoryPath, "utf8"))
     const backups = fs.readdirSync(electronMock.userDataDir).filter((name) => name.startsWith("memory.backup."))
 
-    expect(store.schemaVersion).toBe(2)
-    expect(persisted.schemaVersion).toBe(2)
+    expect(store.schemaVersion).toBe(3)
+    expect(persisted.schemaVersion).toBe(3)
     expect(store.l0.preferredName).toBe("伙伴")
     expect(store.l1.roundCount).toBe(7)
     expect(store.l2[0].syncStatus).toBe("synced")

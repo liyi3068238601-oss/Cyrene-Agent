@@ -164,6 +164,22 @@
                 <div class="inspector-status-row"><span class="inspector-status-icon">叶</span><div><strong>当前心情</strong><span id="inspector-runtime-feeling">平静</span></div><span class="inspector-status-pill">温柔</span></div>
                 <div class="inspector-status-row"><span class="inspector-status-icon">AI</span><div><strong>正在使用</strong><span id="inspector-status-model">模型未连接</span></div><span class="inspector-status-pill" id="inspector-status-model-pill">离线</span></div>
               </section>
+              <section class="inspector-card inspector-observation-card">
+                <div class="inspector-card__head"><span>屏幕观察</span><span class="inspector-status-pill" id="inspector-observation-pill">读取中</span></div>
+                <p class="inspector-observation-summary" id="inspector-observation-summary">尚无屏幕观察摘要</p>
+                <div class="inspector-observation-meta">
+                  <span><strong id="inspector-observation-time">--</strong>最近观察</span>
+                  <span><strong id="inspector-observation-calls">0</strong>自动识别</span>
+                  <span><strong id="inspector-observation-skips">0</strong>跳过静态画面</span>
+                </div>
+                <div class="inspector-observation-note" id="inspector-observation-note">正在读取观察状态</div>
+                <div class="inspector-observation-actions">
+                  <button type="button" data-observation-pause="10m" title="暂停屏幕观察 10 分钟">10 分钟</button>
+                  <button type="button" data-observation-pause="1h" title="暂停屏幕观察 1 小时">1 小时</button>
+                  <button type="button" data-observation-pause="restart" title="暂停到 Cyrene 下次启动">至重启</button>
+                  <button type="button" id="inspector-observation-resume" title="立即恢复屏幕观察">恢复</button>
+                </div>
+              </section>
               <section class="inspector-card">
                 <div class="inspector-card__head"><span>陪伴操作</span></div>
                 <div class="inspector-actions"><button type="button" data-inspector-action="call"><span>☎</span>语音通话</button><button type="button" data-shell-action="api"><span>↔</span>切换模型</button><button type="button" data-shell-action="cyrene"><span>✿</span>角色设置</button><button type="button" data-shell-action="settings"><span>⚙</span>全部设置</button></div>

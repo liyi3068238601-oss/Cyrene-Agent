@@ -43,7 +43,7 @@ export class MemoryManager {
     await memoryStore.upsertL0Field("permanentNote", updated)
   }
 
-  async writeMemory(candidates: MemoryCandidate[]): Promise<void> {
+  async writeMemory(candidates: MemoryCandidate[], conversationId = "default"): Promise<void> {
     for (const candidate of candidates) {
       if (shouldSkipCandidate(candidate)) {
         console.log("[MemoryManager] 候选标记为不写入或存在过度概括，跳过")
@@ -86,16 +86,16 @@ export class MemoryManager {
         await memoryStore.replaceL1Field(field, candidate.content)
         console.log(`[MemoryManager] L1 更新字段: ${field}`)
       } else if (candidate.layer === "L2") {
-        await this.writeL2(candidate)
+        await this.writeL2(candidate, conversationId)
       }
     }
   }
 
-  private async writeL2(candidate: MemoryCandidate): Promise<void> {
+  private async writeL2(candidate: MemoryCandidate, conversationId: string): Promise<void> {
     const l2Input: Omit<L2Memory, "id" | "createdAt" | "lastAccessedAt" | "accessCount" | "weight" | "status"> = {
       content: candidate.content,
       triggerText: candidate.triggerText,
-      sourceConversationId: "",
+      sourceConversationId: conversationId,
       embedding: [],
       isPinned: false,
       syncStatus: "pending_sync",
@@ -109,6 +109,7 @@ export class MemoryManager {
         triggerText: candidate.triggerText,
         confidence: candidate.confidence,
         l2Id: l2.id,
+        sessionId: conversationId,
       })
       await memoryStore.markL2SyncStatus(l2.id, "synced", ragId)
     } catch (err) {

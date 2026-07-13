@@ -18,7 +18,8 @@ export async function captureScreen(): Promise<ScreenshotResult | null> {
     thumbnailSize: { width, height },
   });
   if (sources.length === 0) return null;
-  const thumb = sources[0].thumbnail;
+  const primarySource = sources.find((source) => source.display_id === String(display.id));
+  const thumb = (primarySource ?? sources[0]).thumbnail;
   const size = thumb.getSize();
   const png = thumb.toPNG();
   return {

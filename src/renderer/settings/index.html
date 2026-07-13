@@ -945,7 +945,7 @@
               </div>
               <div class="form-row form-row--inline">
                 <span class="switch"><input id="channels-tool-sandbox" type="checkbox" /><span class="switch__track"><span class="switch__thumb"></span></span></span>
-                <span class="form-row__label">工具沙箱: 仅 safe 类 (禁用文件/shell 工具)</span>
+                <span class="form-row__label">其他外部渠道工具沙箱（QQ 始终为纯聊天）</span>
               </div>
             </div>
           </div>
@@ -961,6 +961,25 @@
           </div>
 
           <div class="plugin-list">
+            <article class="plugin-card" id="plugin-screen-observation-card">
+              <div class="plugin-card__icon">👁</div>
+              <div class="plugin-card__body">
+                <h2>屏幕观察</h2>
+                <p>让昔涟定期了解主屏幕正在进行的事情。仅在画面明显变化时调用视觉模型，原始截图不写入磁盘。</p>
+                <div class="plugin-config" id="plugin-screen-observation-config">
+                  <div class="tts-field">
+                    <label for="screen-observation-interval">检查间隔（分钟）</label>
+                    <input id="screen-observation-interval" type="number" min="1" max="60" step="1" value="5" />
+                  </div>
+                  <p class="user-field-hint">截图会发送给已配置的视觉模型。系统只缓存最多 30 分钟的文字摘要；锁屏或休眠时自动暂停，登录、支付、密码和私聊内容要求视觉模型省略细节。</p>
+                </div>
+              </div>
+              <label class="plugin-switch" aria-label="启用屏幕观察">
+                <input type="checkbox" id="plugin-screen-observation-enabled" />
+                <span></span>
+              </label>
+            </article>
+
             <article class="plugin-card">
               <div class="plugin-card__icon">📚</div>
               <div class="plugin-card__body">
@@ -1618,6 +1637,16 @@
                 </button>
               </div>
               <button type="button" class="ghost-btn" id="opener-test-fire" style="margin-top: 10px;">🔊 测试气泡</button>
+            </div>
+            <hr class="api-section-divider" />
+            <div class="tts-section">
+              <h2 class="tts-section__title">聊天窗口主动消息</h2>
+              <p class="tts-hint">一段时间没有聊天后，昔涟会结合时间、系统空闲、当前心情和主会话上下文主动发起对话。消息固定进入不可删除的主会话，23:00–08:00 不打扰。</p>
+              <label class="form-row"><span class="form-row__label">启用主动消息</span><input id="proactive-chat-enabled" type="checkbox" /></label>
+              <div class="form-grid">
+                <label class="field"><span>无聊天时长（分钟）</span><input id="proactive-chat-idle-minutes" type="number" min="5" max="1440" step="5" value="30" /></label>
+                <label class="field"><span>消息冷却（分钟）</span><input id="proactive-chat-cooldown-minutes" type="number" min="15" max="10080" step="15" value="180" /></label>
+              </div>
             </div>
           </div>
         </section>

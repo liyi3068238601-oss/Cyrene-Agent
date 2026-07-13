@@ -40,7 +40,7 @@ export type BuildOptionsFn = (input: AguiRunInput) => Promise<{
 }>;
 
 /** 调用方注入：agent 跑完后的副作用（记忆/sticker/表情/广播）。 */
-export type OnRunFinishedFn = (result: CyreneRunResult, latestUserText: string) => Promise<void> | void;
+export type OnRunFinishedFn = (result: CyreneRunResult, latestUserText: string, sessionId: string) => Promise<void> | void;
 
 /** 调用方注入：拿聊天窗口（广播副作用用，可空）。 */
 export type GetChatWindowFn = () => { webContents: WebContents; isDestroyed(): boolean } | null;
@@ -122,7 +122,7 @@ export function registerAgUiIpc(
         activeRuns.delete(runId);
         try {
           if (agent.lastResult) {
-            await onFinished(agent.lastResult, latestUserText);
+            await onFinished(agent.lastResult, latestUserText, input.sessionId || "default");
             // 历史召回用：把这轮对话存入向量库（异步，不阻塞，失败不影响主流程）
             // 放在 onFinished 之后，确保记忆/sticker 等副作用先跑完
             void indexConversationTurn(

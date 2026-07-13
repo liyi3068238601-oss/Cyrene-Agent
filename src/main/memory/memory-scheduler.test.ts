@@ -85,7 +85,7 @@ describe("MemoryScheduler", () => {
     for (let i = 1; i <= 6; i++) {
       scheduler.scheduleMemoryWrite(`user ${i}`, `assistant ${i}`)
     }
-    await vi.waitFor(() => expect(deps.writeMemory).toHaveBeenCalledWith([candidate]))
+    await vi.waitFor(() => expect(deps.writeMemory).toHaveBeenCalledWith([candidate], "default"))
 
     const turns = vi.mocked(deps.judgeMemory).mock.calls[0][0]
     expect(turns.map((turn: MemoryJudgeTurn) => turn.userInput)).toEqual([
@@ -97,6 +97,23 @@ describe("MemoryScheduler", () => {
       "user 6",
     ])
     expect(deps.replaceL1Field).toHaveBeenCalledWith("roundCount", 6)
+  })
+
+  it("counts and judges each conversation independently", async () => {
+    const { scheduler, deps } = createScheduler()
+
+    for (let i = 1; i <= 5; i++) {
+      scheduler.scheduleMemoryWrite(`a${i}`, `reply a${i}`, "branch-a")
+      scheduler.scheduleMemoryWrite(`b${i}`, `reply b${i}`, "branch-b")
+    }
+    scheduler.scheduleMemoryWrite("a6", "reply a6", "branch-a")
+
+    await vi.waitFor(() => expect(deps.judgeMemory).toHaveBeenCalledTimes(1))
+    expect(deps.judgeMemory).toHaveBeenCalledWith(
+      expect.arrayContaining([expect.objectContaining({ userInput: "a1" }), expect.objectContaining({ userInput: "a6" })]),
+      "branch-a",
+    )
+    expect(vi.mocked(deps.judgeMemory).mock.calls[0][0].some((turn) => turn.userInput.startsWith("b"))).toBe(false)
   })
 
   it("uses an overlapping 8-turn window on later MemoryJudge runs", async () => {

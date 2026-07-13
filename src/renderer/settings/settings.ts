@@ -1097,6 +1097,36 @@ stickerAddConfirm.addEventListener("click", async () => {
 // 天气查询/联网搜索有独立配置卡片（下方）。
 
 // ── 天气插件（Open-Meteo / 高德天气）──
+const screenObservationEnabled = document.getElementById("plugin-screen-observation-enabled") as HTMLInputElement | null;
+const screenObservationConfig = document.getElementById("plugin-screen-observation-config") as HTMLElement | null;
+const screenObservationInterval = document.getElementById("screen-observation-interval") as HTMLInputElement | null;
+
+function syncScreenObservationVisibility(): void {
+  if (screenObservationConfig) screenObservationConfig.style.display = screenObservationEnabled?.checked ? "block" : "none";
+}
+
+screenObservationEnabled?.addEventListener("change", () => {
+  syncScreenObservationVisibility();
+  void saveWeatherField("screenObservationEnabled", screenObservationEnabled.checked);
+});
+screenObservationInterval?.addEventListener("change", () => {
+  const minutes = Math.max(1, Math.min(60, Number(screenObservationInterval.value) || 5));
+  screenObservationInterval.value = String(minutes);
+  void saveWeatherField("screenObservationIntervalMinutes", minutes);
+});
+
+async function loadScreenObservationConfig(): Promise<void> {
+  try {
+    const config = await window.tts?.loadSettings();
+    if (screenObservationEnabled) screenObservationEnabled.checked = Boolean(config?.screenObservationEnabled);
+    if (screenObservationInterval) screenObservationInterval.value = String(config?.screenObservationIntervalMinutes ?? 5);
+    syncScreenObservationVisibility();
+  } catch (error) {
+    console.warn("[plugins] 加载屏幕观察配置失败", error);
+  }
+}
+void loadScreenObservationConfig();
+
 const weatherEnabledCheckbox = document.getElementById("plugin-weather-enabled") as HTMLInputElement | null;
 const weatherConfig = document.getElementById("plugin-weather-config") as HTMLElement | null;
 const weatherSourceSelect = document.getElementById("weather-source") as HTMLSelectElement | null;
@@ -3610,7 +3640,7 @@ function buildChatSessionItem(session: ChatSessionMetaUI): HTMLLIElement {
 
   const titleEl = document.createElement("div");
   titleEl.className = "chat-sessions__title";
-  titleEl.textContent = session.title || "新对话";
+  titleEl.textContent = session.isMain ? "主会话 · 主动消息" : session.title || "新对话";
 
   const metaEl = document.createElement("div");
   metaEl.className = "chat-sessions__meta";
@@ -3640,6 +3670,7 @@ function buildChatSessionItem(session: ChatSessionMetaUI): HTMLLIElement {
   deleteBtn.title = "删除会话";
   deleteBtn.setAttribute("aria-label", "删除会话");
   deleteBtn.textContent = "🗑️";
+  if(session.isMain){deleteBtn.disabled=true;deleteBtn.title="主会话可以清空，但不能删除";deleteBtn.setAttribute("aria-label","主会话不可删除")}
 
   const renameBtn = document.createElement("button");
   renameBtn.type = "button";
@@ -3647,6 +3678,7 @@ function buildChatSessionItem(session: ChatSessionMetaUI): HTMLLIElement {
   renameBtn.title = "重命名";
   renameBtn.setAttribute("aria-label", "重命名会话");
   renameBtn.textContent = "✏️";
+  if(session.isMain){renameBtn.disabled=true;renameBtn.title="主会话名称固定"}
 
   // 编辑态确认/取消按钮（默认隐藏，进入编辑态时显示，替换 ✏️/🗑️ 的位置）
   const confirmRenameBtn = document.createElement("button");
@@ -3787,6 +3819,7 @@ function enterRenameMode(
 }
 
 async function deleteChatSession(session: ChatSessionMetaUI): Promise<void> {
+  if(session.isMain)return;
   const isActive = session.id === chatSessionsActiveId;
   const prompt = isActive
     ? `「${session.title || "新对话"}」正在聊天窗口里打开，确定删除？\n删除后聊天窗口会跳到最新一条会话或自动新建。`
@@ -4278,6 +4311,9 @@ async function loadTtsConfig(): Promise<void> {
     btn.classList.toggle("is-active", isActive);
     btn.setAttribute("aria-checked", isActive ? "true" : "false");
   });
+  ttsEl("proactive-chat-enabled").checked=Boolean(ttsConfig.proactiveChatEnabled);
+  ttsEl("proactive-chat-idle-minutes").value=String(ttsConfig.proactiveChatIdleMinutes??30);
+  ttsEl("proactive-chat-cooldown-minutes").value=String(ttsConfig.proactiveChatCooldownMinutes??180);
 }
 
 function updateTtsSliderLabels(): void {
@@ -4354,6 +4390,9 @@ document.getElementById("opener-test-fire")?.addEventListener("click", () => {
   const win = window as unknown as { openerBridge?: { testFire?: () => Promise<void> } };
   void win.openerBridge?.testFire?.();
 });
+ttsEl("proactive-chat-enabled").addEventListener("change",()=>void saveTtsField("proactiveChatEnabled",ttsEl("proactive-chat-enabled").checked));
+ttsEl("proactive-chat-idle-minutes").addEventListener("change",()=>void saveTtsField("proactiveChatIdleMinutes",Number(ttsEl("proactive-chat-idle-minutes").value)||30));
+ttsEl("proactive-chat-cooldown-minutes").addEventListener("change",()=>void saveTtsField("proactiveChatCooldownMinutes",Number(ttsEl("proactive-chat-cooldown-minutes").value)||180));
 
 // 自动朗读开关
 ttsEl("tts-auto-read").addEventListener("change", () => {

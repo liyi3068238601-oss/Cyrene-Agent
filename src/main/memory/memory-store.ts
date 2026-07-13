@@ -4,7 +4,8 @@ import { app } from "electron"
 import { ConflictLog, L0Profile, L1Profile, L2Memory, L2SyncStatus, MemoryConflictResolution, MemoryEvidence, MemoryStore, ReflectionLog } from "./memory-types"
 import { appendMemoryTrace } from "./memory-trace"
 
-const CURRENT_SCHEMA_VERSION = 2
+const CURRENT_SCHEMA_VERSION = 3
+const DEFAULT_L2_WEIGHT = 30
 const QUOTE_SNIPPET_MAX = 300
 const RESOLVER_PRIORITY_RANK: Record<string, number> = {
   high: 3,
@@ -83,6 +84,9 @@ export function repairMigrations(store: Partial<MemoryStore>): MemoryStore {
     l1: { ...DEFAULT_L1, ...store.l1 },
     l2: Array.isArray(store.l2) ? store.l2.map((memory) => ({
       ...memory,
+      weight: memory.status === "active" && (!Number.isFinite(memory.weight) || memory.weight <= 0)
+        ? DEFAULT_L2_WEIGHT
+        : memory.weight,
       syncStatus: memory.syncStatus ?? (memory.ragId ? "synced" : "pending_sync"),
       evidenceIds: Array.isArray(memory.evidenceIds) ? memory.evidenceIds : [],
     })) : [],
@@ -210,7 +214,7 @@ class MemoryStoreManager {
       createdAt: Date.now(),
       lastAccessedAt: Date.now(),
       accessCount: 0,
-      weight: 0,
+      weight: DEFAULT_L2_WEIGHT,
       status: "active",
       syncStatus: input.syncStatus ?? (input.ragId ? "synced" : "pending_sync"),
       evidenceIds: Array.isArray(input.evidenceIds) ? input.evidenceIds : [],
@@ -655,6 +659,34 @@ class MemoryStoreManager {
       layer: "L2",
       status: changed > 0 ? "ok" : "skip",
       details: { delta, changed },
+    })
+    return changed
+  }
+
+  async decayInactiveL2Weights(now = Date.now(), graceDays = 7): Promise<number> {
+    const store = await this.load()
+    const dayMs = 24 * 60 * 60 * 1000
+    let changed = 0
+
+    for (const mem of store.l2) {
+      if (mem.isPinned || mem.status === "archived" || mem.status === "superseded" || mem.status === "merged") continue
+      const inactiveDays = Math.floor(Math.max(0, now - mem.lastAccessedAt) / dayMs)
+      const decay = Math.max(0, inactiveDays - graceDays)
+      if (decay <= 0) continue
+
+      const nextWeight = Math.max(0, DEFAULT_L2_WEIGHT - decay)
+      if (nextWeight >= mem.weight) continue
+      mem.weight = nextWeight
+      mem.status = nextWeight >= 10 ? (nextWeight >= 30 ? "active" : "aging") : "archived"
+      changed += 1
+    }
+
+    if (changed > 0) await this.save(store)
+    appendMemoryTrace({
+      op: "l2.inactiveDecay",
+      layer: "L2",
+      status: changed > 0 ? "ok" : "skip",
+      details: { changed, graceDays },
     })
     return changed
   }

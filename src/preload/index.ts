@@ -44,6 +44,10 @@ const chatApi = {
   },
   onStreamChunk: (cb: (chunk: string) => void) => { ipcRenderer.on(IPC.CHAT_STREAM_CHUNK, (_e: unknown, chunk: string) => cb(chunk)); },
   onStreamDone: (cb: (payload: unknown) => void) => { ipcRenderer.on(IPC.CHAT_STREAM_DONE, (_e: unknown, payload: unknown) => cb(payload)); },
+  onProactiveMessage: (cb:(payload:unknown)=>void) => { const listener=(_e:unknown,payload:unknown)=>cb(payload);ipcRenderer.on(IPC.CHAT_PROACTIVE_MESSAGE,listener);return()=>ipcRenderer.off(IPC.CHAT_PROACTIVE_MESSAGE,listener); },
+  getScreenObservationStatus: () => ipcRenderer.invoke(IPC.SCREEN_OBSERVATION_GET_STATUS),
+  pauseScreenObservation: (mode: "10m" | "1h" | "restart") => ipcRenderer.invoke(IPC.SCREEN_OBSERVATION_PAUSE, mode),
+  resumeScreenObservation: () => ipcRenderer.invoke(IPC.SCREEN_OBSERVATION_RESUME),
   removeStreamListeners: () => { ipcRenderer.removeAllListeners(IPC.CHAT_STREAM_CHUNK); ipcRenderer.removeAllListeners(IPC.CHAT_STREAM_DONE); },
 };
 
@@ -60,7 +64,7 @@ const novelaiApi = {
   models: (config?: unknown) => ipcRenderer.invoke(IPC.NOVELAI_MODELS, config),
   capabilities: (kind: string) => ipcRenderer.invoke(IPC.NOVELAI_CAPABILITIES, kind),
   generate: (input: unknown) => ipcRenderer.invoke(IPC.NOVELAI_GENERATE, input),
-  history: () => ipcRenderer.invoke(IPC.NOVELAI_HISTORY),
+  history: (offset=0, limit=40) => ipcRenderer.invoke(IPC.NOVELAI_HISTORY,offset,limit),
   image: (id: string) => ipcRenderer.invoke(IPC.NOVELAI_GET_IMAGE, id),
   openOutput: () => ipcRenderer.invoke(IPC.NOVELAI_OPEN_OUTPUT),
   pickImage: () => ipcRenderer.invoke(IPC.NOVELAI_PICK_IMAGE),

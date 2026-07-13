@@ -25,6 +25,7 @@ import {
 const ROOT_DIR_NAME = "cyrene-chats";
 const SESSIONS_SUBDIR = "sessions";
 const INDEX_FILE = "index.json";
+export const MAIN_SESSION_ID = "main";
 
 let rootDir = "";
 let sessionsDir = "";
@@ -68,7 +69,7 @@ function readIndexFromDisk(): ChatSessionMeta[] {
 
 function persistIndex(): void {
   // 排序按 updatedAt desc，最近的对话排前面
-  indexCache.sort((a, b) => b.updatedAt - a.updatedAt);
+  indexCache.sort((a, b) => Number(Boolean(b.isMain)) - Number(Boolean(a.isMain)) || b.updatedAt - a.updatedAt);
   atomicWriteJson(indexPath, indexCache);
 }
 
@@ -104,6 +105,7 @@ function metaFromSession(session: ChatSession): ChatSessionMeta {
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
     messageCount: session.messages.length,
+    isMain: session.isMain === true,
   };
 }
 
@@ -169,7 +171,14 @@ export function initialize(): void {
   ensureDirs();
   indexCache = readIndexFromDisk();
   cleanupStickerOnlySessions();
+  ensureMainSession();
   initialized = true;
+}
+
+function ensureMainSession():ChatSession{
+  const existing=readSessionFile(MAIN_SESSION_ID);
+  if(existing){existing.isMain=true;existing.title="主会话";existing.titleIsCustom=true;writeSessionFile(existing);upsertMeta(metaFromSession(existing));return existing}
+  const now=Date.now();const session:ChatSession={id:MAIN_SESSION_ID,title:"主会话",identityId:null,messages:[],createdAt:now,updatedAt:now,schemaVersion:CHAT_SCHEMA_VERSION,titleIsCustom:true,isMain:true};writeSessionFile(session);upsertMeta(metaFromSession(session));return session;
 }
 
 export function getRootDir(): string {
@@ -213,7 +222,8 @@ export function appendMessage(id: string, message: ChatMessage): ChatSession | n
   session.messages.push(message);
   session.updatedAt = Date.now();
   // 用户没手动改名时，根据最新内容重新派生（清空后也会回到"新对话"）
-  if (!session.titleIsCustom) {
+  if (session.isMain) session.title="主会话";
+  else if (!session.titleIsCustom) {
     session.title = deriveTitle(session.messages);
   }
   writeSessionFile(session);
@@ -228,7 +238,8 @@ export function replaceMessages(id: string, messages: ChatMessage[]): ChatSessio
   if (!session) return null;
   session.messages = messages.filter(isMeaningfulMessage);
   session.updatedAt = Date.now();
-  if (!session.titleIsCustom) {
+  if (session.isMain) session.title="主会话";
+  else if (!session.titleIsCustom) {
     session.title = deriveTitle(session.messages);
   }
   writeSessionFile(session);
@@ -239,6 +250,7 @@ export function replaceMessages(id: string, messages: ChatMessage[]): ChatSessio
 export function renameSession(id: string, title: string): ChatSession | null {
   const session = readSessionFile(id);
   if (!session) return null;
+  if(session.isMain)return session;
   const trimmed = title.trim();
   if (!trimmed) return session;
   session.title = trimmed.slice(0, 80);
@@ -250,6 +262,7 @@ export function renameSession(id: string, title: string): ChatSession | null {
 }
 
 export function deleteSession(id: string): boolean {
+  if(id===MAIN_SESSION_ID)return false;
   const filePath = sessionPath(id);
   let fileExisted = false;
   if (fs.existsSync(filePath)) {

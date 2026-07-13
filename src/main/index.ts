@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, screen, shell, dialog, protocol, net } from "electron";
+import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, screen, shell, dialog, protocol, net, powerMonitor } from "electron";
 import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
@@ -16,7 +16,7 @@ import { buildToneInjection } from "./orchestrator/tone-injector";
 import { getAdapter, buildVendorUrl, getAdapterForConfig, createSseReader } from "./orchestrator/vendors";
 import type { VendorConfig } from "./orchestrator/vendors";
 import { getCapability } from "./orchestrator/vendors/capabilities";
-import type { VisionConfig } from "./orchestrator/vision-captioner";
+import { captionImage, type VisionConfig } from "./orchestrator/vision-captioner";
 import { toolRegistry, type ToolDefinition } from "./orchestrator/tool-registry";
 import type { ToolRiskLevel } from "./permission";
 import { loadChannelsSettings } from "./channels/settings-store";
@@ -53,8 +53,11 @@ import { synthesize as customCloudSynthesize } from "./tts/custom-cloud-engine";
 import { synthesize as mimoSynthesize } from "./tts/mimo-engine";
 import { synthesizeByEngine } from "./tts/tts-dispatcher";
 import { startOpener, stopOpener, setLive2dWindow, reloadManifest, handleBubbleClick, handleChatWindowOpened, testFire } from "./opener/opener-runner";
+import { startProactiveChat, stopProactiveChat } from "./proactive-chat";
+import { MAIN_SESSION_ID, appendMessage as appendChatMessage, getSession as getChatSession } from "./chats/chats-store";
 import { registerAgUiIpc, type AguiRunInput } from "./agui-bridge";
 import { setWeatherConfig, setSearchConfig, loadTodos, onTodosChange, setDelegateSettings } from "./orchestrator/built-in-tools";
+import { setScreenObservationVisionConfigGetter } from "./orchestrator/screen-observation-register";
 import { registerRecallHistoryTool } from "./orchestrator/history-tools";
 import { registerDocumentTools } from "./orchestrator/document-tools";
 import { registerLifeTools, setTranslateConfig } from "./orchestrator/life-tools";
@@ -64,6 +67,9 @@ import { setAsrConfig } from "./asr/volcano-asr-engine";
 import { setCallWindow, registerCallIpc, setCallSettings, stopCall } from "./call/call-manager";
 import { initSkills, skillRegistry, buildSkillCatalog, parseSlashCommand, setSkillEnabled, listSkillsForUi } from "./skills";
 import { initGameBot } from "./game-bot";
+import { captureScreen } from "./game-bot/screenshot";
+import type { ScreenCapture } from "./orchestrator/screen-observation-tool";
+import { buildRecentScreenObservationContext, getScreenObserverStatus, pauseScreenObservation, resumeScreenObservation, startScreenObserver, stopScreenObserver } from "./screen-observer";
 import { initChannels, shutdownChannels } from "./channels/init";
 import { channelManager } from "./channels/manager";
 import { getRecentLog as getRecentChannelLog } from "./channels/message-log";
@@ -93,6 +99,7 @@ let stickerManagerWindow: BrowserWindow | null = null;
 let callWindow: BrowserWindow | null = null;
 let novelAiWindow: BrowserWindow | null = null;
 let schedulerEngine: SchedulerEngine | null = null;
+let screenObservationPaused = false;
 // 聊天窗口当前活跃的会话 id（通过 IPC 由聊天窗口上报）；
 // 设置面板"删除当前会话"差异化提示用。聊天窗口关闭时由 closed 事件置 null。
 let activeChatSessionId: string | null = null;
@@ -449,6 +456,13 @@ interface GeneralSettings {
   asrShowTranscript: boolean;
   /** Opener 主动开口档位 */
   openerMode: "off" | "quiet" | "normal" | "lively";
+  /** 空闲后由 LLM 在主会话发起聊天 */
+  proactiveChatEnabled:boolean;
+  proactiveChatIdleMinutes:number;
+  proactiveChatCooldownMinutes:number;
+  /** 定期观察主屏幕，仅缓存近期文字摘要 */
+  screenObservationEnabled:boolean;
+  screenObservationIntervalMinutes:number;
 }
 
 
@@ -574,6 +588,11 @@ const DEFAULT_GENERAL_SETTINGS: GeneralSettings = {
   asrVadSilenceMs: 1000,
   asrShowTranscript: false,
   openerMode: "off",
+  proactiveChatEnabled:false,
+  proactiveChatIdleMinutes:30,
+  proactiveChatCooldownMinutes:180,
+  screenObservationEnabled:false,
+  screenObservationIntervalMinutes:5,
 };
 
 function getSettingsPath(): string {
@@ -967,6 +986,11 @@ function normalizeGeneralSettings(input: Partial<GeneralSettings> | null | undef
     openerMode: ["off", "quiet", "normal", "lively"].includes(String(input?.openerMode))
       ? (input!.openerMode as "off" | "quiet" | "normal" | "lively")
       : "off",
+    proactiveChatEnabled:Boolean(input?.proactiveChatEnabled),
+    proactiveChatIdleMinutes:typeof input?.proactiveChatIdleMinutes==="number"?Math.max(5,Math.min(1440,Math.round(input.proactiveChatIdleMinutes))):30,
+    proactiveChatCooldownMinutes:typeof input?.proactiveChatCooldownMinutes==="number"?Math.max(15,Math.min(10080,Math.round(input.proactiveChatCooldownMinutes))):180,
+    screenObservationEnabled:Boolean(input?.screenObservationEnabled),
+    screenObservationIntervalMinutes:typeof input?.screenObservationIntervalMinutes==="number"?Math.max(1,Math.min(60,Math.round(input.screenObservationIntervalMinutes))):5,
     ttsGptsovitsBaseUrl: typeof input?.ttsGptsovitsBaseUrl === "string" ? input.ttsGptsovitsBaseUrl : DEFAULT_GENERAL_SETTINGS.ttsGptsovitsBaseUrl,
     ttsGptsovitsRefAudioPath: typeof input?.ttsGptsovitsRefAudioPath === "string" ? input.ttsGptsovitsRefAudioPath : "",
     ttsGptsovitsPromptText: typeof input?.ttsGptsovitsPromptText === "string" ? input.ttsGptsovitsPromptText : "",
@@ -1704,7 +1728,10 @@ async function requestModelReply(inputMessages: unknown, styleFile = "01_default
   // 1.1 自动注入相关记忆（L2 + 导入文档），让模型无需调 tool 也能感知
   let memoryInjection = "";
   try {
-    memoryInjection = await buildMemoryInjection(latestUserText);
+    memoryInjection = await buildMemoryInjection(latestUserText, {
+      sessionId: activeChatSessionId ?? "default",
+      includeAllSessions: activeChatSessionId === MAIN_SESSION_ID,
+    });
   } catch (err) {
     console.warn("[Cyrene] memory injection failed:", err);
   }
@@ -1794,7 +1821,7 @@ async function requestModelReply(inputMessages: unknown, styleFile = "01_default
   }
 
 
-  scheduleMemoryWrite(latestUserText, chatContent);
+  scheduleMemoryWrite(latestUserText, chatContent, activeChatSessionId ?? "default");
 
   const inferredStatus = inferRuntimeState(latestUserText, chatContent, false);
   runtimeState.status = inferredStatus.status;
@@ -2015,6 +2042,9 @@ function createWindow(): void {
     () => loadGeneralSettings().searchTavilyKey,
   );
 
+  // Screen observation reads the latest vision settings for every on-demand capture.
+  setScreenObservationVisionConfigGetter(() => loadVisionConfig());
+
   // 注入出行工具 amapKey 获取器（复用 GeneralSettings 中的 amapKey）
   setTravelConfig(() => loadGeneralSettings().amapKey, () => loadGeneralSettings().travelEnabled);
 
@@ -2077,7 +2107,7 @@ function createWindow(): void {
 
       // ③ 记忆注入
       let memoryInjection = "";
-      try { memoryInjection = await buildMemoryInjection(userText); } catch { /* ignore */ }
+      try { memoryInjection = await buildMemoryInjection(userText, { sessionId: "phone" }); } catch { /* ignore */ }
 
       // ④ 通话专用人设 prompt
       const phoneParts: string[] = [];
@@ -2553,6 +2583,34 @@ function flushPetWindowMove(): void {
   }
 }
 
+async function generateProactiveChatMessage():Promise<void>{
+  const settings=loadModelSettings();if(!settings.apiKey)return;
+  const session=getChatSession(MAIN_SESSION_ID);if(!session)return;
+  const recent=session.messages.slice(-12).map((message)=>({role:message.role==="model"?"assistant" as const:"user" as const,content:message.content}));
+  const now=new Date(),idleSec=powerMonitor.getSystemIdleTime();
+  const recentScreen=loadGeneralSettings().screenObservationEnabled?buildRecentScreenObservationContext():"";
+  const stateText=`当前时间：${now.toLocaleString("zh-CN")}；系统空闲：${Math.round(idleSec/60)} 分钟；当前状态：${runtimeState.status}；当前心情：${runtimeState.feeling}；距离主会话上次更新：${Math.max(0,Math.round((Date.now()-session.updatedAt)/60_000))} 分钟。${recentScreen?`\n${recentScreen}`:""}`;
+  const system=buildSystemPrompt("talk")+"\n\n你正在决定是否主动找用户聊一句。请结合当前状态和最近对话，自然发起一条简短消息。保持昔涟人设，1到3句话，不要提及系统、空闲检测、定时器或这段指令，不要声称执行了任何任务，不调用工具。如果最近话题适合延续就轻轻接续，否则自然关心或分享一句。只输出要发送的消息。";
+  const reply=(await enqueueLLMTask("主会话主动消息",()=>callChatCompletions(settings,[{role:"system",content:system},...recent,{role:"user",content:`[内部状态，仅用于决定主动开场]\n${stateText}`}],0.8,90_000,"主动聊天"))).trim();
+  if(!reply)return;
+  const message={id:`proactive-${Date.now()}`,role:"model" as const,content:reply,at:Date.now()};appendChatMessage(MAIN_SESSION_ID,message);
+  if(chatWindow&&!chatWindow.isDestroyed()&&activeChatSessionId===MAIN_SESSION_ID){chatWindow.webContents.send(IPC.CHAT_PROACTIVE_MESSAGE,{sessionId:MAIN_SESSION_ID,message});chatWindow.show();}
+  else createChatWindow(MAIN_SESSION_ID);
+}
+
+function createScreenFingerprint(capture: ScreenCapture): Uint8Array {
+  const image = nativeImage
+    .createFromBuffer(Buffer.from(capture.base64, "base64"))
+    .resize({ width: 8, height: 8, quality: "good" });
+  const bitmap = image.toBitmap();
+  const luminance: number[] = [];
+  for (let offset = 0; offset + 3 < bitmap.length; offset += 4) {
+    luminance.push(Math.round(bitmap[offset] * 0.114 + bitmap[offset + 1] * 0.587 + bitmap[offset + 2] * 0.299));
+  }
+  const average = luminance.reduce((sum, value) => sum + value, 0) / Math.max(1, luminance.length);
+  return Uint8Array.from(luminance.map((value) => value >= average ? 1 : 0));
+}
+
 function createNovelAiWindow(): void {
   if (novelAiWindow && !novelAiWindow.isDestroyed()) {
     novelAiWindow.show();
@@ -2722,6 +2780,29 @@ ipcMain.handle(IPC.CHAT_INGEST_FILES, async (_event, paths: unknown) => {
     console.error("[Cyrene] ingestFiles ERROR:", err?.message || err);
     return [];
   }
+});
+function getScreenObservationUiStatus() {
+  const settings = loadGeneralSettings();
+  const status = getScreenObserverStatus();
+  if (!settings.screenObservationEnabled) {
+    return { ...status, enabled: false, phase: "disabled" as const, lastOutcome: "请先在设置的插件页启用屏幕观察" };
+  }
+  if (status.phase === "disabled") {
+    return { ...status, enabled: true, phase: "waiting" as const, lastOutcome: "等待下次屏幕检查" };
+  }
+  return { ...status, enabled: true };
+}
+
+ipcMain.handle(IPC.SCREEN_OBSERVATION_GET_STATUS, () => getScreenObservationUiStatus());
+ipcMain.handle(IPC.SCREEN_OBSERVATION_PAUSE, (_event, mode: unknown) => {
+  if (mode === "10m") pauseScreenObservation(10 * 60_000);
+  else if (mode === "1h") pauseScreenObservation(60 * 60_000);
+  else if (mode === "restart") pauseScreenObservation(null);
+  return getScreenObservationUiStatus();
+});
+ipcMain.handle(IPC.SCREEN_OBSERVATION_RESUME, () => {
+  resumeScreenObservation();
+  return getScreenObservationUiStatus();
 });
 ipcMain.on(IPC.SIDEBAR_MINIMIZE, () => {
   sidebarWindow?.minimize();
@@ -3732,9 +3813,11 @@ app.whenReady().then(async () => {
     // Phase 3.3：按 toolSandbox 过滤可用工具
     const sandbox = loadChannelsSettings().toolSandbox;
     const allTools = toolRegistry.getEnabledTools();
-    const filteredTools: ToolDefinition[] = sandbox === "safe-only"
-      ? allTools.filter((t) => (t.risk ?? "safe") === ("safe" as ToolRiskLevel))
-      : allTools;
+    const filteredTools: ToolDefinition[] = msg.channel === "qq"
+      ? []
+      : sandbox === "safe-only"
+        ? allTools.filter((t) => (t.risk ?? "safe") === ("safe" as ToolRiskLevel))
+        : allTools;
     console.log(
       "[Channels] bot run:",
       `msg.channel=${msg.channel} sandbox=${sandbox} tools=${filteredTools.length}/${allTools.length} priorMsgs=${priorMessages?.length ?? 0}`,
@@ -3759,6 +3842,9 @@ app.whenReady().then(async () => {
     const { options } = await buildAgentRunOptions(
       {
         messages: [
+          ...(msg.channel === "qq"
+            ? [{ role: "system" as const, content: "QQ 是纯聊天渠道。只能进行自然对话，不得调用工具、执行任务、操作文件或系统，也不要声称已经替用户完成这些操作。若用户提出执行性请求，请说明需要在桌面端进行。" }]
+            : []),
           ...(isQqOwner
             ? [{ role: "system" as const, content: "当前 QQ 消息来自设置中配置的主人。可以按主人关系自然回应，但仍需遵守权限与安全确认规则。" }]
             : []),
@@ -3789,7 +3875,7 @@ app.whenReady().then(async () => {
       });
     });
     if (agent.lastResult) {
-      await onAgentRunFinished(agent.lastResult, msg.text, onRunFinishedDeps, msg.channel);
+      await onAgentRunFinished(agent.lastResult, msg.text, onRunFinishedDeps, msg.channel, sessionId);
     }
     // 落历史
     void indexConversationTurn(sessionId, msg.text, reply);
@@ -3946,8 +4032,12 @@ app.whenReady().then(async () => {
     getSceneEmbeddingProvider: () => getSceneEmbeddingProvider() as unknown,
     buildAlwaysOnContext: (async (userText, messages) =>
       buildAlwaysOnContext(userText, messages as any)) as BuildOptionsDeps["buildAlwaysOnContext"],
+    buildMemoryInjection,
     buildRelationshipContext,
     buildExternalChannelContext,
+    buildScreenObservationContext: () => loadGeneralSettings().screenObservationEnabled
+      ? buildRecentScreenObservationContext()
+      : "",
     buildSystemPrompt,
     logWorldbookInjection,
     normalizeChatMessages: ((raw: ReadonlyArray<unknown>) =>
@@ -4019,7 +4109,7 @@ app.whenReady().then(async () => {
   }
   registerAgUiIpc(
     async (input: AguiRunInput) => buildAgentRunOptions(input, buildOptionsDeps),
-    async (result, latestUserText) => onAgentRunFinished(result, latestUserText, onRunFinishedDeps),
+    async (result, latestUserText, sessionId) => onAgentRunFinished(result, latestUserText, onRunFinishedDeps, undefined, sessionId),
     () => chatWindow,
   );
 
@@ -4097,6 +4187,33 @@ app.whenReady().then(async () => {
   }
 
   schedulerEngine.start();
+  void memoryStore.decayInactiveL2Weights().catch((err) => {
+    console.warn("[Memory] inactive decay failed:", err);
+  });
+  startProactiveChat(
+    ()=>{const settings=loadGeneralSettings();return{enabled:settings.proactiveChatEnabled,idleMinutes:settings.proactiveChatIdleMinutes,cooldownMinutes:settings.proactiveChatCooldownMinutes}},
+    ()=>getChatSession(MAIN_SESSION_ID)?.updatedAt??Date.now(),
+    generateProactiveChatMessage,
+  );
+  powerMonitor.on("lock-screen", () => { screenObservationPaused = true; });
+  powerMonitor.on("unlock-screen", () => { screenObservationPaused = false; });
+  powerMonitor.on("suspend", () => { screenObservationPaused = true; });
+  powerMonitor.on("resume", () => { screenObservationPaused = false; });
+  startScreenObserver(
+    () => {
+      const settings = loadGeneralSettings();
+      return {
+        enabled: settings.screenObservationEnabled && !screenObservationPaused,
+        intervalMinutes: settings.screenObservationIntervalMinutes,
+      };
+    },
+    {
+      captureScreen,
+      getVisionConfig: loadVisionConfig,
+      analyzeImage: captionImage,
+      createFingerprint: createScreenFingerprint,
+    },
+  );
 });
 
 app.on("window-all-closed", () => {});
@@ -4104,6 +4221,8 @@ app.on("window-all-closed", () => {});
 // 应用退出前把 token 用量缓存落盘（防抖未触发的最后一次写）
 app.on("before-quit", () => {
   schedulerEngine?.stop();
+  stopScreenObserver();
+  stopProactiveChat();
   stopOpener();
   flushTokenUsage();
   void shutdownChannels();

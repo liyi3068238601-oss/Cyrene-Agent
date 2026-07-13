@@ -75,6 +75,19 @@ interface InspectorRuntimeState {
   feeling: string;
 }
 
+interface ScreenObservationStatus {
+  phase: "disabled" | "waiting" | "observing" | "paused" | "unconfigured" | "error";
+  enabled: boolean;
+  pauseUntil: number | null;
+  pausedUntilRestart: boolean;
+  lastCheckAt: number | null;
+  lastObservationAt: number | null;
+  summary: string;
+  unchangedSkips: number;
+  visionCalls: number;
+  lastOutcome: string;
+}
+
 interface ModelConfigApi {
   get: () => Promise<ModelConfig>;
   onChanged: (callback: (config: ModelConfig) => void) => () => void;
@@ -88,6 +101,10 @@ interface ChatApi {
     sendMessage: (messages: Array<{ role: "user" | "model"; content: string }>, style: string) => Promise<ChatReplyPayload>;
     ingestDroppedFiles: (files: File[]) => Promise<Attachment[]>;
     getEnabledStickers?: () => Promise<Array<{ id: string; src: string; description?: string }>>;
+    onProactiveMessage?: (callback:(payload:{sessionId:string;message:Message})=>void)=>()=>void;
+    getScreenObservationStatus?: () => Promise<ScreenObservationStatus>;
+    pauseScreenObservation?: (mode: "10m" | "1h" | "restart") => Promise<ScreenObservationStatus>;
+    resumeScreenObservation?: () => Promise<ScreenObservationStatus>;
   }
 
 /** AG-UI 事件流 API（window.agui）。 */
@@ -221,6 +238,13 @@ const inspectorRuntimeStatusEl = document.getElementById("inspector-runtime-stat
 const inspectorRuntimeFeelingEl = document.getElementById("inspector-runtime-feeling") as HTMLElement | null;
 const inspectorStatusModelEl = document.getElementById("inspector-status-model") as HTMLElement | null;
 const inspectorStatusModelPillEl = document.getElementById("inspector-status-model-pill") as HTMLElement | null;
+const inspectorObservationPillEl = document.getElementById("inspector-observation-pill") as HTMLElement | null;
+const inspectorObservationSummaryEl = document.getElementById("inspector-observation-summary") as HTMLElement | null;
+const inspectorObservationTimeEl = document.getElementById("inspector-observation-time") as HTMLElement | null;
+const inspectorObservationCallsEl = document.getElementById("inspector-observation-calls") as HTMLElement | null;
+const inspectorObservationSkipsEl = document.getElementById("inspector-observation-skips") as HTMLElement | null;
+const inspectorObservationNoteEl = document.getElementById("inspector-observation-note") as HTMLElement | null;
+const inspectorObservationResumeBtn = document.getElementById("inspector-observation-resume") as HTMLButtonElement | null;
 
 // 旧版 localStorage key——首次启动时检测到老数据会迁移到主进程 chats 存储再清掉。
 const LEGACY_STORAGE_KEY = "cyrene.chat.history.v1";
@@ -320,6 +344,7 @@ function getStickerSrc(id: string): string | undefined {
 // 启动期间 currentSessionId 为 null，发送按钮通过 sending 标志兜底（bootstrap 极快）。
 const messages: Message[] = [];
 let currentSessionId: string | null = null;
+window.chat?.onProactiveMessage?.((payload)=>{if(payload.sessionId!==currentSessionId||messages.some((message)=>message.id===payload.message.id))return;messages.push(payload.message);render();void saveSession()});
 let currentModelConfig: ModelConfig | null = null;
 
 function formatModelHint(config: ModelConfig | null): string {
@@ -610,11 +635,59 @@ function applyInspectorRuntimeState(state: InspectorRuntimeState | null): void {
   if (inspectorProfileSummaryEl) inspectorProfileSummaryEl.textContent = `${status} · 心情${feeling}`;
 }
 
+function formatObservationTime(timestamp: number | null): string {
+  if (!timestamp) return "--";
+  const date = new Date(timestamp);
+  const now = new Date();
+  if (date.toDateString() === now.toDateString()) {
+    return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  }
+  return `${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function renderScreenObservationStatus(status: ScreenObservationStatus | null): void {
+  const phaseLabels: Record<ScreenObservationStatus["phase"], string> = {
+    disabled: "未启用",
+    waiting: "观察中",
+    observing: "识别中",
+    paused: "已暂停",
+    unconfigured: "未配置",
+    error: "异常",
+  };
+  const phase = status?.phase ?? "disabled";
+  if (inspectorObservationPillEl) {
+    inspectorObservationPillEl.textContent = phaseLabels[phase];
+    inspectorObservationPillEl.classList.toggle("is-online", phase === "waiting" || phase === "observing");
+    inspectorObservationPillEl.classList.toggle("is-paused", phase === "paused");
+    inspectorObservationPillEl.classList.toggle("is-error", phase === "error" || phase === "unconfigured");
+  }
+  if (inspectorObservationSummaryEl) inspectorObservationSummaryEl.textContent = status?.summary || "尚无屏幕观察摘要";
+  if (inspectorObservationTimeEl) inspectorObservationTimeEl.textContent = formatObservationTime(status?.lastObservationAt ?? null);
+  if (inspectorObservationCallsEl) inspectorObservationCallsEl.textContent = String(status?.visionCalls ?? 0);
+  if (inspectorObservationSkipsEl) inspectorObservationSkipsEl.textContent = String(status?.unchangedSkips ?? 0);
+
+  let note = status?.lastOutcome || "正在读取观察状态";
+  if (status?.phase === "paused") {
+    note = status.pausedUntilRestart
+      ? "已暂停至 Cyrene 下次启动"
+      : status.pauseUntil
+        ? `暂停至 ${new Date(status.pauseUntil).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}`
+        : note;
+  }
+  if (inspectorObservationNoteEl) inspectorObservationNoteEl.textContent = note;
+
+  document.querySelectorAll<HTMLButtonElement>("[data-observation-pause]").forEach((button) => {
+    button.disabled = !status?.enabled || status.phase === "paused";
+  });
+  if (inspectorObservationResumeBtn) inspectorObservationResumeBtn.disabled = status?.phase !== "paused";
+}
+
 async function refreshInspectorData(): Promise<void> {
-  const [tokenResult, taskResult, runtimeResult] = await Promise.allSettled([
+  const [tokenResult, taskResult, runtimeResult, observationResult] = await Promise.allSettled([
     inspectorBridge.tokenUsage?.get(7) ?? Promise.resolve([]),
     inspectorBridge.cyreneScheduler?.list() ?? Promise.resolve({ ok: false }),
     inspectorBridge.runtimeState?.get() ?? Promise.resolve(null),
+    window.chat?.getScreenObservationStatus?.() ?? Promise.resolve(null),
   ]);
   if (tokenResult.status === "fulfilled") renderInspectorTokenUsage(tokenResult.value as TokenDayData[]);
   if (taskResult.status === "fulfilled") {
@@ -622,7 +695,21 @@ async function refreshInspectorData(): Promise<void> {
     renderInspectorTasks(result.ok && Array.isArray(result.value) ? result.value : []);
   }
   if (runtimeResult.status === "fulfilled") applyInspectorRuntimeState(runtimeResult.value as InspectorRuntimeState | null);
+  if (observationResult.status === "fulfilled") renderScreenObservationStatus(observationResult.value as ScreenObservationStatus | null);
 }
+
+document.querySelectorAll<HTMLButtonElement>("[data-observation-pause]").forEach((button) => {
+  button.addEventListener("click", async () => {
+    const mode = button.dataset.observationPause as "10m" | "1h" | "restart";
+    const status = await window.chat?.pauseScreenObservation?.(mode);
+    if (status) renderScreenObservationStatus(status);
+  });
+});
+
+inspectorObservationResumeBtn?.addEventListener("click", async () => {
+  const status = await window.chat?.resumeScreenObservation?.();
+  if (status) renderScreenObservationStatus(status);
+});
 
 document.querySelectorAll<HTMLElement>("[data-inspector-tab]").forEach((tab) => {
   tab.addEventListener("click", () => selectInspectorTab((tab.dataset.inspectorTab || "overview") as "overview" | "schedule" | "status"));
@@ -661,7 +748,7 @@ function buildRailItem(session: ChatSessionMetaUI): HTMLLIElement {
 
   const titleEl = document.createElement("div");
   titleEl.className = "chat__rail-title";
-  titleEl.textContent = session.title || "新对话";
+  titleEl.textContent = session.isMain ? "主会话 · 主动消息" : session.title || "新对话";
 
   const metaEl = document.createElement("div");
   metaEl.className = "chat__rail-meta";
@@ -1129,23 +1216,68 @@ function buildWeatherCardEl(data: Record<string, unknown>): HTMLElement {
 function buildNovelAiImageCard(data: Record<string, unknown>): HTMLElement {
   const card = document.createElement("figure");
   card.className = "novelai-chat-card";
+  const previewButton = document.createElement("button");
+  previewButton.type = "button";
+  previewButton.className = "novelai-chat-card__preview";
+  previewButton.title = "查看原图";
+  previewButton.setAttribute("aria-label", "查看生成图片原图");
   const image = document.createElement("img");
   image.src = String(data.dataUrl || "");
   image.alt = String(data.prompt || "NovelAI 生成图片");
   image.draggable = false;
+  const zoomHint = document.createElement("span");
+  zoomHint.className = "novelai-chat-card__zoom";
+  zoomHint.textContent = "查看原图";
+  previewButton.append(image, zoomHint);
   const caption = document.createElement("figcaption");
-  const promptText = document.createElement("span");
-  promptText.textContent = String(data.prompt || "NovelAI 作品");
-  const meta = document.createElement("small");
-  meta.textContent = `${String(data.model || "NovelAI")} · ${Number(data.width) || "?"} × ${Number(data.height) || "?"}`;
+  const captionText = document.createElement("span");
+  captionText.textContent = "图片";
   const openButton = document.createElement("button");
   openButton.type = "button";
-  openButton.textContent = "在绘图工作台查看";
+  openButton.textContent = "绘图详情";
   openButton.addEventListener("click", () => window.novelai?.open());
-  caption.append(promptText, meta, openButton);
-  card.append(image, caption);
+  caption.append(captionText, openButton);
+  card.append(previewButton, caption);
+  previewButton.addEventListener("click", () => openNovelAiImageLightbox(image.src, image.alt));
   image.addEventListener("load", () => { messagesEl.scrollTop = messagesEl.scrollHeight; });
   return card;
+}
+
+function openNovelAiImageLightbox(src: string, alt: string): void {
+  const overlay = document.createElement("div");
+  overlay.className = "novelai-image-lightbox";
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  overlay.setAttribute("aria-label", "图片原图预览");
+
+  const image = document.createElement("img");
+  image.src = src;
+  image.alt = alt;
+  image.draggable = false;
+
+  const closeButton = document.createElement("button");
+  closeButton.type = "button";
+  closeButton.className = "novelai-image-lightbox__close";
+  closeButton.setAttribute("aria-label", "关闭原图预览");
+  closeButton.title = "关闭";
+  closeButton.textContent = "×";
+
+  const close = (): void => {
+    document.removeEventListener("keydown", onKeyDown);
+    overlay.remove();
+  };
+  const onKeyDown = (event: KeyboardEvent): void => {
+    if (event.key === "Escape") close();
+  };
+
+  closeButton.addEventListener("click", close);
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) close();
+  });
+  document.addEventListener("keydown", onKeyDown);
+  overlay.append(image, closeButton);
+  document.body.appendChild(overlay);
+  closeButton.focus();
 }
 
 function buildStoredNovelAiImageCard(meta: NonNullable<Message["novelAiImage"]>): HTMLElement {

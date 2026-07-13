@@ -49,8 +49,13 @@ export interface BuildOptionsDeps {
     userText: string,
     messages: ReadonlyArray<{ role: string; content?: string }>,
   ) => Promise<string>;
+  buildMemoryInjection: (
+    userText: string,
+    options?: { sessionId?: string; includeAllSessions?: boolean },
+  ) => Promise<string>;
   buildRelationshipContext: () => Promise<string>;
   buildExternalChannelContext?: () => string;
+  buildScreenObservationContext?: () => string;
   buildSystemPrompt: (styleFile: string) => string;
   logWorldbookInjection: (alwaysOnContext: string, systemContent: string) => void;
   normalizeChatMessages: (raw: ReadonlyArray<unknown>) => ChatMessage[];
@@ -60,7 +65,7 @@ export interface BuildOptionsDeps {
 /** onRunFinished 副作用所需的 deps（与 BuildOptionsDeps 部分重叠） */
 export interface OnRunFinishedDeps {
   loadModelSettings: () => ModelSettingsLite;
-  scheduleMemoryWrite: (userText: string, reply: string) => void;
+  scheduleMemoryWrite: (userText: string, reply: string, sessionId?: string) => void;
   inferRuntimeState: (userText: string, reply: string, flag: boolean) => { status: string };
   runtimeState: {
     status: string;
@@ -140,6 +145,7 @@ export function buildChannelSystem(channel?: RelationshipChannel): string {
 
 export function buildMessageRhythmSystem(): string {
   return [
+    "【图片分享方式】当绘图工具已经把图片显示在聊天中时，要像真人发照片一样自然、简短地邀请用户看看。除非用户明确追问技术细节，否则不要提及文件名、保存路径、图片 ID、提示词、模型参数、NovelAI、绘图工作台或工具调用。",
     "【消息节奏】",
     "请根据当前人格、情绪和内容决定消息节奏。自然闲聊中，只有当语气确实像连续发送的两条消息时，才用空行分开。",
     "不要为了分段而分段；一个完整意思尽量放在一起。代码、列表、步骤、任务结果、严肃说明和长篇内容保持结构完整。",
@@ -173,6 +179,17 @@ export async function buildAgentRunOptions(
     console.warn("[Cyrene] always-on context build failed:", err);
   }
 
+  let memoryInjection = "";
+  try {
+    const sessionId = input.sessionId || "default";
+    memoryInjection = await deps.buildMemoryInjection(latestUserText, {
+      sessionId,
+      includeAllSessions: sessionId === "main",
+    });
+  } catch (err) {
+    console.warn("[Cyrene] memory injection failed:", err);
+  }
+
   let relationshipContext = "";
   try {
     relationshipContext = await deps.buildRelationshipContext();
@@ -202,6 +219,8 @@ export async function buildAgentRunOptions(
   const channelSystem = buildChannelSystem(input.channel);
   const messageRhythmSystem = buildMessageRhythmSystem();
   const externalChannelContext = deps.buildExternalChannelContext?.() ?? "";
+  // Screen state is local desktop context and must never leak into QQ/other channels.
+  const screenObservationContext = input.channel ? "" : (deps.buildScreenObservationContext?.() ?? "");
 
   let toneInjection = "";
   if (deps.sceneEmbeddingIndex) {
@@ -228,12 +247,14 @@ export async function buildAgentRunOptions(
   const systemContent =
     (environmentContext ? environmentContext + "\n\n" : "") +
     (externalChannelContext ? externalChannelContext + "\n\n" : "") +
+    (screenObservationContext ? screenObservationContext + "\n\n" : "") +
     (channelSystem ? channelSystem + "\n\n" : "") +
     messageRhythmSystem + "\n\n" +
     deps.buildSystemPrompt(input.style || "01_default.md") +
     (skillCatalog ? "\n\n---\n\n" + skillCatalog : "") +
     skillActivation +
     toneInjection +
+    (memoryInjection ? "\n\n" + memoryInjection + "\n\n" : "") +
     (alwaysOnContext ? "\n\n" + alwaysOnContext + "\n\n" : "") +
     (relationshipContext ? "\n\n" + relationshipContext + "\n\n" : "") +
     attachmentContext;
@@ -272,9 +293,10 @@ export async function onAgentRunFinished(
   latestUserText: string,
   deps: OnRunFinishedDeps,
   channel?: "wechat" | "feishu" | "qq",
+  sessionId = "default",
 ): Promise<void> {
   const chatContent = result.reply;
-  deps.scheduleMemoryWrite(latestUserText, chatContent);
+  deps.scheduleMemoryWrite(latestUserText, chatContent, sessionId);
 
   const settings = deps.loadModelSettings();
   const inferredStatus = deps.inferRuntimeState(latestUserText, chatContent, false);

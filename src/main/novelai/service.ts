@@ -196,9 +196,10 @@ function broadcastGeneratedImage(result: Record<string, unknown>): void {
   }
 }
 
-function loadHistory(): Record<string, unknown>[] {
+function loadHistory(rawOffset:unknown=0,rawLimit:unknown=40): Record<string, unknown>[] {
   ensureDirs();
-  return fs.readdirSync(outputDir()).filter((file) => file.endsWith(".json")).sort().reverse().slice(0, 40).flatMap((file) => {
+  const offset=Math.max(0,Number(rawOffset)||0),limit=Math.max(1,Math.min(100,Number(rawLimit)||40));
+  return fs.readdirSync(outputDir()).filter((file) => file.endsWith(".json")).sort().reverse().slice(offset,offset+limit).flatMap((file) => {
     try {
       const meta = JSON.parse(fs.readFileSync(path.join(outputDir(), file), "utf8"));
       const bytes = fs.readFileSync(path.join(outputDir(), meta.file));
@@ -261,7 +262,7 @@ export function registerNovelAiIpc(openWindow: () => void, minimizeWindow: () =>
   ipcMain.handle(IPC.NOVELAI_TASKS, () => imageQueue.list().map(({ input: _input, ...task }) => task));
   ipcMain.handle(IPC.NOVELAI_TASK_CANCEL, (_event, id) => imageQueue.cancel(String(id || "")));
   ipcMain.handle(IPC.NOVELAI_TASK_RETRY, async (_event, id) => imageQueue.retry(String(id || "")));
-  ipcMain.handle(IPC.NOVELAI_HISTORY, () => loadHistory());
+  ipcMain.handle(IPC.NOVELAI_HISTORY, (_event,offset,limit) => loadHistory(offset,limit));
   ipcMain.handle(IPC.NOVELAI_GET_IMAGE, (_event, id) => loadImageById(id));
   ipcMain.handle(IPC.NOVELAI_OPEN_OUTPUT, () => shell.openPath(outputDir()));
   ipcMain.handle(IPC.NOVELAI_PICK_IMAGE, async () => {
@@ -285,7 +286,7 @@ export function registerNovelAiIpc(openWindow: () => void, minimizeWindow: () =>
 toolRegistry.register({
   id: "generate_novelai_image",
   name: "AI 绘图",
-  description: "使用绘图工作台当前配置的供应商生成一张图片。用户明确要求画图、生成插画或角色图时使用。提示词应具体描述主体、构图、服装、表情、光线和画风。",
+  description: "生成图片并直接作为聊天图片分享给用户。用户明确要求画图、生成插画、角色图或想看照片时使用。提示词应具体描述主体、构图、服装、表情、光线和画风；生成后用自然聊天口吻分享，不要向用户复述文件名、路径、图片 ID、模型参数或内部工作流。",
   enabled: true,
   risk: "network",
   inputSchema: {
@@ -305,7 +306,11 @@ toolRegistry.register({
   execute: async (args) => {
     const count=Math.max(1,Math.min(4,Number(args.count)||1));const results:Record<string,unknown>[]=[];
     for(let index=0;index<count;index++){const result=await generateNovelAiImage({...args,count:undefined,seed:args.seed===undefined?undefined:Number(args.seed)+index});results.push(result);broadcastGeneratedImage(result)}
-    return `[ok] 已生成 ${results.length} 张图片并保存到 NovelAI 绘图工作台。文件: ${results.map((item)=>item.file).join("、")}; 提示词: ${results[0]?.prompt}`;
+    return [
+      `[ok] 已生成 ${results.length} 张图片，并已直接显示在当前聊天中。`,
+      "接下来请像真人在聊天里分享刚拍好或刚画好的图片一样，自然简短地说一句，请用户看看即可。",
+      "不要提及文件名、保存路径、图片 ID、提示词、模型参数、NovelAI、绘图工作台或工具调用。",
+    ].join("\n");
   },
 });
 

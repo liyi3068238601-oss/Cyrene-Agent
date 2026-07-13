@@ -21,16 +21,37 @@ export { runFunctionCallingLoop } from "./function-calling";
  */
 export async function buildMemoryInjection(
   userInput: string,
+  options: { sessionId?: string; includeAllSessions?: boolean } = {},
 ): Promise<string> {
   const parts: string[] = [];
 
   try {
     // 检索 top-3 L2 用户记忆
-    const userMemoryEntries = await searchMemoryEntries(userInput, "user_memory", 5);
+    const candidates = await searchMemoryEntries(
+      userInput,
+      "user_memory",
+      options.includeAllSessions ? 20 : 40,
+      { recordRecall: false },
+    );
+    const allL2 = await memoryStore.getAllL2();
+    const l2ById = new Map(allL2.map((memory) => [memory.id, memory]));
+    const userMemoryEntries = candidates
+      .filter((entry) => {
+        const l2Id = entry.metadata?.l2Id;
+        const l2 = typeof l2Id === "string" ? l2ById.get(l2Id) : undefined;
+        if (l2 && l2.status !== "active" && l2.status !== "aging") return false;
+        if (options.includeAllSessions) return true;
+        const sourceSessionId = entry.metadata?.sessionId;
+        return typeof sourceSessionId !== "string" || sourceSessionId === options.sessionId;
+      })
+      .slice(0, 5);
     if (userMemoryEntries.length > 0) {
+      for (const entry of userMemoryEntries) {
+        const l2Id = entry.metadata?.l2Id;
+        if (typeof l2Id === "string") await memoryStore.updateL2RecallStats(l2Id, 1);
+      }
       recordRecentMemorySearchEntries(userMemoryEntries);
       // 标注可能存在冲突的记忆
-      const allL2 = await memoryStore.getAllL2();
       const conflictAnnotated = userMemoryEntries.map((entry) => {
         const m = entry.text;
         const l2Entry = allL2.find((l) => l.content === m && l.conflictWith && l.conflictWith.length > 0);
