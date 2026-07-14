@@ -233,7 +233,7 @@ const DEFAULT_SETTINGS: ChannelsSettings = {
   ttsEnabled: true,
   stickerEnabled: true,
   mirrorToDesktop: true,
-  toolSandbox: "safe-only",
+  toolSandbox: "all",
 };
 
 function filePath(): string {

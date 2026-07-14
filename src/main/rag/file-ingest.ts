@@ -1,22 +1,39 @@
 import * as fs from "fs";
 import * as path from "path";
+import { pathToFileURL } from "url";
+import type { ImportedDocumentChunk, ImportedDocumentResult } from "./index";
 
 // ── Public types ──
-export type AttachmentKind = "text" | "indexed" | "empty" | "unsupported";
+export type AttachmentKind = "text" | "indexed" | "empty" | "unsupported" | "image" | "document";
 
-export interface Attachment {
-  name: string;
-  kind: AttachmentKind;
-  /** kind="text" 时的小文件内容 */
-  text?: string;
-  /** kind="indexed" 时的 chunk 数 */
-  chunks?: number;
-  /** kind="unsupported" 或 indexed 失败时的原因 */
-  reason?: string;
-}
+export type Attachment =
+  | { kind: "text"; name: string; text: string; filePath?: string; mime?: string }
+  | { kind: "indexed"; name: string; chunks: number; importId?: string; cached?: boolean; filePath?: string; mime?: string; reason?: string; retrievedChunks?: ImportedDocumentChunk[] }
+  | { kind: "empty"; name: string; filePath?: string; mime?: string }
+  | { kind: "unsupported"; name: string; reason: string; filePath?: string; mime?: string; status?: "error" }
+  | { kind: "image"; name: string; filePath: string; mime?: string; status: "pending"; previewUrl?: string; caption?: string }
+  | { kind: "document"; name: string; filePath: string; mime?: string; status: "pending" | "done" | "error" };
 
 /** ingestOneFile 的大文件索引回调签名。由调用方（index.ts）注入具体实现（importDocument）。 */
-export type ImportFn = (text: string, fileName: string) => Promise<number>;
+export type DocumentImportProgress = {
+  status: "chunking" | "embedding" | "cached";
+  completedChunks?: number;
+  totalChunks?: number;
+};
+export type DocumentImportControl = {
+  isCancelled?: () => boolean;
+  onProgress?: (progress: DocumentImportProgress) => void;
+};
+export type ImportFn = (text: string, fileName: string, control?: DocumentImportControl) => Promise<ImportedDocumentResult>;
+export type SearchImportedChunksFn = (query: string, importIds: string[], topK?: number) => Promise<ImportedDocumentChunk[]>;
+export type DocumentImportOptions = {
+  importDocument: ImportFn;
+  getCachedImport?: (text: string) => Promise<Pick<ImportedDocumentResult, "importId" | "chunkCount"> | null>;
+  putCachedImport?: (text: string, fileName: string, imported: ImportedDocumentResult) => Promise<void>;
+  isCancelled?: () => boolean;
+  onProgress?: (progress: DocumentImportProgress) => void;
+};
+export type DocumentImport = ImportFn | DocumentImportOptions;
 
 // ── Thresholds ──
 /** 小文件 vs 大文件（→RAG）的分界，字符数。 */
@@ -34,6 +51,10 @@ const TEXT_EXTS = new Set([
   ".svg", ".html", ".htm",
 ]);
 
+export const IMAGE_EXTS = new Set([
+  ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp",
+]);
+
 const UNSUPPORTED_EXTS = new Set([
   ".zip", ".7z", ".rar", ".tar", ".gz",
   ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
@@ -48,8 +69,59 @@ export function isTextExt(ext: string): boolean {
   return TEXT_EXTS.has(ext.toLowerCase());
 }
 
+export function isImageExt(ext: string): boolean {
+  return IMAGE_EXTS.has(ext.toLowerCase());
+}
+
+export function getMimeFromExt(ext: string): string {
+  switch (ext.toLowerCase()) {
+    case ".png": return "image/png";
+    case ".jpg":
+    case ".jpeg": return "image/jpeg";
+    case ".gif": return "image/gif";
+    case ".bmp": return "image/bmp";
+    case ".webp": return "image/webp";
+    default: return "application/octet-stream";
+  }
+}
+
 export function isUnsupportedExt(ext: string): boolean {
   return UNSUPPORTED_EXTS.has(ext.toLowerCase());
+}
+
+export function isDocumentExt(ext: string): boolean {
+  const normalized = ext.toLowerCase();
+  return normalized === "" || isTextExt(normalized);
+}
+
+export function describePendingAttachment(filePath: string): Attachment {
+  const ext = path.extname(filePath).toLowerCase();
+  const name = path.basename(filePath);
+  if (isImageExt(ext)) {
+    return {
+      name,
+      kind: "image",
+      filePath,
+      mime: getMimeFromExt(ext),
+      previewUrl: pathToFileURL(filePath).toString(),
+      status: "pending",
+    };
+  }
+  if (isDocumentExt(ext)) {
+    return {
+      name,
+      kind: "document",
+      filePath,
+      status: "pending",
+    };
+  }
+  return {
+    name,
+    kind: "unsupported",
+    filePath,
+    status: "error",
+    reason: `暂不支持的文件格式 ${ext || "（无扩展名）"}`,
+  };
 }
 
 /**
@@ -66,6 +138,55 @@ export function isBinary(buf: Buffer): boolean {
   return false;
 }
 
+async function indexLargeText(
+  text: string,
+  name: string,
+  documentImport: DocumentImport,
+): Promise<Attachment> {
+  const options: DocumentImportOptions = typeof documentImport === "function"
+    ? { importDocument: documentImport }
+    : documentImport;
+
+  if (options.isCancelled?.()) {
+    return { name, kind: "indexed", chunks: 0, reason: "cancelled" };
+  }
+
+  if (options.getCachedImport) {
+    try {
+      const cached = await options.getCachedImport(text);
+      if (cached) {
+        options.onProgress?.({ status: "cached", completedChunks: cached.chunkCount, totalChunks: cached.chunkCount });
+        return { name, kind: "indexed", chunks: cached.chunkCount, importId: cached.importId, cached: true };
+      }
+    } catch (err) {
+      console.warn("[RAG] document cache lookup failed:", err);
+    }
+  }
+
+  try {
+    const control: DocumentImportControl = {
+      isCancelled: options.isCancelled,
+      onProgress: options.onProgress,
+    };
+    const imported = control.isCancelled || control.onProgress
+      ? await options.importDocument(text, name, control)
+      : await options.importDocument(text, name);
+    if (options.isCancelled?.()) {
+      return { name, kind: "indexed", chunks: 0, reason: "cancelled" };
+    }
+    if (options.putCachedImport) {
+      try {
+        await options.putCachedImport(text, name, imported);
+      } catch (err) {
+        console.warn("[RAG] document cache write failed:", err);
+      }
+    }
+    return { name, kind: "indexed", chunks: imported.chunkCount, importId: imported.importId };
+  } catch (err: any) {
+    return { name, kind: "indexed", chunks: 0, reason: err?.message || String(err) };
+  }
+}
+
 // ── 核心路由：处理单个文件 ──
 
 /**
@@ -75,7 +196,7 @@ export function isBinary(buf: Buffer): boolean {
  */
 export async function ingestOneFile(
   filePath: string,
-  importFn: ImportFn,
+  documentImport: DocumentImport,
 ): Promise<Attachment> {
   let stat: fs.Stats;
   try {
@@ -116,12 +237,7 @@ export async function ingestOneFile(
     }
     if (text.length > SMALL_THRESHOLD) {
       // 大文本 → 索引到 Vector DB
-      try {
-        const chunks = await importFn(text, name);
-        return { name, kind: "indexed", chunks };
-      } catch (err: any) {
-        return { name, kind: "indexed", chunks: 0, reason: err?.message || String(err) };
-      }
+      return indexLargeText(text, name, documentImport);
     }
     return { name, kind: "text", text };
   }
@@ -136,12 +252,7 @@ export async function ingestOneFile(
     return { name, kind: "empty" };
   }
   if (text.length > SMALL_THRESHOLD) {
-    try {
-      const chunks = await importFn(text, name);
-      return { name, kind: "indexed", chunks };
-    } catch (err: any) {
-      return { name, kind: "indexed", chunks: 0, reason: err?.message || String(err) };
-    }
+    return indexLargeText(text, name, documentImport);
   }
   return { name, kind: "text", text };
 }
@@ -185,7 +296,7 @@ export function walkDir(dirPath: string): string[] {
  */
 export async function ingestPaths(
   paths: string[],
-  importFn: ImportFn,
+  documentImport: DocumentImport,
 ): Promise<Attachment[]> {
   // 展开目录，同时记录每个文件的"显示名"（相对输入目录的路径）
   const filesWithPaths: Array<{ absPath: string; displayName: string }> = [];
@@ -222,9 +333,53 @@ export async function ingestPaths(
 
   const results: Attachment[] = [];
   for (const { absPath, displayName } of unique) {
-    const att = await ingestOneFile(absPath, importFn);
+    const att = await ingestOneFile(absPath, documentImport);
     // 用保留相对路径的显示名覆盖 basename
-    results.push({ ...att, name: displayName });
+    results.push({ ...att, name: displayName, filePath: absPath });
+  }
+  return results;
+}
+
+export async function processDocumentsForChat(
+  filePaths: string[],
+  query: string,
+  documentImport: DocumentImport,
+  searchImportedChunks: SearchImportedChunksFn,
+): Promise<Attachment[]> {
+  const results: Attachment[] = [];
+  for (const filePath of filePaths) {
+    try {
+      const processed = await ingestPaths([filePath], documentImport);
+      if (processed.length === 0) {
+        results.push({
+          name: path.basename(filePath),
+          kind: "unsupported",
+          filePath,
+          status: "error",
+          reason: "文件不存在或无法读取",
+        });
+        continue;
+      }
+
+      for (const attachment of processed) {
+        if (attachment.kind === "indexed" && attachment.importId && query.trim()) {
+          try {
+            attachment.retrievedChunks = await searchImportedChunks(query, [attachment.importId]);
+          } catch (err: any) {
+            attachment.reason = err?.message || String(err);
+          }
+        }
+        results.push(attachment);
+      }
+    } catch (err: any) {
+      results.push({
+        name: path.basename(filePath),
+        kind: "unsupported",
+        filePath,
+        status: "error",
+        reason: err?.message || String(err),
+      });
+    }
   }
   return results;
 }

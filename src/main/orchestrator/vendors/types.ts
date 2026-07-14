@@ -2,6 +2,8 @@
 // 调度层（function-calling.ts）只依赖这里的统一结构，绝不出现 if (provider === "xxx")。
 // 协议事实来源：docs/vendors/tool-calling-matrix.md
 
+import type { ReasoningPreference } from "../../../shared/reasoning";
+
 export type Transport = "openai" | "anthropic";
 export type AuthStyle = "bearer" | "x-api-key";
 export type ThinkingField = "reasoning_content" | "thinking" | "reasoning_details" | null;
@@ -19,7 +21,19 @@ export interface VendorConfig {
    * resolveTransport(cfg) 负责把 auto 解析为具体 transport。
    */
   explicitTransport?: Transport | "auto";
+  /**
+   * 用户保存的推理偏好。adapter buildRequest 必须透传此字段；
+   * 不传时 applyReasoningPreference 缺省按 auto 处理。
+   * commit 2 落地后由 ModelSettings 顶层镜像字段填充；commit 1 期间为可选。
+   */
+  reasoning?: ReasoningPreference;
 }
+
+export type OpenAIContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
+export type ChatMessageContent = string | OpenAIContentBlock[];
 
 /** 统一工具调用描述（项目内部），与 OpenAI/Anthropic wire 格式解耦。 */
 export interface ToolCall {
@@ -35,7 +49,7 @@ export interface ToolCall {
  */
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
-  content?: string;
+  content?: ChatMessageContent;
   /** assistant 上的工具调用（统一结构，OpenAI wire 再转成 tool_calls[].function）。 */
   toolCalls?: ToolCall[];
   /** role:"tool" 的回填锚点（OpenAI: tool_call_id；Anthropic: tool_use_id）。 */

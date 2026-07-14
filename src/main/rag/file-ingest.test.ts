@@ -4,11 +4,15 @@ import * as path from "path";
 import * as os from "os";
 import {
   ingestOneFile,
+  processDocumentsForChat,
   walkDir,
   ingestPaths,
+  describePendingAttachment,
   isBinary,
+  isImageExt,
   isTextExt,
   isUnsupportedExt,
+  getMimeFromExt,
   SMALL_THRESHOLD,
   type Attachment,
   type ImportFn,
@@ -79,6 +83,51 @@ describe("扩展名判断", () => {
     expect(isUnsupportedExt("")).toBe(false);
     expect(isUnsupportedExt(".unknown")).toBe(false);
   });
+  it("isImageExt true 且返回图片 mime", () => {
+    expect(isImageExt(".png")).toBe(true);
+    expect(isImageExt(".JPG")).toBe(true);
+    expect(isImageExt(".webp")).toBe(true);
+    expect(getMimeFromExt(".png")).toBe("image/png");
+    expect(getMimeFromExt(".jpg")).toBe("image/jpeg");
+    expect(getMimeFromExt(".unknown")).toBe("application/octet-stream");
+  });
+});
+
+describe("describePendingAttachment", () => {
+  it("拖入阶段只按扩展名登记 pending，不读取或索引文档", () => {
+    const text = describePendingAttachment(fixture("notes.md"));
+    expect(text).toMatchObject({
+      name: "notes.md",
+      kind: "document",
+      filePath: fixture("notes.md"),
+      status: "pending",
+    });
+    expect(text).not.toHaveProperty("text");
+    expect(text).not.toHaveProperty("chunks");
+  });
+
+  it("拖入阶段把明确不支持的二进制或媒体格式标记为 unsupported", () => {
+    expect(describePendingAttachment(fixture("setup.exe"))).toMatchObject({
+      name: "setup.exe",
+      kind: "unsupported",
+      reason: "暂不支持的文件格式 .exe",
+    });
+    expect(describePendingAttachment(fixture("voice.wav"))).toMatchObject({
+      name: "voice.wav",
+      kind: "unsupported",
+      reason: "暂不支持的文件格式 .wav",
+    });
+  });
+
+  it("拖入阶段仍然为图片返回安全 previewUrl", () => {
+    const image = describePendingAttachment(fixture("screen shot.png"));
+    expect(image.kind).toBe("image");
+    if (image.kind === "image") {
+      expect(image.mime).toBe("image/png");
+      expect(image.previewUrl).toMatch(/^file:\/\//);
+      expect(image.status).toBe("pending");
+    }
+  });
 });
 
 // ── ingestOneFile ──
@@ -86,7 +135,7 @@ describe("ingestOneFile", () => {
   let mockImport: ImportFn;
 
   beforeEach(() => {
-    mockImport = vi.fn().mockResolvedValue(3);
+    mockImport = vi.fn().mockResolvedValue({ importId: "import-test", chunkCount: 3 });
   });
 
   it("小文本文件 → kind:text 内容返回", async () => {
@@ -109,6 +158,72 @@ describe("ingestOneFile", () => {
     }
     expect(mockImport).toHaveBeenCalledOnce();
     expect(mockImport).toHaveBeenCalledWith(big, "big.txt");
+  });
+
+  it("大文本文件返回本轮索引的 importId", async () => {
+    const importForTurn = vi.fn().mockResolvedValue({ importId: "import-current", chunkCount: 3 });
+    const fp = write("turn.md", "x".repeat(SMALL_THRESHOLD + 1));
+
+    const result = await ingestOneFile(fp, importForTurn as ImportFn);
+
+    expect(result).toMatchObject({
+      kind: "indexed",
+      name: "turn.md",
+      chunks: 3,
+      importId: "import-current",
+    });
+  });
+
+  it("reuses a completed document cache record instead of embedding again", async () => {
+    const importFn = vi.fn();
+    const largeMarkdownPath = write("large.md", "x".repeat(SMALL_THRESHOLD + 1));
+
+    const result = await ingestOneFile(largeMarkdownPath, {
+      importDocument: importFn,
+      getCachedImport: async () => ({ importId: "import-cached", chunkCount: 9 }),
+    });
+
+    expect(result).toMatchObject({
+      kind: "indexed",
+      name: "large.md",
+      chunks: 9,
+      importId: "import-cached",
+      cached: true,
+    });
+    expect(importFn).not.toHaveBeenCalled();
+  });
+
+  it("returns importId and relevant chunks for document processing", async () => {
+    const fp = write("large.md", "x".repeat(SMALL_THRESHOLD + 1));
+    const importForTurn = vi.fn().mockResolvedValue({ importId: "import-current", chunkCount: 12 });
+    const searchChunks = vi.fn().mockResolvedValue([
+      { text: "deadline is Friday", score: 0.9, fileName: "large.md", chunkIndex: 0, importId: "import-current" },
+    ]);
+
+    const result = await processDocumentsForChat([fp], "what is the deadline?", importForTurn as ImportFn, searchChunks);
+
+    expect(result[0]).toMatchObject({
+      kind: "indexed",
+      name: "large.md",
+      chunks: 12,
+      importId: "import-current",
+      retrievedChunks: [{ text: "deadline is Friday" }],
+    });
+  });
+
+  it("preserves a completed indexed import when related chunk retrieval fails", async () => {
+    const fp = write("retrieve-fails.md", "x".repeat(SMALL_THRESHOLD + 1));
+    const importForTurn = vi.fn().mockResolvedValue({ importId: "import-current", chunkCount: 12 });
+    const searchChunks = vi.fn().mockRejectedValue(new Error("retrieval unavailable"));
+
+    const result = await processDocumentsForChat([fp], "what is the deadline?", importForTurn as ImportFn, searchChunks);
+
+    expect(result[0]).toMatchObject({
+      kind: "indexed",
+      importId: "import-current",
+      chunks: 12,
+      reason: "retrieval unavailable",
+    });
   });
 
   it("正好等于阈值 → kind:indexed（含边界）", async () => {
@@ -230,7 +345,7 @@ describe("walkDir", () => {
 describe("ingestPaths", () => {
   let mockImport: ImportFn;
   beforeEach(() => {
-    mockImport = vi.fn().mockResolvedValue(2);
+    mockImport = vi.fn().mockResolvedValue({ importId: "import-test", chunkCount: 2 });
   });
 
   it("单个文件 → [Attachment]", async () => {

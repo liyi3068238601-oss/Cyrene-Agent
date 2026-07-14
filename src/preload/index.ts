@@ -1,5 +1,9 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import { IPC } from "../shared/ipc-channels";
+import type { UiTheme } from "../shared/ui-theme";
+import type { UiFont } from "../shared/ui-font";
+import type { DocumentIndexProgress } from "../main/rag/document-index-queue";
+import { getLive2DIpcListenerCounts } from "./live2d-listener-diagnostics";
 
 const cyreneApi = {
   minimize: () => ipcRenderer.send(IPC.WINDOW_MINIMIZE),
@@ -19,6 +23,11 @@ const cyreneApi = {
     const listener = (_e: unknown, zoom: number) => callback(zoom);
     ipcRenderer.on(IPC.PET_ZOOM, listener);
     return () => ipcRenderer.off(IPC.PET_ZOOM, listener);
+  },
+  onPetVisibilityChanged: (callback: (visible: boolean) => void) => {
+    const listener = (_e: unknown, visible: boolean) => callback(visible);
+    ipcRenderer.on(IPC.PET_VISIBILITY_CHANGED, listener);
+    return () => ipcRenderer.off(IPC.PET_VISIBILITY_CHANGED, listener);
   },
 };
 
@@ -42,6 +51,18 @@ const chatApi = {
     if (paths.length === 0) return [];
     return ipcRenderer.invoke(IPC.CHAT_INGEST_FILES, paths);
   },
+  processDocuments: (filePaths: string[], query: string) =>
+    ipcRenderer.invoke(IPC.CHAT_PROCESS_DOCUMENTS, { filePaths, query }),
+  onDocumentIndexProgress: (callback: (progress: DocumentIndexProgress) => void) => {
+    const listener = (_event: unknown, progress: DocumentIndexProgress) => callback(progress);
+    ipcRenderer.on(IPC.CHAT_DOCUMENT_INDEX_PROGRESS, listener);
+    return () => ipcRenderer.removeListener(IPC.CHAT_DOCUMENT_INDEX_PROGRESS, listener);
+  },
+  cancelDocumentIndex: (jobId: string) =>
+    ipcRenderer.invoke(IPC.CHAT_CANCEL_DOCUMENT_INDEX, { jobId }) as Promise<boolean>,
+  captionImage: (filePath: string) => ipcRenderer.invoke(IPC.CHAT_CAPTION_IMAGE, { filePath }),
+  getImageSendStrategy: () => ipcRenderer.invoke(IPC.CHAT_GET_IMAGE_SEND_STRATEGY),
+  getGeneralSettings: () => ipcRenderer.invoke(IPC.SETTINGS_GET_GENERAL),
   onStreamChunk: (cb: (chunk: string) => void) => { ipcRenderer.on(IPC.CHAT_STREAM_CHUNK, (_e: unknown, chunk: string) => cb(chunk)); },
   onStreamDone: (cb: (payload: unknown) => void) => { ipcRenderer.on(IPC.CHAT_STREAM_DONE, (_e: unknown, payload: unknown) => cb(payload)); },
   onProactiveMessage: (cb:(payload:unknown)=>void) => { const listener=(_e:unknown,payload:unknown)=>cb(payload);ipcRenderer.on(IPC.CHAT_PROACTIVE_MESSAGE,listener);return()=>ipcRenderer.off(IPC.CHAT_PROACTIVE_MESSAGE,listener); },
@@ -49,6 +70,8 @@ const chatApi = {
   pauseScreenObservation: (mode: "10m" | "1h" | "restart") => ipcRenderer.invoke(IPC.SCREEN_OBSERVATION_PAUSE, mode),
   resumeScreenObservation: () => ipcRenderer.invoke(IPC.SCREEN_OBSERVATION_RESUME),
   removeStreamListeners: () => { ipcRenderer.removeAllListeners(IPC.CHAT_STREAM_CHUNK); ipcRenderer.removeAllListeners(IPC.CHAT_STREAM_DONE); },
+  getReasoningState: () => ipcRenderer.invoke(IPC.CHAT_GET_REASONING_STATE),
+  setReasoning: (payload: { providerKey: string; preference: unknown }) => ipcRenderer.invoke(IPC.CHAT_SET_REASONING, payload),
 };
 
 contextBridge.exposeInMainWorld("cyrene", cyreneApi);
@@ -90,7 +113,13 @@ contextBridge.exposeInMainWorld("novelai", novelaiApi);
 // AG-UI 事件流：发起一次 agent run，通过 onEvent 回调收 AG-UI 标准事件，
 // 返回 Promise<{success,error}> 表示整轮结束。onEvent 返回的取消订阅函数用于停止监听。
 const aguiApi = {
-  run: (input: { messages: unknown[]; style: string; sessionId?: string; attachments?: { name: string; text: string }[] }) =>
+  run: (input: {
+    messages: unknown[];
+    style: string;
+    sessionId?: string;
+    attachments?: { name: string; text: string }[];
+    imageAttachments?: { name: string; filePath: string; mime?: string }[];
+  }) =>
     ipcRenderer.invoke(IPC.AGUI_RUN, input) as Promise<{ success: boolean; error?: string }>,
   onEvent: (callback: (event: unknown) => void) => {
     const listener = (_e: unknown, event: unknown) => {
@@ -192,15 +221,26 @@ const callApi = {
 contextBridge.exposeInMainWorld("call", callApi);
 
 const cyreneThemeApi = {
-  get: () => ipcRenderer.invoke(IPC.UI_THEME_GET) as Promise<"classic" | "polished-pink" | "pearl-white">,
-  onChanged: (callback: (theme: "classic" | "polished-pink" | "pearl-white") => void) => {
-    const listener = (_e: unknown, theme: "classic" | "polished-pink" | "pearl-white") => callback(theme);
+  get: () => ipcRenderer.invoke(IPC.UI_THEME_GET) as Promise<UiTheme>,
+  onChanged: (callback: (theme: UiTheme) => void) => {
+    const listener = (_e: unknown, theme: UiTheme) => callback(theme);
     ipcRenderer.on(IPC.UI_THEME_CHANGED, listener);
     return () => ipcRenderer.off(IPC.UI_THEME_CHANGED, listener);
   },
 };
 
 contextBridge.exposeInMainWorld("cyreneTheme", cyreneThemeApi);
+
+const cyreneFontApi = {
+  get: () => ipcRenderer.invoke(IPC.UI_FONT_GET) as Promise<UiFont>,
+  onChanged: (callback: (font: UiFont) => void) => {
+    const listener = (_e: unknown, font: UiFont) => callback(font);
+    ipcRenderer.on(IPC.UI_FONT_CHANGED, listener);
+    return () => ipcRenderer.off(IPC.UI_FONT_CHANGED, listener);
+  },
+};
+
+contextBridge.exposeInMainWorld("cyreneFont", cyreneFontApi);
 
 const settingsApi = {
   minimize: () => ipcRenderer.send(IPC.SETTINGS_MINIMIZE),
@@ -217,6 +257,9 @@ const settingsApi = {
   },
   getGeneral: () => ipcRenderer.invoke(IPC.SETTINGS_GET_GENERAL),
   saveGeneral: (config: unknown) => ipcRenderer.invoke(IPC.SETTINGS_SAVE_GENERAL, config),
+  pickUiFont: () => ipcRenderer.invoke(IPC.SETTINGS_PICK_UI_FONT) as Promise<string | null>,
+  importUiFont: (sourcePath: string) => ipcRenderer.invoke(IPC.SETTINGS_IMPORT_UI_FONT, sourcePath) as Promise<UiFont>,
+  resetUiFont: () => ipcRenderer.invoke(IPC.SETTINGS_RESET_UI_FONT) as Promise<UiFont>,
   openSidebar: () => ipcRenderer.send(IPC.SETTINGS_OPEN_SIDEBAR),
   closeSidebar: () => ipcRenderer.send(IPC.SETTINGS_CLOSE_SIDEBAR),
   openTasks: () => ipcRenderer.send(IPC.SETTINGS_OPEN_TASKS),
@@ -416,11 +459,21 @@ const live2dActionApi = {
 };
 contextBridge.exposeInMainWorld("live2dAction", live2dActionApi);
 
+const live2dDiagnosticsApi = {
+  getMain: () => ipcRenderer.invoke(IPC.LIVE2D_GET_MAIN_DIAGNOSTICS),
+  getIpcListenerCounts: () => getLive2DIpcListenerCounts(ipcRenderer),
+};
+contextBridge.exposeInMainWorld("live2dDiagnostics", live2dDiagnosticsApi);
+
 // Opener 主动开口反馈（渲染端 → 主进程）
 const openerApi = {
   feedback: (payload: { type: "clicked"; sceneId: string; itemId: string }) =>
     ipcRenderer.send(IPC.OPENER_FEEDBACK, payload),
   testFire: () => ipcRenderer.invoke(IPC.OPENER_TEST_FIRE),
+  getStatus: () => ipcRenderer.invoke(IPC.OPENER_GET_STATUS),
+  openPackDir: () => ipcRenderer.invoke(IPC.OPENER_OPEN_PACK_DIR),
+  openInstallDocs: () => ipcRenderer.invoke(IPC.OPENER_OPEN_INSTALL_DOCS),
+  openSession: (sessionId: string) => ipcRenderer.invoke(IPC.CHATS_OPEN_IN_CHAT_WINDOW, sessionId),
 };
 contextBridge.exposeInMainWorld("openerBridge", openerApi);
 
@@ -428,12 +481,16 @@ contextBridge.exposeInMainWorld("openerBridge", openerApi);
 const chatStoreApi = {
   list: () => ipcRenderer.invoke(IPC.CHATS_LIST),
   get: (id: string) => ipcRenderer.invoke(IPC.CHATS_GET, id),
+  getPage: (id: string, before: number | null, limit: number) =>
+    ipcRenderer.invoke(IPC.CHATS_GET_PAGE, { id, before, limit }),
   create: (payload?: { title?: string; identityId?: string | null }) =>
     ipcRenderer.invoke(IPC.CHATS_CREATE, payload ?? {}),
   append: (id: string, message: unknown) =>
     ipcRenderer.invoke(IPC.CHATS_APPEND, { id, message }),
   replaceMessages: (id: string, messages: unknown[]) =>
     ipcRenderer.invoke(IPC.CHATS_REPLACE_MESSAGES, { id, messages }),
+  replaceTail: (id: string, startIndex: number, messages: unknown[]) =>
+    ipcRenderer.invoke(IPC.CHATS_REPLACE_TAIL, { id, startIndex, messages }),
   rename: (id: string, title: string) =>
     ipcRenderer.invoke(IPC.CHATS_RENAME, { id, title }),
   delete: (id: string) => ipcRenderer.invoke(IPC.CHATS_DELETE, id),

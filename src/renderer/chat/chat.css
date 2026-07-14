@@ -521,6 +521,32 @@ body {
   max-width: 70%;
 }
 
+.chat-transient-status {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 70%;
+  padding: 9px 13px;
+  margin-left: 66px;
+  border-radius: 14px;
+  border: 1px solid var(--rb-border-soft);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--rb-text-muted);
+  font: var(--rb-text-small);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.chat-transient-status__dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.chat-transient-status__text {
+  white-space: nowrap;
+}
+
 .msg--user  { align-self: flex-end; flex-direction: row-reverse; }
 .msg--model { align-self: flex-start; }
 
@@ -621,6 +647,123 @@ body {
   background: rgba(255, 255, 255, 0.06);
   box-shadow: 0 14px 34px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.10);
   -webkit-user-drag: none;
+}
+
+.msg__attachments {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: min(320px, 62vw);
+}
+
+.msg__image-card {
+  width: min(260px, 58vw);
+  overflow: hidden;
+  border-radius: 14px;
+  border: 1px solid var(--rb-border-soft);
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.msg__image-preview {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--rb-text-muted);
+  font: var(--rb-text-small);
+}
+
+.msg__image-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  -webkit-user-drag: none;
+}
+
+.msg__image-preview.is-error {
+  padding: 16px;
+  box-sizing: border-box;
+  text-align: center;
+}
+
+.msg__image-name {
+  padding: 8px 10px;
+  color: var(--rb-text-default);
+  font: var(--rb-text-small);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.msg__document-card {
+  width: min(280px, 58vw);
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) 24px;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid var(--rb-border-soft);
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.msg__document-card--error {
+  border-color: rgba(255, 120, 120, 0.42);
+}
+
+.msg__document-icon {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.10);
+  font-size: 17px;
+}
+
+.msg__document-meta {
+  min-width: 0;
+}
+
+.msg__document-name {
+  color: var(--rb-text-default);
+  font: var(--rb-text-small);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.msg__document-status {
+  margin-top: 2px;
+  color: var(--rb-text-muted);
+  font: var(--rb-text-micro);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.msg__document-cancel {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  color: var(--rb-text-muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.msg__document-cancel:hover,
+.msg__document-cancel:focus-visible {
+  color: var(--rb-text-default);
+  background: rgba(255, 255, 255, 0.12);
 }
 
 .msg__time {
@@ -1090,14 +1233,14 @@ body {
 }
 .dm-opt:hover {
   background: var(--rb-border-faint);
-  color: var(--rb-pink-100);
+  color: #E74C77;
 }
 .dm-opt.is-active {
-  color: var(--rb-text-on-pink);
+  color: #E74C77;
 }
 .dm-opt.is-active::after {
   content: "✓";
-  color: var(--rb-pink-glow);
+  color: #E74C77;
   margin-left: 10px;
   font-weight: 600;
 }
@@ -1173,10 +1316,10 @@ body {
 .weather-card {
   border-radius: 18px;
   overflow: hidden;
-  box-shadow: 0 8px 24px rgba(0,0,0,0.25), 0 2px 6px rgba(180,100,150,0.15);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.25), 0 2px 6px var(--rb-weather-shadow);
   margin: 4px 0 8px 46px;
-  background: #F9CBDF;
-  border: 1px solid rgba(180,100,150,0.2);
+  background: var(--rb-weather-bg);
+  border: 1px solid var(--rb-weather-card-border);
   max-width: 340px;
   width: fit-content;
   min-width: 280px;
@@ -1192,14 +1335,14 @@ body {
 .weather-card .w-header {
   display: flex; justify-content: space-between; align-items: center;
   padding: 10px 14px;
-  border-bottom: 1px solid rgba(140,60,110,0.15);
+  border-bottom: 1px solid var(--rb-weather-border);
 }
 .weather-card .w-datetime { display: flex; flex-direction: column; gap: 1px; }
-.weather-card .w-date { font-size: 12px; font-weight: 600; color: var(--rb-text-strong); }
-.weather-card .w-time { font-size: 10px; color: var(--rb-text-muted); }
+.weather-card .w-date { font-size: 12px; font-weight: 600; color: var(--rb-weather-text-strong); }
+.weather-card .w-time { font-size: 10px; color: var(--rb-weather-text-muted); }
 .weather-card .w-loc { display: flex; align-items: baseline; gap: 4px; }
-.weather-card .w-city { font-size: 13px; font-weight: 700; color: var(--rb-text-strong); }
-.weather-card .w-adm { font-size: 10px; color: var(--rb-text-muted); }
+.weather-card .w-city { font-size: 13px; font-weight: 700; color: var(--rb-weather-text-strong); }
+.weather-card .w-adm { font-size: 10px; color: var(--rb-weather-text-muted); }
 
 .weather-card .w-main {
   display: flex; align-items: center; justify-content: space-between;
@@ -1211,57 +1354,57 @@ body {
   filter: drop-shadow(0 2px 4px rgba(0,0,0,0.1));
   animation: weather-float 3.5s ease-in-out infinite;
 }
-.weather-card .w-desc { font-size: 13px; font-weight: 600; color: var(--rb-text-default); }
+.weather-card .w-desc { font-size: 13px; font-weight: 600; color: var(--rb-weather-text-default); }
 .weather-card .w-temp-box { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
 .weather-card .w-temp {
-  font-size: 40px; font-weight: 200; color: #b84a7a; line-height: 1;
+  font-size: 40px; font-weight: 200; color: var(--rb-weather-temp); line-height: 1;
 }
 .weather-card .w-temp .w-deg { font-size: 22px; font-weight: 300; }
 .weather-card .w-hilo { display: flex; gap: 8px; font-size: 11px; font-weight: 600; }
-.weather-card .w-hilo .w-hi { color: #c45a3a; }
-.weather-card .w-hilo .w-lo { color: #3a7ab0; }
-.weather-card .w-hilo .w-sep { color: var(--rb-text-faint); }
+.weather-card .w-hilo .w-hi { color: var(--rb-weather-temp-hi); }
+.weather-card .w-hilo .w-lo { color: var(--rb-weather-temp-lo); }
+.weather-card .w-hilo .w-sep { color: var(--rb-weather-text-faint); }
 
 @keyframes weather-float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
 
 .weather-card .w-feels {
   padding: 6px 14px 10px;
   font-size: 11px;
-  color: var(--rb-text-muted);
-  border-bottom: 1px solid rgba(140,60,110,0.15);
+  color: var(--rb-weather-text-muted);
+  border-bottom: 1px solid var(--rb-weather-border);
 }
 
 .weather-card .w-quick {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 1px;
-  background: rgba(140,60,110,0.12);
+  background: var(--rb-weather-border-strong);
 }
 .weather-card .w-qitem {
-  background: #F9CBDF;
+  background: var(--rb-weather-bg);
   padding: 8px 4px;
   text-align: center;
 }
 .weather-card .w-qicon { font-size: 14px; margin-bottom: 2px; }
-.weather-card .w-qlabel { font-size: 9px; color: var(--rb-text-muted); margin-bottom: 1px; }
-.weather-card .w-qvalue { font-size: 12px; font-weight: 600; color: var(--rb-text-strong); }
+.weather-card .w-qlabel { font-size: 9px; color: var(--rb-weather-text-muted); margin-bottom: 1px; }
+.weather-card .w-qvalue { font-size: 12px; font-weight: 600; color: var(--rb-weather-text-strong); }
 
 .weather-card .w-source {
   padding: 6px 14px; font-size: 9px;
-  color: var(--rb-text-faint);
+  color: var(--rb-weather-text-faint);
   display: flex; justify-content: space-between;
-  background: #eeacd2;
+  background: var(--rb-weather-bg-3);
 }
 
 /* 展开按钮 */
 .weather-card .w-expand {
   display: flex; align-items: center; justify-content: center; gap: 6px;
   padding: 8px; cursor: pointer; width: 100%; border: none;
-  background: #f0b5d0; font-size: 11px; font-weight: 500;
-  color: var(--rb-text-muted); transition: all 0.2s;
-  border-top: 1px solid rgba(140,60,110,0.15);
+  background: var(--rb-weather-bg-2); font-size: 11px; font-weight: 500;
+  color: var(--rb-weather-text-muted); transition: all 0.2s;
+  border-top: 1px solid var(--rb-weather-border);
 }
-.weather-card .w-expand:hover { color: #b84a7a; background: #ecadd0; }
+.weather-card .w-expand:hover { color: var(--rb-weather-accent); background: var(--rb-weather-bg-3); }
 .weather-card .w-expand .w-arrow { transition: transform 0.3s; font-size: 9px; }
 .weather-card.expanded .w-expand .w-arrow { transform: rotate(180deg); }
 
@@ -1269,21 +1412,21 @@ body {
 .weather-card .w-details {
   max-height: 0; overflow: hidden;
   transition: max-height 0.35s ease;
-  background: #f0b5d0;
+  background: var(--rb-weather-bg-2);
 }
 .weather-card.expanded .w-details { max-height: 400px; }
 
 .weather-card .w-detail-grid {
   display: grid; grid-template-columns: 1fr 1fr; gap: 1px;
-  background: rgba(140,60,110,0.12);
+  background: var(--rb-weather-border-strong);
 }
 .weather-card .w-ditem {
-  background: #F9CBDF; padding: 10px 12px;
+  background: var(--rb-weather-bg); padding: 10px 12px;
   display: flex; align-items: center; gap: 8px;
 }
 .weather-card .w-dicon { font-size: 18px; width: 22px; text-align: center; }
-.weather-card .w-dlabel { font-size: 10px; color: var(--rb-text-muted); margin-bottom: 1px; }
-.weather-card .w-dvalue { font-size: 13px; font-weight: 600; color: var(--rb-text-strong); }
+.weather-card .w-dlabel { font-size: 10px; color: var(--rb-weather-text-muted); margin-bottom: 1px; }
+.weather-card .w-dvalue { font-size: 13px; font-weight: 600; color: var(--rb-weather-text-strong); }
 .weather-card .w-kaomoji { font-size: 14px; margin-left: 3px; }
 
 /* 空态：当前会话无消息时显示（设置面板"+新对话"或删除清空后的过渡态） */
@@ -1311,7 +1454,7 @@ body {
 
 .chat__empty-text {
   font-size: 15px;
-  color: rgba(255, 255, 255, 0.65);
+  color: var(--rb-text-muted);
   margin: 0;
   letter-spacing: 0.5px;
 }

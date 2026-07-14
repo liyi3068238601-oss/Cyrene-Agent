@@ -30,6 +30,8 @@ export interface AguiRunInput {
   channel?: RelationshipChannel;
   /** 本轮附件（文本内容，临时注入系统上下文，不存历史）。 */
   attachments?: { name: string; text: string }[];
+  /** 本轮图片附件。主进程会安全读取并转成 OpenAI-compatible image_url content block。 */
+  imageAttachments?: { name: string; filePath: string; mime?: string }[];
 }
 
 /** 调用方（index.ts）注入：把输入转成 agent 需要的 options（含 system prompt 拼接）。 */
@@ -45,8 +47,14 @@ export type OnRunFinishedFn = (result: CyreneRunResult, latestUserText: string, 
 /** 调用方注入：拿聊天窗口（广播副作用用，可空）。 */
 export type GetChatWindowFn = () => { webContents: WebContents; isDestroyed(): boolean } | null;
 
+export interface AguiConversationLifecycle {
+  onUserMessage(): void;
+  onConversationStarted(): void;
+  onConversationEnded(): void;
+}
+
 /** 单次对话的活跃订阅（用于取消）。键 = runId。 */
-const activeRuns = new Map<string, Subscription>();
+const activeRuns = new Map<string, { subscription: Subscription; endLifecycle: () => void }>();
 
 export function hasActiveAgUiRuns(): boolean {
   return activeRuns.size > 0;
@@ -66,6 +74,7 @@ export function registerAgUiIpc(
   buildOptions: BuildOptionsFn,
   onRunFinished: OnRunFinishedFn,
   getChatWindow: GetChatWindowFn,
+  lifecycle?: AguiConversationLifecycle,
 ): void {
   buildOptionsFn = buildOptions;
   getChatWindowFn = getChatWindow;
@@ -75,8 +84,17 @@ export function registerAgUiIpc(
     if (!buildOptionsFn || !onFinished) {
       throw new Error("AG-UI 桥未初始化");
     }
+    lifecycle?.onUserMessage();
+    lifecycle?.onConversationStarted();
     const input = rawInput as AguiRunInput;
-    const { options, latestUserText } = await buildOptionsFn(input);
+    let built;
+    try {
+      built = await buildOptionsFn(input);
+    } catch (error) {
+      lifecycle?.onConversationEnded();
+      throw error;
+    }
+    const { options, latestUserText } = built;
 
     const threadId = `thread-${Date.now()}`;
     const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -102,6 +120,12 @@ export function registerAgUiIpc(
     };
 
     let pendingRunFinishedEvent: unknown | null = null;
+    let lifecycleEnded = false;
+    const endLifecycle = (): void => {
+      if (lifecycleEnded) return;
+      lifecycleEnded = true;
+      lifecycle?.onConversationEnded();
+    };
 
     // 订阅 agent 事件流：每个事件透传渲染端；
     // complete/error 时做副作用，并补发一个终态事件让渲染端知道这轮结束。
@@ -121,6 +145,7 @@ export function registerAgUiIpc(
         // 补发 RUN_ERROR 事件，渲染端据此收尾（invoke 早已 resolve，靠事件驱动）
         send({ type: "RUN_ERROR", error: message, threadId, runId });
         activeRuns.delete(runId);
+        endLifecycle();
       },
       complete: async () => {
         activeRuns.delete(runId);
@@ -141,9 +166,10 @@ export function registerAgUiIpc(
         if (pendingRunFinishedEvent) {
           send(pendingRunFinishedEvent);
         }
+        endLifecycle();
       },
     });
-    activeRuns.set(runId, sub);
+    activeRuns.set(runId, { subscription: sub, endLifecycle });
 
     // invoke 立刻返回 ack，不等 Observable 结束。
     // 终态（RUN_FINISHED/RUN_ERROR）由事件流承载，渲染端据此 offEvent + 收尾。
@@ -152,8 +178,9 @@ export function registerAgUiIpc(
   });
 
   ipcMain.handle(IPC.AGUI_CANCEL, () => {
-    for (const sub of activeRuns.values()) {
-      sub.unsubscribe();
+    for (const run of activeRuns.values()) {
+      run.subscription.unsubscribe();
+      run.endLifecycle();
     }
     activeRuns.clear();
     return true;

@@ -10,6 +10,8 @@
 
 export type ChatRole = "user" | "model";
 
+export type ChatSessionPurpose = "proactive-chat";
+
 export type ChatStickerId =
   | "playful"
   | "love-happy"
@@ -30,6 +32,9 @@ export interface ChatMessage {
   at: number;
   /** 仅从聊天窗口隐藏；消息仍持久化，并继续参与会话上下文。 */
   hidden?: boolean;
+  /** 不直接显示在聊天气泡里，但会拼入模型上下文。 */
+  modelContext?: string;
+  attachments?: MessageAttachment[];
   /** 表情包 ID（内置或用户自定义） */
   sticker?: string | null;
   /** TTS 缓存 key。只存 key，不存绝对路径，避免 userData 路径变化后 session JSON 失效。 */
@@ -44,6 +49,28 @@ export interface ChatMessage {
   };
 }
 
+export type MessageAttachment = ImageMessageAttachment | DocumentMessageAttachment;
+
+export interface ImageMessageAttachment {
+  kind: "image";
+  name: string;
+  filePath: string;
+  mime: string;
+  previewUrl?: string;
+  caption?: string;
+  status: "pending" | "done" | "error";
+}
+
+export interface DocumentMessageAttachment {
+  kind: "document";
+  name: string;
+  filePath: string;
+  status: "pending" | "done" | "error";
+  processedKind?: "text" | "indexed" | "empty" | "unsupported";
+  chunks?: number;
+  reason?: string;
+}
+
 export interface ChatSession {
   id: string;
   title: string;
@@ -52,6 +79,8 @@ export interface ChatSession {
   createdAt: number;
   updatedAt: number;
   schemaVersion: 1;
+  /** 系统用途会话的稳定标识；普通用户会话不设置。 */
+  purpose?: ChatSessionPurpose;
   // 用户是否手动改过名；true 时不再根据消息内容自动派生 title。
   // 没有此字段的老数据视为 false（向后兼容）。
   titleIsCustom?: boolean;
@@ -70,6 +99,7 @@ export interface ChatSessionMeta {
   updatedAt: number;
   messageCount: number;
   isMain?: boolean;
+  purpose?: ChatSessionPurpose;
 }
 
 export const CHAT_SCHEMA_VERSION = 1 as const;

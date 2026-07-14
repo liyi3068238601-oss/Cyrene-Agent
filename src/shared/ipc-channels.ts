@@ -10,6 +10,7 @@ export const IPC = {
   WINDOW_SET_DRAGGING: "window:set-dragging",
   WINDOW_CAPTURE_FRAME: "window:capture-frame",
   WINDOW_GET_CURSOR_POSITION: "window:get-cursor-position",
+  PET_VISIBILITY_CHANGED: "pet:visibility-changed",
   APP_QUIT: "app:quit",
 
   // chat window
@@ -19,6 +20,11 @@ export const IPC = {
   CHAT_IS_MAXIMIZED: "chat:is-maximized",
   CHAT_SEND_MESSAGE: "chat:send-message",
   CHAT_INGEST_FILES: "chat:ingest-files",
+  CHAT_PROCESS_DOCUMENTS: "chat:process-documents",
+  CHAT_DOCUMENT_INDEX_PROGRESS: "chat:document-index-progress",
+  CHAT_CANCEL_DOCUMENT_INDEX: "chat:cancel-document-index",
+  CHAT_CAPTION_IMAGE: "chat:caption-image",
+  CHAT_GET_IMAGE_SEND_STRATEGY: "chat:get-image-send-strategy",
   CHAT_STREAM_CHUNK: "chat:stream-chunk",
   CHAT_STREAM_DONE: "chat:stream-done",
   CHAT_PROACTIVE_MESSAGE: "chat:proactive-message",
@@ -51,6 +57,9 @@ export const IPC = {
   NOVELAI_ASSET_UPDATE: "novelai:asset-update",
   NOVELAI_HISTORY_UPDATE: "novelai:history-update",
   NOVELAI_HISTORY_DELETE: "novelai:history-delete",
+  // 推理下拉（chat 窗口：原子读 + providerKey 写）
+  CHAT_GET_REASONING_STATE: "chat:get-reasoning-state",
+  CHAT_SET_REASONING: "chat:set-reasoning",
 
   // AG-UI 事件流（替换上面的 chat:stream-* 的新通道）
   AGUI_RUN: "agui:run",
@@ -83,6 +92,11 @@ export const IPC = {
   SETTINGS_SAVE_GENERAL: "settings:save-general",
   UI_THEME_GET: "ui-theme:get",
   UI_THEME_CHANGED: "ui-theme:changed",
+  UI_FONT_GET: "ui-font:get",
+  UI_FONT_CHANGED: "ui-font:changed",
+  SETTINGS_PICK_UI_FONT: "settings:pick-ui-font",
+  SETTINGS_IMPORT_UI_FONT: "settings:import-ui-font",
+  SETTINGS_RESET_UI_FONT: "settings:reset-ui-font",
   SETTINGS_OPEN_SIDEBAR: "settings:open-sidebar",
   SETTINGS_CLOSE_SIDEBAR: "settings:close-sidebar",
   SETTINGS_OPEN_TASKS: "settings:open-tasks",
@@ -98,9 +112,11 @@ export const IPC = {
   // chat sessions (multi-conversation history, persisted to userData/cyrene-chats/)
   CHATS_LIST: "chats:list",
   CHATS_GET: "chats:get",
+  CHATS_GET_PAGE: "chats:get-page",
   CHATS_CREATE: "chats:create",
   CHATS_APPEND: "chats:append",
   CHATS_REPLACE_MESSAGES: "chats:replace-messages",
+  CHATS_REPLACE_TAIL: "chats:replace-tail",
   CHATS_RENAME: "chats:rename",
   CHATS_DELETE: "chats:delete",
   CHATS_OPEN_FOLDER: "chats:open-folder",
@@ -143,8 +159,12 @@ export const IPC = {
   // Opener 主动开口
   LIVE2D_SHOW_BUBBLE: "live2d:show-bubble",       // 主进程 → 桌宠窗口：显示气泡+播 wav
   LIVE2D_PLAY_ACTION: "live2d:play-action",        // 主进程 → 桌宠窗口：执行动作（motion 或 expression）
+  LIVE2D_GET_MAIN_DIAGNOSTICS: "live2d:get-main-diagnostics",
   OPENER_FEEDBACK: "opener:feedback",             // 渲染端 → 主进程：点气泡反馈
   OPENER_TEST_FIRE: "opener:test-fire",           // 渲染端 → 主进程：手动测试气泡
+  OPENER_GET_STATUS: "opener:get-status",         // 渲染端 → 主进程：查询主动开口语音包状态
+  OPENER_OPEN_PACK_DIR: "opener:open-pack-dir",   // 渲染端 → 主进程：打开当前实际读取的语音包目录
+  OPENER_OPEN_INSTALL_DOCS: "opener:open-install-docs", // 渲染端 → 主进程：打开本地语音包安装说明
   // embedding model status
   EMBEDDING_GET_STATUS: "embedding:get-status",
   EMBEDDING_DOWNLOAD: "embedding:download",

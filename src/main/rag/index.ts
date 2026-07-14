@@ -9,6 +9,8 @@ import { WorldbookManager } from "./worldbook";
 export { INJECTION_HEADER, INJECTION_PREAMBLE } from "./worldbook-constants";
 import { chunkText } from "./chunk";
 import { feedEntityNamesToJieba } from "../memory/entity-graph";
+import { isL2LocallyRecallable } from "../memory/memory-types";
+import type { DocumentImportControl } from "./file-ingest";
 
 // ── Global RAG instances ──
 let store: JsonVectorStore | null = null;
@@ -140,6 +142,17 @@ export async function addMemory(
   return entry.id;
 }
 
+export async function addL2MemoryVector(
+  text: string,
+  l2Id: string,
+  metadata?: Record<string, unknown>,
+): Promise<string> {
+  if (!store || !provider) throw new Error("RAG not initialized");
+  if (!l2Id.trim()) throw new Error("l2Id is required");
+  const entry = await store.addUnique(text, "user_memory", provider, { ...metadata, l2Id });
+  return entry.id;
+}
+
 // ── Memory search ──
 export async function searchMemory(
   query: string,
@@ -158,7 +171,27 @@ export async function searchMemoryEntries(
   options?: { recordRecall?: boolean }
 ): Promise<Array<{ id: string; text: string; createdAt: number; score: number; metadata?: Record<string, unknown> }>> {
   if (!retriever) return [];
-  const results = await retriever.retrieve(query, source, topK);
+  let allowedEntryIds: string[] | undefined;
+  if (source === "user_memory") {
+    try {
+      const { memoryStore } = await import("../memory/memory-store");
+      const memories = await memoryStore.getAllL2();
+      const recallableById = new Map(
+        memories.filter(isL2LocallyRecallable).map((memory) => [memory.id, memory]),
+      );
+      allowedEntryIds = getEntriesBySource("user_memory")
+        .filter((entry) => {
+          const l2Id = entry.metadata?.l2Id;
+          if (typeof l2Id !== "string") return false;
+          return recallableById.get(l2Id)?.ragId === entry.id;
+        })
+        .map((entry) => entry.id);
+    } catch (err) {
+      console.warn("[RAG] failed to resolve recallable user memories:", err);
+      return [];
+    }
+  }
+  const results = await retriever.retrieve(query, source, topK, { allowedEntryIds });
   if (options?.recordRecall !== false) {
     await recordUserMemoryRecalls(results);
   }
@@ -233,20 +266,93 @@ export function getPermanentWorldbookEntries(): string[] {
 }
 
 // ── Import document ──
-export async function importDocument(
+export type ImportedDocumentResult = {
+  importId: string;
+  chunkCount: number;
+};
+
+export type ImportedDocumentChunk = {
+  text: string;
+  score: number;
+  fileName?: string;
+  chunkIndex?: number;
+  importId?: string;
+};
+
+export type PreparedDocumentEmbedding = {
+  text: string;
+  chunkIndex: number;
+  embedding: number[];
+};
+
+export async function appendPreparedDocumentBatch(
+  fileName: string,
+  importId: string,
+  prepared: PreparedDocumentEmbedding[],
+): Promise<void> {
+  if (!store) throw new Error("RAG not initialized");
+  store.addPreparedBatch(prepared.map((entry) => ({
+    text: entry.text,
+    embedding: entry.embedding,
+    source: "imported_doc",
+    metadata: { fileName, chunkIndex: entry.chunkIndex, importId },
+  })));
+}
+
+export async function importPreparedDocumentForTurn(
+  fileName: string,
+  prepared: PreparedDocumentEmbedding[],
+): Promise<ImportedDocumentResult> {
+  if (!store) throw new Error("RAG not initialized");
+  const id = typeof crypto !== "undefined" && crypto.randomUUID
+    ? crypto.randomUUID()
+    : Math.random().toString(36).slice(2, 8);
+  const importId = `import-${Date.now()}-${id}`;
+  await appendPreparedDocumentBatch(fileName, importId, prepared);
+  return { importId, chunkCount: prepared.length };
+}
+
+export async function importDocumentForTurn(
   text: string,
-  fileName: string
-): Promise<number> {
+  fileName: string,
+  control?: DocumentImportControl,
+): Promise<ImportedDocumentResult> {
   if (!store || !provider) throw new Error("RAG not initialized");
   const chunks = chunkText(text, "doc_" + fileName);
-  const importId = typeof crypto !== "undefined" && crypto.randomUUID
+  control?.onProgress?.({ status: "chunking", completedChunks: chunks.length, totalChunks: chunks.length });
+  if (control?.isCancelled?.()) throw new Error("cancelled");
+  const id = typeof crypto !== "undefined" && crypto.randomUUID
     ? crypto.randomUUID()
-    : "import_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+    : Math.random().toString(36).slice(2, 8);
+  const importId = `import-${Date.now()}-${id}`;
+  control?.onProgress?.({ status: "embedding", completedChunks: 0, totalChunks: chunks.length });
   await store.addBatch(
     chunks.map((c) => ({ text: c.text, source: "imported_doc", metadata: { fileName, chunkIndex: c.index, importId } })),
-    provider
+    provider,
+    { isCancelled: control?.isCancelled },
   );
-  return chunks.length;
+  return { importId, chunkCount: chunks.length };
+}
+
+export async function importDocument(text: string, fileName: string): Promise<number> {
+  const result = await importDocumentForTurn(text, fileName);
+  return result.chunkCount;
+}
+
+export async function searchImportedDocumentChunksForImportIds(
+  query: string,
+  importIds: string[],
+  topK = 6,
+): Promise<ImportedDocumentChunk[]> {
+  if (!retriever || !query.trim() || importIds.length === 0) return [];
+  const results = await retriever.retrieve(query, "imported_doc", topK, { importIds });
+  return results.map((result) => ({
+    text: result.entry.text,
+    score: result.score,
+    fileName: typeof result.entry.metadata?.fileName === "string" ? result.entry.metadata.fileName : undefined,
+    chunkIndex: typeof result.entry.metadata?.chunkIndex === "number" ? result.entry.metadata.chunkIndex : undefined,
+    importId: typeof result.entry.metadata?.importId === "string" ? result.entry.metadata.importId : undefined,
+  }));
 }
 
 // ── Build memory context (legacy, kept for compatibility) ──
@@ -302,18 +408,27 @@ export async function upsertMemoryIndex(
 }
 
 export function isRAGInitialized(): boolean {
-  return store !== null;
+  return store !== null && provider !== null;
+}
+
+export function isUserMemoryVectorStoreReady(): boolean {
+  return store !== null && provider !== null;
 }
 
 /**
  * 获取指定 source 的所有向量条目（含 embedding），用于记忆压缩 / 聚类。
  * 返回浅拷贝，调用方不应修改返回的 embedding。
  */
-export function getEntriesBySource(source: string): Array<{ id: string; text: string; embedding: number[]; createdAt: number; weight: number }> {
+export function getEntriesBySource(source: string): Array<{ id: string; text: string; embedding: number[]; createdAt: number; weight: number; metadata?: Record<string, unknown> }> {
   if (!store) return [];
   return ((store as any).entries as MemoryEntry[])
     .filter((e) => e.source === source)
-    .map((e) => ({ id: e.id, text: e.text, embedding: e.embedding, createdAt: e.createdAt, weight: e.weight }));
+    .map((e) => ({ id: e.id, text: e.text, embedding: e.embedding, createdAt: e.createdAt, weight: e.weight, metadata: e.metadata }));
+}
+
+export function deleteUserMemoryVectors(ragIds: string[]): number {
+  if (!store) throw new Error("RAG not initialized");
+  return store.deleteEntriesByIds(ragIds, "user_memory");
 }
 
 export function deleteImportedDoc(importId: string, fileName?: string): number {
@@ -351,4 +466,8 @@ export function listMemoryIndexEntries(source = "user_memory"): Array<{
 export function deleteConversationHistoryEntries(sessionIds: Iterable<string>): number {
   if (!store) return 0;
   return store.deleteConversationHistory(sessionIds);
+}
+
+export function hasImportedDocumentChunks(importId: string): boolean {
+  return store?.hasImportedDocumentChunks(importId) ?? false;
 }

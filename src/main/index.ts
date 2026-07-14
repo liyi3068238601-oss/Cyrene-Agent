@@ -2,24 +2,61 @@ import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, screen, shell, di
 import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
-import { createHash } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { pathToFileURL } from "url";
 import { IPC } from "../shared/ipc-channels";
+import { normalizeUiTheme, type UiTheme } from "../shared/ui-theme";
+import { DEFAULT_UI_FONT, isSupportedFontFileName, normalizeUiFont, type UiFont } from "../shared/ui-font";
+import { normalizeUiIcon, UI_ICON_PRESETS, type UiIcon } from "../shared/ui-icon";
+import { foldReasoning, normalizeReasoningPreference, type ReasoningPreference } from "../shared/reasoning";
+import { getUiFontResponseHeaders, isSafeUiFontRequest } from "./ui-font-protocol";
+import {
+  normalizeDefaultChatMode,
+  normalizeMobileMessageSegmentationMode,
+  normalizeProactiveChatMode,
+  normalizeProactiveDeliveryTarget,
+  normalizeSegmentedOutputMode,
+  type DefaultChatMode,
+  type MobileMessageSegmentationMode,
+  type ProactiveChatMode,
+  type ProactiveDeliveryTarget,
+  type SegmentedOutputMode,
+} from "../shared/preferences";
 import { STATUS_KEYWORDS } from "./status-keywords";
-import { initRAG, buildMemoryContext, addMemory, importDocument, switchEmbeddingModel, deleteImportedDoc, deleteMemoryEntries } from "./rag";
+import {
+  addL2MemoryVector,
+  addMemory,
+  buildMemoryContext,
+  deleteMemoryEntries,
+  deleteImportedDoc,
+  deleteUserMemoryVectors,
+  getEntriesBySource,
+  importDocument,
+  initRAG,
+  isUserMemoryVectorStoreReady,
+  switchEmbeddingModel,
+} from "./rag";
 import { getEmbeddingProvider, getSceneEmbeddingProvider } from "./rag/embedding";
-import { ingestPaths } from "./rag/file-ingest";
+import { describePendingAttachment } from "./rag/file-ingest";
+import { cancelDocumentIndexJob, configureDocumentIndexQueue, enqueueDocumentIndexJob } from "./rag/document-index-queue";
+import { retrieveQueuedDocumentChunks, runDocumentIndexJob } from "./rag/document-index-worker";
+import { processDocumentIndexRequest } from "./rag/document-index-ipc";
+import { IMAGE_CAPTION_PROMPT, validateCaptionImagePath } from "./chat/image-caption";
+import { decideImageSendStrategy } from "./chat/image-send-strategy";
 import { buildAlwaysOnContext, buildMemoryInjection, runFunctionCallingLoop, scheduleMemoryWrite } from "./orchestrator";
 import { CyreneAgent } from "./orchestrator/cyrene-agent";
 import { indexConversationTurn } from "./orchestrator/history-tools";
 import { buildToneInjection } from "./orchestrator/tone-injector";
 import { getAdapter, buildVendorUrl, getAdapterForConfig, createSseReader } from "./orchestrator/vendors";
 import type { VendorConfig } from "./orchestrator/vendors";
-import { getCapability } from "./orchestrator/vendors/capabilities";
+import { getCapability, getCapabilityOrOpenAI } from "./orchestrator/vendors/capabilities";
 import { captionImage, type VisionConfig } from "./orchestrator/vision-captioner";
 import { toolRegistry, type ToolDefinition } from "./orchestrator/tool-registry";
+import { buildToolCatalog } from "./orchestrator/tool-catalog";
 import type { ToolRiskLevel } from "./permission";
 import { loadChannelsSettings } from "./channels/settings-store";
+import { channelManager } from "./channels/manager";
+import { canStartProactiveChannelDelivery, sendProactiveChannelMessage } from "./channels/proactive-delivery";
 // 触发 built-in-tools 的副作用注册（fetch_url / run_shell / install_mcp_server）
 import "./orchestrator/built-in-tools";
 // 触发 fs-tools 的副作用注册（read_file / list_dir / write_file / read_image）
@@ -34,13 +71,15 @@ import { registerChoiceIpc, setChoiceCardSender } from "./user-choice";
 import { enqueueLLMTask } from "./llm-queue";
 import { getEmbeddingStatus, downloadEmbeddingModel, deleteEmbeddingModel } from "./embedding-manager";
 import { BUILT_IN_STICKER_DESCRIPTIONS } from "./sticker-descriptions";
-import { buildStickerEmbeddingIndex, matchSticker } from "./sticker-embedder";
+import { buildCachedStickerEmbeddingIndex } from "./sticker-embedding-cache";
+import { matchSticker } from "./sticker-embedder";
 import type { StickerEmbeddingEntry } from "./sticker-embedder";
-import { buildSceneIndex } from "./scene-embedder";
+import { buildCachedSceneIndex } from "./scene-embedding-cache";
 import type { SceneIndex } from "./scene-embedder";
 import { loadUserStickerManifest, addUserSticker, deleteUserSticker, getAllStickerConfig, isStickerIdTaken, getStickersDir } from "./sticker-storage";
 import { parseLocalStickerFileFromUrl, resolveLocalStickerPath } from "./sticker-protocol";
 import { normalizeWindowVisibilitySettings } from "./window-visibility-settings";
+import { PetWindowMoveController } from "./pet-window-movement";
 import type { StickerConfigItem } from "../shared/sticker-types";
 import { initReranker, getRerankerInstallStatus } from "./rag/reranker";
 import { memoryStore } from "./memory/memory-store"
@@ -66,18 +105,24 @@ import { isMemoryAutomationPaused, setMemoryAutomationPaused } from "./memory-v2
 import { recallMemoryV2 } from "./memory-v2/librarian"
 import { memoryV2ArchivistScheduler } from "./memory-v2/archivist-scheduler"
 import { syncPendingCompressedMemories } from "./memory/memory-compressor";
+import { backupMemoryRagFiles, reconcileMemoryRag } from "./memory/memory-rag-reconciliation";
 import type { L0Profile, L1Profile } from "./memory/memory-types";
-import { registerChatsIpc } from "./chats/chats-ipc";
+import { broadcastChatsChanged, registerChatsIpc } from "./chats/chats-ipc";
+import * as chatsStore from "./chats/chats-store";
 import { recordUsage, getUsage, flush as flushTokenUsage } from "./token-usage-store";
 import { uploadFile as ttsUploadFile, cloneVoice as ttsCloneVoice, synthesize as ttsSynthesize } from "./tts/minimax-engine";
 import { synthesize as gptsovitsSynthesize } from "./tts/gptsovits-engine";
 import { synthesize as customCloudSynthesize } from "./tts/custom-cloud-engine";
 import { synthesize as mimoSynthesize } from "./tts/mimo-engine";
 import { synthesizeByEngine } from "./tts/tts-dispatcher";
-import { startOpener, stopOpener, setLive2dWindow, reloadManifest, handleBubbleClick, handleChatWindowOpened, testFire } from "./opener/opener-runner";
+import { startOpener, stopOpener, setLive2dWindow, reloadManifest, handleBubbleClick, handleChatWindowOpened, testFire, setProactiveCandidateHandler, getPresetFallback } from "./opener/opener-runner";
 import { startProactiveChat, stopProactiveChat } from "./proactive-chat";
 import { MAIN_SESSION_ID, appendMessage as appendChatMessage, getSession as getChatSession, setDeletedSessionArchiver } from "./chats/chats-store";
 import { hasActiveAgUiRuns, registerAgUiIpc, type AguiRunInput } from "./agui-bridge";
+import { loadState as loadOpenerState, saveState as saveOpenerState } from "./opener/desire-engine";
+import type { ShowBubblePayload } from "./opener/opener-types";
+import { SCENE_CONFIGS } from "./opener/scenes-config";
+import { getManifestPath, getOpenerPackDir } from "./opener/opener-pack-store";
 import { setWeatherConfig, setSearchConfig, loadTodos, onTodosChange, setDelegateSettings } from "./orchestrator/built-in-tools";
 import { setScreenObservationVisionConfigGetter } from "./orchestrator/screen-observation-register";
 import { registerRecallHistoryTool } from "./orchestrator/history-tools";
@@ -85,6 +130,12 @@ import { registerDocumentTools } from "./orchestrator/document-tools";
 import { registerLifeTools, setTranslateConfig } from "./orchestrator/life-tools";
 import { registerTravelTools, setTravelConfig } from "./orchestrator/travel-tools";
 import { registerEmailTools, setEmailConfig } from "./orchestrator/email-tools";
+import {
+  buildConversationTimeContext,
+  normalizeChatMessagesWithTime,
+  resolveChatContextTimezone,
+  type ChatContextMessage,
+} from "./chat-time-context";
 import { setAsrConfig } from "./asr/volcano-asr-engine";
 import { setCallWindow, registerCallIpc, setCallSettings, stopCall } from "./call/call-manager";
 import { initSkills, skillRegistry, buildSkillCatalog, parseSlashCommand, setSkillEnabled, listSkillsForUi } from "./skills";
@@ -92,10 +143,11 @@ import { initGameBot } from "./game-bot";
 import { captureScreen } from "./game-bot/screenshot";
 import type { ScreenCapture } from "./orchestrator/screen-observation-tool";
 import { buildRecentScreenObservationContext, getScreenObserverStatus, pauseScreenObservation, resumeScreenObservation, startScreenObserver, stopScreenObserver } from "./screen-observer";
-import { initChannels, shutdownChannels } from "./channels/init";
-import { channelManager } from "./channels/manager";
+import { initChannels, shutdownChannels, setChannelsConversationLifecycle } from "./channels/init";
 import { getRecentLog as getRecentChannelLog } from "./channels/message-log";
-import { setDispatcherBuildAndRunAgent, setDispatcherSynthesizeTts, setDispatcherBroadcastChat, setDispatcherLoadRecentHistory } from "./channels/dispatcher";
+import { buildChannelAttachmentInputs } from "./channels/agent-input";
+import { setDispatcherBuildAndRunAgent, setDispatcherSynthesizeTts, setDispatcherBroadcastChat, setDispatcherLoadGeneralSettings, setDispatcherLoadRecentHistory } from "./channels/dispatcher";
+import { createWindowLifecycleTracker } from "./electron-window-lifecycle";
 import {
   buildAgentRunOptions,
   onAgentRunFinished,
@@ -110,6 +162,37 @@ import { SchedulerEngine } from "./scheduler/scheduler-engine";
 import { createSchedulerRunner } from "./scheduler/scheduler-runner";
 import { registerSchedulerIpc } from "./scheduler/scheduler-ipc";
 import type { ScheduledTask } from "./scheduler/types";
+import {
+  createProactiveChatService,
+  type ProactiveChatService,
+  type ProactiveCommitInput,
+  type ProactiveCommitResult,
+} from "./proactive/proactive-service";
+import { routeProactiveDelivery } from "./proactive/proactive-delivery-routing";
+import { buildProactiveMessages, type ProactiveHistoryTurn } from "./proactive/proactive-prompt";
+import { runProactiveModel } from "./proactive/proactive-model";
+import type { ProactiveCandidate, ProactiveRuntimeSnapshot } from "./proactive/proactive-types";
+import { canCommitProactiveMessage } from "./proactive/proactive-policy";
+
+configureDocumentIndexQueue(runDocumentIndexJob);
+
+async function reconcileUserMemoryIndex(): Promise<void> {
+  if (!isUserMemoryVectorStoreReady()) {
+    console.warn("[Memory/RAG] reconciliation skipped: vector store is not writable");
+    return;
+  }
+  const report = await reconcileMemoryRag({
+    getMemories: () => memoryStore.getAllL2(),
+    getVectors: () => getEntriesBySource("user_memory"),
+    backup: async () => backupMemoryRagFiles(app.getPath("userData")),
+    addVector: addL2MemoryVector,
+    markSynced: (l2Id, ragId) => memoryStore.markL2SyncStatus(l2Id, "synced", ragId),
+    markSyncFailed: (l2Id, error) => memoryStore.markL2SyncStatus(l2Id, "sync_failed", undefined, error),
+    deleteVectors: (ids) => deleteUserMemoryVectors(ids),
+    warn: (message, error) => console.warn(`[Memory/RAG] ${message}:`, error),
+  });
+  console.log("[Memory/RAG] reconciliation:", report);
+}
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -122,6 +205,18 @@ let callWindow: BrowserWindow | null = null;
 let novelAiWindow: BrowserWindow | null = null;
 let schedulerEngine: SchedulerEngine | null = null;
 let screenObservationPaused = false;
+let proactiveChatService: ProactiveChatService | null = null;
+let normalConversationBusyCount = 0;
+let proactiveScreenLocked = false;
+const petWindowMoveController = new PetWindowMoveController(
+  () => mainWindow,
+  ({ x, y }) => {
+    saveGeneralSettings({ petWindowX: x, petWindowY: y });
+  },
+);
+const live2dWindowLifecycle = createWindowLifecycleTracker<BrowserWindow>("live2d-main", {
+  onClosed: () => setLive2dWindow(null),
+});
 // 聊天窗口当前活跃的会话 id（通过 IPC 由聊天窗口上报）；
 // 设置面板"删除当前会话"差异化提示用。聊天窗口关闭时由 closed 事件置 null。
 let activeChatSessionId: string | null = null;
@@ -295,6 +390,12 @@ interface ProviderProfile {
    * 不存 = 等价于 "auto"。
    */
   explicitTransport?: "openai" | "anthropic" | "auto";
+  /**
+   * 用户保存的推理偏好（source of truth）。顶层 ModelSettings.reasoning 是当前厂商镜像。
+   * 当前模型不支持某个 effort 时仍保留 user preference，
+   * 实际请求时由 resolveEffectiveReasoning 决定 effective config。
+   */
+  reasoning?: ReasoningPreference;
 }
 
 /**
@@ -355,6 +456,12 @@ interface ModelSettings {
    * 详见 ProviderProfile.explicitTransport。
    */
   explicitTransport?: "openai" | "anthropic" | "auto";
+  /**
+   * 当前厂商 reasoning 偏好的顶层镜像（与 explicitTransport 同思路）。
+   * 真值在 perProvider[currentProvider].reasoning；顶层字段是 view。
+   * 保存的是用户 preference（不覆盖）；effective config 由 capability 决定。
+   */
+  reasoning?: ReasoningPreference;
   // 按厂商缓存：currentProvider 之外的厂商配置也保留在这里，切回来时回填。
   // 真值（source of truth）是 perProvider；顶层 baseUrl/model/apiKey 是当前厂商那一份的展开镜像，
   // 仅为兼容现有 main 进程里大量直接读 settings.baseUrl 等代码而保留。
@@ -405,7 +512,19 @@ interface GeneralSettings {
   tasksVisible: boolean;
   launchAtLogin: boolean;
   language: "zh-CN";
-  uiTheme: "classic" | "polished-pink" | "pearl-white";
+  uiTheme: UiTheme;
+  uiFont: UiFont;
+  uiIcon: UiIcon;
+  /** 聊天窗口打开时默认选中的模式。 */
+  defaultChatMode: DefaultChatMode;
+  /** 聊天气泡分段输出偏好。 */
+  segmentedOutputMode: SegmentedOutputMode;
+  /** 手机渠道文本消息分段发送偏好。 */
+  mobileMessageSegmentation: MobileMessageSegmentationMode;
+  /** 主动聊天功能开关占位；当前不接实际逻辑。 */
+  proactiveChatMode: ProactiveChatMode;
+  /** 主动消息最终投递到本地、微信或飞书。 */
+  proactiveDeliveryTarget: ProactiveDeliveryTarget;
   // TTS 配置
   ttsEngine: "off" | "minimax" | "gptsovits" | "custom-cloud" | "mimo";
   ttsAutoRead: boolean;
@@ -474,6 +593,8 @@ interface GeneralSettings {
   asrLanguage: "zh" | "en" | "auto";
   /** VAD 静默检测阈值（毫秒），500~2000，默认 1000 */
   asrVadSilenceMs: number;
+  /** VAD 音量阈值（0~1），默认 0.01。环境吵或麦克风音量低时可调 */
+  asrVadThreshold: number;
   /** 通话中显示文字转写 */
   asrShowTranscript: boolean;
   /** Opener 主动开口档位 */
@@ -525,9 +646,16 @@ const CHAT_REQUEST_TIMEOUT_MS = 300000; // FC 总预算：20 轮 × 推理模型
 /** 桌宠窗口的基础尺寸（zoom=1.0 时）。缩放因子改变窗口与模型尺寸，二者同步。 */
 const PET_WINDOW_BASE_WIDTH = 400;
 const PET_WINDOW_BASE_HEIGHT = 500;
+const STARTUP_EMBEDDING_REFRESH_DELAY_MS = 1500;
 
-/** 任务栏 / 托盘图标路径（相对于 dist/main/main/）。所有窗口共用同一个 .ico。 */
-const APP_ICON_PATH = path.join(__dirname, "..", "..", "..", "assets", "tray-icon.ico");
+function getAppIconPath(icon: UiIcon): string {
+  const preset = UI_ICON_PRESETS.find((item) => item.id === icon);
+  return path.join(__dirname, "..", "..", "..", "assets", "icon-presets", preset?.fileName ?? "cyrene-sun.png");
+}
+
+function getCurrentAppIconPath(): string {
+  return getAppIconPath(loadGeneralSettings().uiIcon);
+}
 let runtimeState: RuntimeState = {
     status: "陪伴中",
     feeling: "平静",
@@ -536,7 +664,65 @@ let runtimeState: RuntimeState = {
   };
 let feelingScores = createFeelingScores(runtimeState.feeling);
 let stickerEmbeddingIndex: StickerEmbeddingEntry[] | null = null;
+let stickerEmbeddingRefreshSeq = 0;
 let sceneEmbeddingIndex: SceneIndex | null = null;
+let sceneEmbeddingRefreshSeq = 0;
+
+function refreshStickerEmbeddingIndexInBackground(reason: string): void {
+  const seq = ++stickerEmbeddingRefreshSeq;
+  void (async () => {
+    try {
+      const provider = getEmbeddingProvider();
+      if (!provider) {
+        if (seq === stickerEmbeddingRefreshSeq) stickerEmbeddingIndex = null;
+        console.warn("[StickerEmbedding] Model not found. Sticker matching disabled.");
+        return;
+      }
+
+      const index = await buildCachedStickerEmbeddingIndex(
+        provider,
+        BUILT_IN_STICKER_DESCRIPTIONS,
+        loadUserStickerManifest(),
+      );
+      if (seq !== stickerEmbeddingRefreshSeq) return;
+      stickerEmbeddingIndex = index;
+      console.log(`[StickerEmbedding] index ready (${reason}): ${index.length} entries`);
+    } catch (err) {
+      if (seq === stickerEmbeddingRefreshSeq) stickerEmbeddingIndex = null;
+      console.error("[StickerEmbedding] refresh failed:", err instanceof Error ? err.message : String(err));
+    }
+  })();
+}
+
+function refreshSceneEmbeddingIndexInBackground(reason: string): void {
+  const seq = ++sceneEmbeddingRefreshSeq;
+  void (async () => {
+    try {
+      const sceneProvider = getSceneEmbeddingProvider();
+      if (!sceneProvider) {
+        if (seq === sceneEmbeddingRefreshSeq) sceneEmbeddingIndex = null;
+        console.warn("[SceneEmbedding] bge-m3 model not found. Scene embedding disabled.");
+        return;
+      }
+
+      const index = await buildCachedSceneIndex(sceneProvider);
+      if (seq !== sceneEmbeddingRefreshSeq) return;
+      sceneEmbeddingIndex = index;
+      console.log("[SceneEmbedding] index ready:", Object.keys(index.scenes).length, "scenes", `(${reason})`);
+    } catch (err) {
+      if (seq === sceneEmbeddingRefreshSeq) sceneEmbeddingIndex = null;
+      console.error("[SceneEmbedding] refresh failed:", err instanceof Error ? err.message : String(err));
+    }
+  })();
+}
+
+function scheduleStartupEmbeddingRefreshes(): void {
+  setTimeout(() => {
+    refreshStickerEmbeddingIndexInBackground("startup");
+    refreshSceneEmbeddingIndexInBackground("startup");
+  }, STARTUP_EMBEDDING_REFRESH_DELAY_MS);
+}
+
 const DEFAULT_MODEL_SETTINGS: ModelSettings = {
   mode: "auto",
   // 默认厂商改为 MiniMax（v1 vendor adapter 第一个落地的），DeepSeek 已从 v1 清单移除。
@@ -566,6 +752,13 @@ const DEFAULT_GENERAL_SETTINGS: GeneralSettings = {
   launchAtLogin: false,
   language: "zh-CN",
   uiTheme: "classic",
+  uiFont: DEFAULT_UI_FONT,
+  uiIcon: "cyrene-sun",
+  defaultChatMode: "collab",
+  segmentedOutputMode: "off",
+  mobileMessageSegmentation: "off",
+  proactiveChatMode: "off",
+  proactiveDeliveryTarget: "local",
   ttsEngine: "off",
   ttsAutoRead: true,
   ttsSpeed: 1,
@@ -608,6 +801,7 @@ const DEFAULT_GENERAL_SETTINGS: GeneralSettings = {
   asrAliyunAccessKeySecret: "",
   asrLanguage: "zh",
   asrVadSilenceMs: 1000,
+  asrVadThreshold: 0.01,
   asrShowTranscript: false,
   openerMode: "off",
   proactiveChatEnabled:false,
@@ -779,6 +973,7 @@ function normalizeProviderProfile(input: Partial<ProviderProfile> | null | undef
     apiKey: typeof input?.apiKey === "string" ? input.apiKey.trim() : "",
     displayName: typeof input?.displayName === "string" && input?.displayName.trim() ? input.displayName.trim() : undefined,
     explicitTransport,
+    reasoning: normalizeReasoningPreference((input as { reasoning?: unknown })?.reasoning),
   };
 }
 
@@ -842,6 +1037,7 @@ function normalizeModelSettings(input: Partial<ModelSettings> | null | undefined
     model: profile.model,
     apiKey: profile.apiKey,
     explicitTransport: profile.explicitTransport,
+    reasoning: profile.reasoning,  // 顶层镜像：与 explicitTransport 同源（perProvider[currentProvider].reasoning）
     perProvider,
     runtimeSync: input?.runtimeSync === "llm" ? "llm" : input?.runtimeSync === "local" ? "local" : "off",
     stickerEnabled: input?.stickerEnabled !== false,
@@ -929,6 +1125,25 @@ function saveModelSettings(settings: Partial<ModelSettings>): ModelSettings {
     settings.explicitTransport === "openai" || settings.explicitTransport === "anthropic" || settings.explicitTransport === "auto"
       ? settings.explicitTransport
       : incomingProfile.explicitTransport;
+  // reasoning 折叠（用户第三轮修订 #4）：优先级 perProvider > 顶层 > existing
+  const incomingProfileForReasoning = (settings.perProvider ?? {})[currentProvider];
+  const hasProfileReasoning = incomingProfileForReasoning
+    && Object.prototype.hasOwnProperty.call(incomingProfileForReasoning, "reasoning");
+  const hasTopLevelReasoning = Object.prototype.hasOwnProperty.call(settings, "reasoning");
+  let chosenReasoningRaw: unknown;
+  let chosenReasoningHasKey: boolean;
+  if (hasProfileReasoning) {
+    chosenReasoningRaw = (incomingProfileForReasoning as { reasoning?: unknown }).reasoning;
+    chosenReasoningHasKey = true;
+  } else if (hasTopLevelReasoning) {
+    chosenReasoningRaw = settings.reasoning;
+    chosenReasoningHasKey = true;
+  } else {
+    chosenReasoningRaw = undefined;
+    chosenReasoningHasKey = false;
+  }
+  const foldedReasoning = foldReasoning(chosenReasoningRaw, incomingProfile.reasoning, chosenReasoningHasKey);
+
   perProvider[currentProvider] = {
     baseUrl: typeof settings.baseUrl === "string" ? settings.baseUrl.trim() : incomingProfile.baseUrl,
     model: typeof settings.model === "string" ? settings.model.trim() : incomingProfile.model,
@@ -937,6 +1152,7 @@ function saveModelSettings(settings: Partial<ModelSettings>): ModelSettings {
       ? settings.displayName.trim()
       : incomingProfile.displayName,
     explicitTransport: incomingExplicitTransport,
+    reasoning: foldedReasoning,
   };
 
   merged.provider = currentProvider;
@@ -979,7 +1195,14 @@ function normalizeGeneralSettings(input: Partial<GeneralSettings> | null | undef
     tasksVisible: windowVisibility.tasksVisible,
     launchAtLogin: Boolean(input?.launchAtLogin),
     language: "zh-CN",
-    uiTheme: input?.uiTheme === "pearl-white" ? "pearl-white" : input?.uiTheme === "polished-pink" ? "polished-pink" : "classic",
+    uiTheme: normalizeUiTheme(input?.uiTheme),
+    uiFont: normalizeUiFont(input?.uiFont),
+    uiIcon: normalizeUiIcon(input?.uiIcon),
+    defaultChatMode: normalizeDefaultChatMode(input?.defaultChatMode),
+    segmentedOutputMode: normalizeSegmentedOutputMode(input?.segmentedOutputMode),
+    mobileMessageSegmentation: normalizeMobileMessageSegmentationMode(input?.mobileMessageSegmentation),
+    proactiveChatMode: normalizeProactiveChatMode(input?.proactiveChatMode),
+    proactiveDeliveryTarget: normalizeProactiveDeliveryTarget(input?.proactiveDeliveryTarget),
     // TTS 配置
     ttsEngine: (["off", "minimax", "gptsovits", "custom-cloud", "mimo"].includes(input?.ttsEngine as string) ? input?.ttsEngine : "off") as GeneralSettings["ttsEngine"],
     ttsAutoRead: input?.ttsAutoRead === undefined ? DEFAULT_GENERAL_SETTINGS.ttsAutoRead : Boolean(input.ttsAutoRead),
@@ -1025,6 +1248,9 @@ function normalizeGeneralSettings(input: Partial<GeneralSettings> | null | undef
     asrVadSilenceMs: typeof input?.asrVadSilenceMs === "number"
       ? Math.max(300, Math.min(30000, Math.round(input.asrVadSilenceMs)))
       : DEFAULT_GENERAL_SETTINGS.asrVadSilenceMs,
+    asrVadThreshold: typeof input?.asrVadThreshold === "number"
+      ? Math.max(0.001, Math.min(0.5, Number(input.asrVadThreshold)))
+      : DEFAULT_GENERAL_SETTINGS.asrVadThreshold,
     asrShowTranscript: Boolean(input?.asrShowTranscript),
     openerMode: ["off", "quiet", "normal", "lively"].includes(String(input?.openerMode))
       ? (input!.openerMode as "off" | "quiet" | "normal" | "lively")
@@ -1090,6 +1316,12 @@ function saveGeneralSettings(settings: Partial<GeneralSettings>): GeneralSetting
   syncBuiltInToolToggles(normalized);
   if (before.uiTheme !== normalized.uiTheme) {
     broadcastUiThemeChanged(normalized.uiTheme);
+  }
+  if (JSON.stringify(before.uiFont) !== JSON.stringify(normalized.uiFont)) {
+    broadcastUiFontChanged(normalized.uiFont);
+  }
+  if (before.uiIcon !== normalized.uiIcon) {
+    applyUiIcon(normalized.uiIcon);
   }
   return normalized;
 }
@@ -1304,6 +1536,7 @@ function computeLayout(): {
 interface ChatRequestMessage {
   role: "user" | "model" | "assistant" | "system";
   content: string;
+  at?: number;
 }
 
 interface ChatCompletionChoice {
@@ -1453,18 +1686,8 @@ function buildChatCompletionsUrl(baseUrl: string): string {
   return `${trimmed}/chat/completions`;
 }
 
-function normalizeChatMessages(input: unknown): Array<{ role: "system" | "user" | "assistant"; content: string }> {
-  if (!Array.isArray(input)) return [];
-  return input
-    .map((item): { role: "system" | "user" | "assistant"; content: string } | null => {
-      if (!item || typeof item !== "object") return null;
-      const record = item as Partial<ChatRequestMessage>;
-      if (typeof record.content !== "string" || !record.content.trim()) return null;
-      const role = record.role === "user" || record.role === "system" ? record.role : "assistant";
-      return { role, content: stripThinkBlocks(record.content).trim() };
-    })
-    .filter((item): item is { role: "system" | "user" | "assistant"; content: string } => item !== null)
-    .slice(-24);
+function normalizeChatMessages(input: unknown): ChatContextMessage[] {
+  return normalizeChatMessagesWithTime(input);
 }
 
 function getApiLogPath(): string {
@@ -1517,6 +1740,7 @@ async function callChatCompletionsStream(
     model: settings.model,
     apiKey: settings.apiKey,
     explicitTransport: settings.explicitTransport,
+    reasoning: settings.reasoning,
   };
 
   try {
@@ -1641,23 +1865,310 @@ function buildSystemPrompt(styleFile: string): string {
   const isTalkMode = styleFile.startsWith("talk");
   const system = loadPromptFile(isTalkMode ? "talk_system.md" : "system.md");
   if (system) parts.push(system);
-  
+
   const identity = loadPromptFile("identity.md");
   if (identity) parts.push(identity);
-  
+
   const soul = loadPromptFile("soul.md");
   if (soul) parts.push(soul);
-  
+
   const canon = loadPromptFile("canon_quotes.md");
   if (canon) parts.push(canon);
-  
+
   // 纯聊天模式不加载 style 文件（talk_system.md 已包含完整规则）
   if (!isTalkMode) {
     const style = loadPromptFile("styles/" + styleFile);
     if (style) parts.push(style);
   }
-  
+
   return parts.join("\n\n---\n\n");
+}
+
+function buildProactivePersonaPrompt(): string {
+  const parts: string[] = [];
+  const talkSystem = loadPromptFile("talk_system.md");
+  if (talkSystem) parts.push(talkSystem);
+  const soul = loadPromptFile("soul.md");
+  if (soul) {
+    // 主动轮完全不携带工具说明；Soul 尾部的 Live2D/联网章节由正常聊天使用。
+    parts.push(soul.split("\n## Live2D 与聊天文字的分工")[0].trim());
+  }
+  const canon = loadPromptFile("canon_quotes.md");
+  if (canon) parts.push(canon);
+  const style = loadPromptFile("styles/01_default.md");
+  if (style) parts.push(style);
+  return parts.join("\n\n---\n\n");
+}
+
+function toProactiveHistory(messages: Array<{ role: "user" | "model"; content: string; at: number }>): ProactiveHistoryTurn[] {
+  return messages
+    .filter((message) => message.content.trim())
+    .slice(-16)
+    .map((message) => ({ role: message.role, content: message.content, at: message.at }));
+}
+
+function getProactiveHistories(): { ordinary: ProactiveHistoryTurn[]; proactive: ProactiveHistoryTurn[] } {
+  const ordinaryMeta = chatsStore.listSessions().find((session) => session.purpose !== "proactive-chat");
+  const ordinarySession = ordinaryMeta ? chatsStore.getSession(ordinaryMeta.id) : null;
+  const proactiveSession = chatsStore.getSessionByPurpose("proactive-chat");
+  return {
+    ordinary: toProactiveHistory(ordinarySession?.messages ?? []),
+    proactive: toProactiveHistory(proactiveSession?.messages ?? []),
+  };
+}
+
+function getProactiveRuntimeSnapshot(): ProactiveRuntimeSnapshot {
+  const now = Date.now();
+  let idleSec = Number.POSITIVE_INFINITY;
+  try { idleSec = powerMonitor.getSystemIdleTime(); } catch { /* app 尚未 ready */ }
+  return {
+    now,
+    localHour: new Date(now).getHours(),
+    idleSec,
+    enabled: loadGeneralSettings().proactiveChatMode === "on",
+    conversationBusy: normalConversationBusyCount > 0,
+    generationBusy: false,
+    screenLocked: proactiveScreenLocked,
+  };
+}
+
+async function buildProactiveAgentMessages(candidate: ProactiveCandidate) {
+  const histories = getProactiveHistories();
+  const recentTopic = histories.ordinary.slice(-4).map((turn) => turn.content).join("\n");
+  const retrievalQuery = `${candidate.sceneId}\n${recentTopic}`.trim();
+  const [profileContext, memoryContext] = await Promise.all([
+    buildAlwaysOnContext(retrievalQuery, histories.ordinary.map((turn) => ({ role: turn.role, content: turn.content }))).catch(() => ""),
+    buildMemoryInjection(retrievalQuery).catch(() => ""),
+  ]);
+  const state = loadOpenerState();
+  const snapshot = getProactiveRuntimeSnapshot();
+  return buildProactiveMessages({
+    basePersona: buildProactivePersonaPrompt(),
+    userProfile: profileContext,
+    relevantMemory: memoryContext,
+    ordinaryHistory: histories.ordinary,
+    proactiveHistory: histories.proactive,
+    sceneId: candidate.sceneId,
+    localNow: new Date(snapshot.now),
+    idleSec: snapshot.idleSec,
+    unansweredCount: state.unansweredCount,
+  });
+}
+
+async function synthesizeProactiveSpeech(text: string): Promise<{ audioBase64: string; format: "wav" | "mp3"; durationMs: number } | null> {
+  const cfg = loadGeneralSettings();
+  if (!cfg.ttsAutoRead || cfg.ttsEngine === "off") return null;
+  try {
+    const result = await synthesizeByEngine(cfg.ttsEngine, {
+      text,
+      speed: cfg.ttsSpeed,
+      volume: cfg.ttsVolume,
+      apiKey: cfg.ttsEngine === "mimo" ? cfg.ttsMimoKey : (cfg.ttsEngine === "custom-cloud" ? cfg.ttsCustomCloudApiKey : cfg.ttsMinimaxKey),
+      voiceId: cfg.ttsEngine === "custom-cloud" ? cfg.ttsCustomCloudVoiceId : cfg.ttsMinimaxVoiceId,
+      model: cfg.ttsMinimaxModel,
+      baseUrl: cfg.ttsGptsovitsBaseUrl,
+      refAudioPath: cfg.ttsGptsovitsRefAudioPath,
+      promptText: cfg.ttsGptsovitsPromptText,
+      endpointUrl: cfg.ttsCustomCloudEndpointUrl,
+      timeoutMs: cfg.ttsCustomCloudTimeoutMs,
+      voiceAudioPath: cfg.ttsMimoVoiceAudioPath,
+      stylePrompt: cfg.ttsMimoStylePrompt,
+      format: cfg.ttsEngine === "gptsovits" ? cfg.ttsGptsovitsFormat : (cfg.ttsEngine === "custom-cloud" ? cfg.ttsCustomCloudFormat : "mp3"),
+    });
+    return {
+      audioBase64: result.audio.toString("base64"),
+      format: result.format,
+      durationMs: Math.max(1_500, Math.min(30_000, text.length * 180)),
+    };
+  } catch (error) {
+    console.warn("[Proactive] TTS 合成失败，保留文本消息:", error instanceof Error ? error.message : error);
+    return null;
+  }
+}
+
+function updateNormalConversationBusy(delta: 1 | -1): void {
+  normalConversationBusyCount = Math.max(0, normalConversationBusyCount + delta);
+}
+
+const proactiveConversationLifecycle = {
+  onUserMessage: () => proactiveChatService?.invalidateForUserMessage(),
+  onConversationStarted: () => {
+    updateNormalConversationBusy(1);
+    proactiveChatService?.normalConversationStarted();
+  },
+  onConversationEnded: () => {
+    updateNormalConversationBusy(-1);
+    if (normalConversationBusyCount === 0) proactiveChatService?.normalConversationEnded();
+  },
+};
+
+function getProactiveCommitDecision(candidate: ProactiveCandidate, generationEpoch: number) {
+  return canCommitProactiveMessage(
+    getProactiveRuntimeSnapshot(),
+    loadOpenerState(),
+    candidate,
+    generationEpoch,
+  );
+}
+
+function recordProactiveDeliveryMetadata(input: ProactiveCommitInput): void {
+  const openerState = loadOpenerState();
+  const sceneConfig = SCENE_CONFIGS.find((config) => config.id === input.candidate.sceneId);
+  if (sceneConfig?.todayFiredFlag) openerState.todayFired[sceneConfig.todayFiredFlag] = true;
+  if (input.source === "fallback" && input.fallbackPayload) {
+    const itemId = (input.fallbackPayload as ShowBubblePayload).itemId;
+    if (itemId) {
+      const recent = openerState.recentItems[input.candidate.sceneId] ?? [];
+      openerState.recentItems[input.candidate.sceneId] = [itemId, ...recent.filter((id) => id !== itemId)].slice(0, 4);
+    }
+  }
+  saveOpenerState(openerState);
+}
+
+async function commitLocalProactiveMessage(input: ProactiveCommitInput): Promise<ProactiveCommitResult> {
+  const initialDecision = getProactiveCommitDecision(input.candidate, input.generationEpoch);
+  if (!initialDecision.allowed) return { kind: "cancelled", reason: initialDecision.reason };
+
+  const session = chatsStore.getOrCreateSessionByPurpose("proactive-chat", {
+    title: "昔涟的主动消息",
+    identityId: null,
+  });
+  const at = Date.now();
+  const appended = chatsStore.appendMessage(session.id, {
+    id: randomUUID(),
+    role: "model",
+    content: input.text,
+    at,
+  });
+  if (!appended) throw new Error("主动聊天会话写入失败");
+  broadcastChatsChanged();
+
+  let payload: ShowBubblePayload = input.source === "fallback" && input.fallbackPayload
+    ? { ...(input.fallbackPayload as ShowBubblePayload), text: input.text, sessionId: session.id }
+    : {
+        text: input.text,
+        sceneId: input.candidate.sceneId,
+        itemId: `proactive-${at}`,
+        sessionId: session.id,
+      };
+
+  if (input.source === "model") {
+    const speech = await synthesizeProactiveSpeech(input.text);
+    if (speech) payload = { ...payload, ...speech };
+  }
+
+  // 文本已落库；气泡/TTS 前再次执行完整检查，失败时只取消展示和语音。
+  const displayDecision = getProactiveCommitDecision(input.candidate, input.generationEpoch);
+  if (displayDecision.allowed && mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC.LIVE2D_SHOW_BUBBLE, payload);
+  }
+  return { kind: "committed" };
+}
+
+async function commitSelectedProactiveMessage(input: ProactiveCommitInput): Promise<ProactiveCommitResult> {
+  const settings = loadGeneralSettings();
+  const target = settings.proactiveDeliveryTarget;
+  const result = await routeProactiveDelivery(target, {
+    commitLocal: () => commitLocalProactiveMessage(input),
+    commitChannel: async (channel) => {
+      const channelResult = await sendProactiveChannelMessage({
+        channel,
+        text: input.text,
+        mobileMessageSegmentation: settings.mobileMessageSegmentation,
+        manager: channelManager,
+        canContinue: () => {
+          if (loadGeneralSettings().proactiveDeliveryTarget !== channel) return false;
+          return getProactiveCommitDecision(input.candidate, input.generationEpoch).allowed;
+        },
+      });
+      return channelResult.kind === "committed"
+        ? { kind: "committed" }
+        : { kind: "cancelled", reason: channelResult.reason };
+    },
+  });
+
+  if (result.kind === "committed") recordProactiveDeliveryMetadata(input);
+  return result;
+}
+
+function initializeProactiveChatService(): void {
+  proactiveChatService = createProactiveChatService({
+    loadState: loadOpenerState,
+    saveState: (state) => {
+      const openerState = loadOpenerState();
+      Object.assign(openerState, state);
+      saveOpenerState(openerState);
+    },
+    getSnapshot: getProactiveRuntimeSnapshot,
+    buildMessages: async (candidate) => buildProactiveAgentMessages(candidate),
+    runModel: async (messages) => {
+      const settings = loadModelSettings();
+      if (!settings.apiKey) return { kind: "error", reason: "missing_api_key" };
+      return runProactiveModel({
+        settings: {
+          provider: settings.provider,
+          baseUrl: settings.baseUrl,
+          model: settings.model,
+          apiKey: settings.apiKey,
+          explicitTransport: settings.explicitTransport,
+          reasoning: settings.reasoning,
+        },
+        messages,
+        timeoutMs: 45_000,
+      });
+    },
+    getFallback: async (candidate) => getPresetFallback(candidate.sceneId, new Date().getHours()),
+    canStartDelivery: () => {
+      const target = loadGeneralSettings().proactiveDeliveryTarget;
+      return target === "local" || canStartProactiveChannelDelivery(target, channelManager);
+    },
+    commitMessage: commitSelectedProactiveMessage,
+    log: (event, detail) => console.log(`[Proactive] ${event}`, detail ?? ""),
+  });
+
+  setProactiveCandidateHandler(async (candidate) => {
+    await proactiveChatService?.evaluateCandidate(candidate);
+  });
+
+  setChannelsConversationLifecycle(proactiveConversationLifecycle);
+
+  powerMonitor.on("lock-screen", () => {
+    proactiveScreenLocked = true;
+    proactiveChatService?.invalidate();
+  });
+  powerMonitor.on("unlock-screen", () => { proactiveScreenLocked = false; });
+  powerMonitor.on("suspend", () => {
+    proactiveScreenLocked = true;
+    proactiveChatService?.invalidate();
+  });
+  powerMonitor.on("resume", () => { proactiveScreenLocked = false; });
+}
+
+/**
+ * 工具阶段使用的 system prompt。
+ * 第一期：固定 tools_system.md 规则 + 运行时生成的工具目录。
+ * 不放任何人格 / 环境 / 记忆，避免人设污染工具决策。
+ */
+function buildToolSystemPrompt(enabledTools: ReadonlyArray<ToolDefinition>): string {
+  const base = loadPromptFile("tools_system.md");
+  const catalog = buildToolCatalog(enabledTools as ToolDefinition[]);
+  return [
+    base,
+    "## 当前可用工具",
+    catalog,
+  ].filter(Boolean).join("\n\n");
+}
+
+/**
+ * Soul 阶段使用的基础 system prompt。
+ * 包含：人设（system.md + identity.md + soul.md + canon + style）+ 后续可追加的环境/记忆等。
+ * 注意：工具结果（`role: "tool"` 消息）在 conversation 中已携带，本函数不重复注入。
+ * 第一期：build-options 会把 environmentContext / skillCatalog / toneInjection /
+ * alwaysOnContext / relationshipContext / attachmentContext 等都拼到 baseContent 末尾，
+ * 后续第二期再拆分为 toolEnvironmentContext / soulEnvironmentContext。
+ */
+function buildSoulSystemBasePrompt(styleFile: string): string {
+  return buildSystemPrompt(styleFile);
 }
 
 /**
@@ -1758,6 +2269,10 @@ async function requestModelReply(inputMessages: unknown, styleFile = "01_default
   if (messages.length === 0) {
     throw new Error("没有可发送的聊天内容。");
   }
+  const profile = loadUserProfile();
+  const chatContextTimezone = resolveChatContextTimezone(profile.timezone);
+  const skillActivation = resolveSlashActivation(messages);
+  const { messages: llmMessages, timeContext: conversationTimeContext } = buildConversationTimeContext(messages, chatContextTimezone);
   const latestUserText = messages.filter((message) => message.role === "user").at(-1)?.content ?? "";
 
   // 1. 构建 always-on 上下文（世界书 + L0/L1 画像）
@@ -1784,7 +2299,6 @@ async function requestModelReply(inputMessages: unknown, styleFile = "01_default
   // 降低"桌面在哪"这类低级幻觉。失败不影响主流程。
   let environmentContext = "";
   try {
-    const profile = loadUserProfile();
     environmentContext = buildEnvironmentContext(
       { provider: settings.provider, model: settings.model },
       { nickname: profile.nickname, callPreference: profile.callPreference, birthday: profile.birthday, defaultCity: profile.defaultCity, timezone: profile.timezone },
@@ -1796,13 +2310,12 @@ async function requestModelReply(inputMessages: unknown, styleFile = "01_default
   // system prompt 拼装顺序：事实层在前，人格层在后，skill 清单 + /命令激活放最后。
   // /命令拦截：命中 /skill-id 则当轮 system 注入 skill 正文（user message 原样，不污染 memory）
   const skillCatalog = buildSkillCatalog(skillRegistry.getEnabled());
-  const skillActivation = resolveSlashActivation(messages);
   // 语气硬注入：embedding 匹配场景，强制注入语气规则 + 场景参考样本（必须遵守，优先级最高）
   let toneInjection = "";
   const sceneProvider = getSceneEmbeddingProvider();
   if (sceneProvider && sceneEmbeddingIndex) {
     try {
-      toneInjection = await buildToneInjection(latestUserText, messages, sceneProvider, sceneEmbeddingIndex);
+      toneInjection = await buildToneInjection(latestUserText, llmMessages, sceneProvider, sceneEmbeddingIndex);
     } catch (err) {
       console.error("[Cyrene] tone injection failed:", err);
     }
@@ -1811,6 +2324,7 @@ async function requestModelReply(inputMessages: unknown, styleFile = "01_default
   // 世界知识放最后：LLM 对靠近 user 的信息权重更高；且避免被 system.md 的"不知道不要编"规则覆盖
   const systemContent =
     (environmentContext ? environmentContext + "\n\n" : "") +
+    (conversationTimeContext ? conversationTimeContext + "\n\n---\n\n" : "") +
     buildSystemPrompt(styleFile) +
     (skillCatalog ? "\n\n---\n\n" + skillCatalog : "") +
     skillActivation +
@@ -1824,7 +2338,7 @@ async function requestModelReply(inputMessages: unknown, styleFile = "01_default
   // 2. Function Calling 循环：模型自己决定调不调工具、调哪个
   const fcMessages: Array<{ role: "system" | "user" | "assistant" | "tool"; content: string }> = [
     { role: "system", content: systemContent },
-    ...messages,
+    ...llmMessages,
   ];
 
   let chatContent = "";
@@ -1875,7 +2389,8 @@ async function requestModelReply(inputMessages: unknown, styleFile = "01_default
   if (settings.stickerEnabled && stickerEmbeddingIndex) {
     const provider = getEmbeddingProvider();
     if (provider) {
-      const matchResult = await matchSticker(chatContent + "\n" + latestUserText, provider, stickerEmbeddingIndex, settings.stickerSimilarityThreshold);
+      const stickerQuery = (chatContent + "\n" + latestUserText).slice(0, 1000);
+      const matchResult = await matchSticker(stickerQuery, provider, stickerEmbeddingIndex, settings.stickerSimilarityThreshold);
       sticker = matchResult?.id ?? null;
     }
   }
@@ -1884,7 +2399,7 @@ async function requestModelReply(inputMessages: unknown, styleFile = "01_default
     broadcastRuntimeStateChanged();
   } else if (settings.runtimeSync === "llm") {
     broadcastRuntimeStateChanged();
-    void observeRuntimeState(settings, messages, latestUserText, chatContent);
+    void observeRuntimeState(settings, llmMessages, latestUserText, chatContent);
   }
 
 
@@ -1933,6 +2448,14 @@ function broadcastUiThemeChanged(theme: GeneralSettings["uiTheme"]): void {
   for (const win of [mainWindow, chatWindow, sidebarWindow, tasksWindow, settingsWindow, stickerManagerWindow, callWindow]) {
     if (win && !win.isDestroyed()) {
       win.webContents.send(IPC.UI_THEME_CHANGED, theme);
+    }
+  }
+}
+
+function broadcastUiFontChanged(font: GeneralSettings["uiFont"]): void {
+  for (const win of [mainWindow, chatWindow, sidebarWindow, tasksWindow, settingsWindow, stickerManagerWindow, callWindow]) {
+    if (win && !win.isDestroyed()) {
+      win.webContents.send(IPC.UI_FONT_CHANGED, font);
     }
   }
 }
@@ -2017,7 +2540,7 @@ function createWindow(): void {
     skipTaskbar: true,
     resizable: false,
     hasShadow: false,
-    icon: APP_ICON_PATH,
+    icon: getCurrentAppIconPath(),
     webPreferences: {
       preload: path.join(__dirname, "..", "..", "preload", "preload", "index.js"),
       contextIsolation: true,
@@ -2025,6 +2548,7 @@ function createWindow(): void {
       sandbox: false,
     },
   });
+  live2dWindowLifecycle.attach(mainWindow);
 
   if (isDev) {
     mainWindow.loadURL("http://localhost:5173");
@@ -2036,6 +2560,13 @@ function createWindow(): void {
     mainWindow.setIgnoreMouseEvents(true, { forward: true });
   }
 
+  mainWindow.on("hide", () => {
+    mainWindow?.webContents.send(IPC.PET_VISIBILITY_CHANGED, false);
+  });
+  mainWindow.on("show", () => {
+    mainWindow?.webContents.send(IPC.PET_VISIBILITY_CHANGED, true);
+  });
+
   applyGeneralSettings(loadGeneralSettings());
 
   // Opener 主动开口：注入桌宠窗口 + 启动 tick
@@ -2044,7 +2575,9 @@ function createWindow(): void {
   const initOpener = () => {
     const s = loadGeneralSettings();
     stopOpener();
-    if (s.openerMode !== "off") startOpener(s.openerMode);
+    if (s.proactiveChatMode === "on") {
+      startOpener(s.openerMode === "off" ? "normal" : s.openerMode);
+    }
   };
   initOpener();
 
@@ -2209,6 +2742,8 @@ function createWindow(): void {
   });
 
   mainWindow.on("closed", () => {
+    petWindowMoveController.dispose();
+    live2dWindowLifecycle.clear(mainWindow ?? undefined);
     mainWindow = null;
   });
 }
@@ -2235,7 +2770,7 @@ function createChatWindow(sessionId?: string): void {
     minWidth: 1000,
     minHeight: 700,
     title: "Cyrene · 聊天",
-    icon: APP_ICON_PATH,
+    icon: getCurrentAppIconPath(),
     backgroundColor: "#00000000",
     autoHideMenuBar: true,
     show: false,
@@ -2295,7 +2830,7 @@ function createSidebarWindow(): void {
     minWidth: 56,
     minHeight: 540,
     title: "昔涟 · 状态",
-    icon: APP_ICON_PATH,
+    icon: getCurrentAppIconPath(),
     backgroundColor: "#00000000",
     autoHideMenuBar: true,
     show: false,
@@ -2342,7 +2877,7 @@ function createTasksWindow(): void {
     height: 760,
     minHeight: 540,
     title: "昔涟 · 今日日程",
-    icon: APP_ICON_PATH,
+    icon: getCurrentAppIconPath(),
     backgroundColor: "#00000000",
     autoHideMenuBar: true,
     show: false,
@@ -2397,7 +2932,7 @@ function createSettingsWindow(section?: string): void {
     minWidth: 920,
     minHeight: 580,
     title: "昔涟 · 设置",
-    icon: APP_ICON_PATH,
+    icon: getCurrentAppIconPath(),
     backgroundColor: "#00000000",
     autoHideMenuBar: true,
     show: false,
@@ -2523,7 +3058,7 @@ function createCallWindow(): void {
     minWidth: 420,
     minHeight: 600,
     title: "Cyrene · 语音通话",
-    icon: APP_ICON_PATH,
+    icon: getCurrentAppIconPath(),
     backgroundColor: "#00000000",
     autoHideMenuBar: true,
     show: false,
@@ -2559,7 +3094,7 @@ function createCallWindow(): void {
 }
 
 function createTray(): void {
-  const icon = nativeImage.createFromPath(APP_ICON_PATH);
+  const icon = nativeImage.createFromPath(getCurrentAppIconPath());
   tray = new Tray(icon);
 
   const contextMenu = Menu.buildFromTemplate([
@@ -2590,6 +3125,18 @@ function createTray(): void {
   tray.setContextMenu(contextMenu);
 }
 
+function applyUiIcon(iconSetting: UiIcon): void {
+  const icon = nativeImage.createFromPath(getAppIconPath(iconSetting));
+  if (icon.isEmpty()) {
+    console.warn("[Cyrene] failed to load selected app icon:", iconSetting);
+    return;
+  }
+  tray?.setImage(icon);
+  for (const win of [mainWindow, chatWindow, sidebarWindow, tasksWindow, settingsWindow, stickerManagerWindow, callWindow]) {
+    if (win && !win.isDestroyed()) win.setIcon(icon);
+  }
+}
+
 ipcMain.handle(IPC.WINDOW_SET_INTERACTIVE, (_event, interactive: boolean) => {
   if (mainWindow) {
     mainWindow.setIgnoreMouseEvents(!interactive, { forward: true });
@@ -2597,17 +3144,7 @@ ipcMain.handle(IPC.WINDOW_SET_INTERACTIVE, (_event, interactive: boolean) => {
 });
 
 ipcMain.on(IPC.WINDOW_MOVE, (_event, dx: number, dy: number) => {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  const delta = normalizeWindowPosition(dx, dy);
-  if (!delta) return;
-  const [x, y] = mainWindow.getPosition();
-  const next = normalizeWindowPosition(x + delta.x, y + delta.y);
-  if (!next) return;
-  try {
-    mainWindow.setPosition(next.x, next.y, false);
-  } catch (err) {
-    console.warn("[Cyrene] ignored invalid relative window move:", err);
-  }
+  petWindowMoveController.moveRelative(dx, dy);
 });
 
 let pendingPetWindowPosition: { x: number; y: number } | null = null;
@@ -2693,7 +3230,7 @@ function createNovelAiWindow(): void {
     minWidth: 980,
     minHeight: 680,
     title: "昔涟 · NovelAI 绘图",
-    icon: APP_ICON_PATH,
+    icon: getCurrentAppIconPath(),
     backgroundColor: "#100d20",
     autoHideMenuBar: true,
     show: false,
@@ -2714,11 +3251,7 @@ function createNovelAiWindow(): void {
 }
 
 ipcMain.on(IPC.WINDOW_MOVE_TO, (_event, x: number, y: number) => {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  const next = normalizeWindowPosition(x, y);
-  if (!next) return;
-  pendingPetWindowPosition = next;
-  if (petWindowMoveTimer === null) petWindowMoveTimer = setTimeout(flushPetWindowMove, 16);
+  petWindowMoveController.queueAbsolute(x, y);
 });
 
 /**
@@ -2747,22 +3280,13 @@ ipcMain.on(IPC.WINDOW_MOVE_TO, (_event, x: number, y: number) => {
  * translucent during the drag.
  */
 ipcMain.on(IPC.WINDOW_SET_DRAGGING, (_event, isDragging: boolean) => {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const window = mainWindow;
+  if (!window || window.isDestroyed()) return;
+  if (!isDragging) petWindowMoveController.finishDragging();
   try {
-    mainWindow.setOpacity(isDragging ? 0.99 : 1.0);
-  } catch (err) {
-    console.warn("[Cyrene] failed to update drag opacity:", err);
-    return;
-  }
-  if (!isDragging) {
-    if (petWindowMoveTimer !== null) {
-      clearTimeout(petWindowMoveTimer);
-      petWindowMoveTimer = null;
-    }
-    flushPetWindowMove();
-    const [x, y] = mainWindow.getPosition();
-    const current = normalizeWindowPosition(x, y);
-    if (current) void saveGeneralSettings({ petWindowX: current.x, petWindowY: current.y });
+    window.setOpacity(isDragging ? 0.99 : 1.0);
+  } catch (error) {
+    console.warn("[Cyrene] Failed to update pet window dragging opacity:", error);
   }
 });
 
@@ -2789,6 +3313,10 @@ ipcMain.handle(IPC.WINDOW_CAPTURE_FRAME, async () => {
 ipcMain.handle(IPC.WINDOW_GET_CURSOR_POSITION, () => {
   return screen.getCursorScreenPoint();
 });
+
+ipcMain.handle(IPC.LIVE2D_GET_MAIN_DIAGNOSTICS, () => ({
+  window: live2dWindowLifecycle.getDiagnostics(),
+}));
 
 ipcMain.handle("debug:screenshot", async () => {
   if (!mainWindow) return null;
@@ -2831,16 +3359,49 @@ ipcMain.on(IPC.CHAT_TOGGLE_MAXIMIZE, () => {
 ipcMain.handle(IPC.CHAT_IS_MAXIMIZED, () => {
   return chatWindow?.isMaximized() ?? false;
 });
+
+// 推理下拉原子读：{ providerKey, providerId, model, preference }
+// providerKey = settings.provider（displayName），用来防竞态；chat:setReasoning 需携带同 providerKey。
+ipcMain.handle(IPC.CHAT_GET_REASONING_STATE, () => {
+  const settings = loadModelSettings();
+  const cap = getCapabilityOrOpenAI(settings.provider);
+  return {
+    providerKey: settings.provider,
+    providerId: cap.id,
+    model: settings.model,
+    preference: settings.perProvider?.[settings.provider]?.reasoning,
+  };
+});
+
+// 推理下拉写：原子。payload 形如 { providerKey, preference }，providerKey 防竞态。
+ipcMain.handle(IPC.CHAT_SET_REASONING, (_event, payload: unknown) => {
+  if (!payload || typeof payload !== "object") return;
+  const p = payload as { providerKey?: unknown; preference?: unknown };
+  if (typeof p.providerKey !== "string" || typeof p.preference !== "object" || !p.preference) return;
+  const current = loadModelSettings();
+  if (current.provider !== p.providerKey) {
+    // 竞态：用户拿到 state 后、点选项前，provider 已切换。丢弃旧 providerKey 的写。
+    return;
+  }
+  const normalized = normalizeReasoningPreference(p.preference);
+  if (!normalized) return;
+  saveModelSettings({ reasoning: normalized });
+});
 ipcMain.handle(IPC.CHAT_SEND_MESSAGE, async (_event, messages: unknown) => {
-  return requestModelReply(messages);
+  proactiveConversationLifecycle.onUserMessage();
+  proactiveConversationLifecycle.onConversationStarted();
+  try {
+    return await requestModelReply(messages);
+  } finally {
+    proactiveConversationLifecycle.onConversationEnded();
+  }
 });
 
 ipcMain.handle(IPC.CHAT_INGEST_FILES, async (_event, paths: unknown) => {
   const list = Array.isArray(paths) ? paths.filter((p): p is string => typeof p === "string") : [];
   if (list.length === 0) return [];
   try {
-    const results = await ingestPaths(list, importDocument);
-    return results;
+    return list.map((filePath) => describePendingAttachment(filePath));
   } catch (err: any) {
     console.error("[Cyrene] ingestFiles ERROR:", err?.message || err);
     return [];
@@ -2868,6 +3429,68 @@ ipcMain.handle(IPC.SCREEN_OBSERVATION_PAUSE, (_event, mode: unknown) => {
 ipcMain.handle(IPC.SCREEN_OBSERVATION_RESUME, () => {
   resumeScreenObservation();
   return getScreenObservationUiStatus();
+});
+
+ipcMain.handle(IPC.CHAT_PROCESS_DOCUMENTS, async (event, payload: unknown) => {
+  const filePaths = payload && typeof payload === "object" && Array.isArray((payload as { filePaths?: unknown }).filePaths)
+    ? (payload as { filePaths: unknown[] }).filePaths.filter((p): p is string => typeof p === "string")
+    : [];
+  if (filePaths.length === 0) return [];
+  const query = typeof (payload as { query?: unknown }).query === "string"
+    ? (payload as { query: string }).query
+    : "";
+  return processDocumentIndexRequest({
+    filePaths,
+    query,
+    sender: event.sender,
+    enqueue: enqueueDocumentIndexJob,
+    retrieve: retrieveQueuedDocumentChunks,
+  });
+});
+
+ipcMain.handle(IPC.CHAT_CANCEL_DOCUMENT_INDEX, (_event, payload: unknown) => {
+  const jobId = payload && typeof payload === "object" ? (payload as { jobId?: unknown }).jobId : undefined;
+  return typeof jobId === "string" && cancelDocumentIndexJob(jobId);
+});
+
+ipcMain.handle(IPC.CHAT_CAPTION_IMAGE, async (_event, payload: unknown) => {
+  const filePath = payload && typeof payload === "object"
+    ? (payload as { filePath?: unknown }).filePath
+    : undefined;
+  const validated = validateCaptionImagePath(filePath);
+  if (!validated.ok) return { ok: false, error: validated.error };
+
+  const visionCfg = loadVisionConfig();
+  if (!visionCfg) {
+    return { ok: false, error: "未配置视觉模型，无法分析图片" };
+  }
+
+  try {
+    const { captionImage } = await import("./orchestrator/vision-captioner");
+    const caption = await captionImage(
+      { base64: validated.buffer.toString("base64"), mime: validated.mime },
+      IMAGE_CAPTION_PROMPT,
+      visionCfg,
+    );
+    if (caption.startsWith("[错误")) {
+      return { ok: false, error: caption };
+    }
+    return { ok: true, caption };
+  } catch (err: any) {
+    return { ok: false, error: err?.message || String(err) };
+  }
+});
+
+ipcMain.handle(IPC.CHAT_GET_IMAGE_SEND_STRATEGY, () => {
+  const settings = loadModelSettings();
+  return decideImageSendStrategy({
+    provider: settings.provider,
+    baseUrl: settings.baseUrl,
+    model: settings.model,
+    apiKey: settings.apiKey,
+    explicitTransport: settings.explicitTransport,
+    vision: loadVisionConfig(),
+  });
 });
 ipcMain.on(IPC.SIDEBAR_MINIMIZE, () => {
   sidebarWindow?.minimize();
@@ -2924,8 +3547,68 @@ ipcMain.handle(IPC.UI_THEME_GET, () => {
   return loadGeneralSettings().uiTheme;
 });
 
+ipcMain.handle(IPC.UI_FONT_GET, () => {
+  return loadGeneralSettings().uiFont;
+});
+
+function getUiFontsDir(): string {
+  return path.join(app.getPath("userData"), "ui-fonts");
+}
+
+function getCustomFontDisplayName(filePath: string): string {
+  return path.basename(filePath, path.extname(filePath)).replace(/[-_]+/g, " ").trim().slice(0, 80) || "自定义字体";
+}
+
+ipcMain.handle(IPC.SETTINGS_PICK_UI_FONT, async () => {
+  const result = await dialog.showOpenDialog({
+    properties: ["openFile"],
+    filters: [{ name: "字体文件", extensions: ["ttf", "otf"] }],
+  });
+  return result.canceled ? null : result.filePaths[0] ?? null;
+});
+
+ipcMain.handle(IPC.SETTINGS_IMPORT_UI_FONT, (_event, sourcePath: unknown) => {
+  if (typeof sourcePath !== "string" || !sourcePath) throw new Error("未选择字体文件");
+  const extension = path.extname(sourcePath).toLowerCase();
+  if (extension !== ".ttf" && extension !== ".otf") throw new Error("仅支持 .ttf 或 .otf 字体文件");
+  const stat = fs.statSync(sourcePath);
+  if (!stat.isFile() || stat.size <= 0 || stat.size > 50 * 1024 * 1024) throw new Error("字体文件无效或超过 50 MB");
+
+  const fileName = `custom-${randomUUID()}${extension}`;
+  if (!isSupportedFontFileName(fileName)) throw new Error("字体文件名无效");
+  const fontsDir = getUiFontsDir();
+  fs.mkdirSync(fontsDir, { recursive: true });
+  const targetPath = path.join(fontsDir, fileName);
+  fs.copyFileSync(sourcePath, targetPath);
+
+  const before = loadGeneralSettings().uiFont;
+  const saved = saveGeneralSettings({ uiFont: { kind: "custom", fileName, displayName: getCustomFontDisplayName(sourcePath) } });
+  if (before.kind === "custom" && before.fileName !== fileName) {
+    const oldPath = path.join(fontsDir, before.fileName);
+    if (isSupportedFontFileName(before.fileName)) fs.rmSync(oldPath, { force: true });
+  }
+  return saved.uiFont;
+});
+
+ipcMain.handle(IPC.SETTINGS_RESET_UI_FONT, () => {
+  const before = loadGeneralSettings().uiFont;
+  const saved = saveGeneralSettings({ uiFont: DEFAULT_UI_FONT });
+  if (before.kind === "custom" && isSupportedFontFileName(before.fileName)) {
+    fs.rmSync(path.join(getUiFontsDir(), before.fileName), { force: true });
+  }
+  return saved.uiFont;
+});
+
 ipcMain.handle(IPC.SETTINGS_SAVE_GENERAL, (_event, settings: Partial<GeneralSettings>) => {
-  return saveGeneralSettings(settings);
+  const saved = saveGeneralSettings(settings);
+  if ("proactiveChatMode" in settings || "proactiveDeliveryTarget" in settings || "openerMode" in settings) {
+    stopOpener();
+    proactiveChatService?.invalidate();
+    if (saved.proactiveChatMode === "on") {
+      startOpener(saved.openerMode === "off" ? "normal" : saved.openerMode);
+    }
+  }
+  return saved;
 });
 
 ipcMain.on(IPC.SETTINGS_OPEN_SIDEBAR, () => {
@@ -3015,8 +3698,11 @@ ipcMain.handle(IPC.EMBEDDING_SET_MODEL, async (_event, modelKey: string) => {
   try {
     const result = await switchEmbeddingModel(modelKey);
     if (result.ok) {
+      await reconcileUserMemoryIndex();
       saveModelSettings({ embeddingModel: modelKey as "minilm" | "bgem3" });
       broadcastModelConfigChanged();
+      stickerEmbeddingIndex = null;
+      refreshStickerEmbeddingIndexInBackground("embedding-model-switch");
     }
     return result;
   } catch (err) {
@@ -3105,15 +3791,8 @@ ipcMain.handle(IPC.STICKERS_ADD, async (_event, payload: unknown) => {
   };
   try {
     await addUserSticker(sourcePath, id, description, phrases);
-    // 重建 embedding 索引
-    const provider = getEmbeddingProvider();
-    if (provider) {
-      stickerEmbeddingIndex = await buildStickerEmbeddingIndex(
-        provider,
-        BUILT_IN_STICKER_DESCRIPTIONS,
-        loadUserStickerManifest(),
-      );
-    }
+    stickerEmbeddingIndex = null;
+    refreshStickerEmbeddingIndexInBackground("user-sticker-add");
   } catch (err) {
     console.error("[stickers] add failed:", err);
     throw err;
@@ -3124,15 +3803,8 @@ ipcMain.handle(IPC.STICKERS_ADD, async (_event, payload: unknown) => {
 ipcMain.handle(IPC.STICKERS_DELETE, async (_event, id: string) => {
   try {
     await deleteUserSticker(id);
-    // 重建 embedding 索引
-    const provider = getEmbeddingProvider();
-    if (provider) {
-      stickerEmbeddingIndex = await buildStickerEmbeddingIndex(
-        provider,
-        BUILT_IN_STICKER_DESCRIPTIONS,
-        loadUserStickerManifest(),
-      );
-    }
+    stickerEmbeddingIndex = null;
+    refreshStickerEmbeddingIndexInBackground("user-sticker-delete");
   } catch (err) {
     console.error("[stickers] delete failed:", err);
     throw err;
@@ -3407,10 +4079,11 @@ ipcMain.handle(IPC.EMBEDDING_DELETE, async (_event, payload: unknown) => {
   }
 });
 
-// 注册 local-sticker:// 协议（用户添加的表情包图片）
+// 注册本地用户资源协议（表情包图片与用户导入的字体）
 // 必须在 app.ready 之前调用
 protocol.registerSchemesAsPrivileged([
   { scheme: "local-sticker", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
+  { scheme: "local-font", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true } },
 ]);
 
 app.whenReady().then(async () => {
@@ -3433,6 +4106,20 @@ app.whenReady().then(async () => {
     if (!filePath) return new Response("Invalid sticker path", { status: 403 });
 
     return net.fetch(pathToFileURL(filePath).toString());
+  });
+  protocol.handle("local-font", (request) => {
+    let fileName: string;
+    try {
+      fileName = decodeURIComponent(new URL(request.url).hostname);
+    } catch {
+      return new Response("Invalid font URL", { status: 404 });
+    }
+    if (!isSafeUiFontRequest(fileName)) return new Response("Invalid font URL", { status: 404 });
+    const filePath = path.join(getUiFontsDir(), fileName);
+    if (path.dirname(filePath) !== getUiFontsDir() || !fs.existsSync(filePath)) return new Response("Font not found", { status: 404 });
+    return net.fetch(pathToFileURL(filePath).toString()).then((response) => new Response(response.body, {
+      headers: getUiFontResponseHeaders(fileName),
+    }));
   });
   // Token 用量查询 IPC
   ipcMain.handle(IPC.TOKEN_USAGE_GET, (_event, days: number) => {
@@ -3466,10 +4153,13 @@ app.whenReady().then(async () => {
       await syncPlaywrightMcp(saved);
     }
 
-    // Opener 主动开口：档位变化时重启
-    if ("openerMode" in tts) {
+    // 主动聊天总开关或频率变化时重启。
+    if ("openerMode" in tts || "proactiveChatMode" in tts) {
       stopOpener();
-      if (saved.openerMode !== "off") startOpener(saved.openerMode);
+      proactiveChatService?.invalidate();
+      if (saved.proactiveChatMode === "on") {
+        startOpener(saved.openerMode === "off" ? "normal" : saved.openerMode);
+      }
     }
 
     // 返回不含密钥明文的副本（前端展示用）
@@ -3488,6 +4178,38 @@ app.whenReady().then(async () => {
 
   // Opener 手动测试气泡
   ipcMain.handle(IPC.OPENER_TEST_FIRE, async () => { await testFire(); });
+
+  ipcMain.handle(IPC.OPENER_GET_STATUS, () => {
+    const packDir = getOpenerPackDir();
+    const manifestPath = getManifestPath();
+    return {
+      manifestInstalled: fs.existsSync(manifestPath),
+      packDir,
+      manifestPath,
+    };
+  });
+
+  ipcMain.handle(IPC.OPENER_OPEN_PACK_DIR, async () => {
+    const packDir = getOpenerPackDir();
+    try {
+      fs.mkdirSync(packDir, { recursive: true });
+      const error = await shell.openPath(packDir);
+      return error ? { ok: false, error } : { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle(IPC.OPENER_OPEN_INSTALL_DOCS, async () => {
+    const docPath = path.join(app.getAppPath(), "docs", "opener-pack.md");
+    try {
+      if (!fs.existsSync(docPath)) return { ok: false, error: "安装说明文档不存在：" + docPath };
+      const error = await shell.openPath(docPath);
+      return error ? { ok: false, error } : { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
 
   // 上传音频文件 → file_id
   ipcMain.handle(IPC.TTS_UPLOAD, async (_event, payload: { apiKey: string; filePath: string; purpose: "voice_clone" | "prompt_audio" }) => {
@@ -3943,6 +4665,7 @@ app.whenReady().then(async () => {
 
   // 聊天会话存储 IPC（chats-store.initialize 会建好 cyrene-chats 目录并加载 index）
   registerChatsIpc();
+  initializeProactiveChatService();
 
   // 历史召回工具（recall_history）——让模型能回忆滚出窗口的对话
   registerRecallHistoryTool();
@@ -3991,8 +4714,13 @@ app.whenReady().then(async () => {
     const { loadRecentHistory } = await import("./channels/history-log");
     return loadRecentHistory(sessionId, limit);
   });
+  setDispatcherLoadGeneralSettings(loadGeneralSettings);
 
   setDispatcherBuildAndRunAgent(async (msg, sessionId, priorMessages) => {
+    // 渠道响应结果：统一由 dispatcher 按 cap 降级到 OutgoingMessage.parts。
+    // 包含 sticker 决定（从 onAgentRunFinished 返回，避免在 dispatcher 端重新算一遍 embedding）。
+    const channelResult: { text: string; sticker: string | null } = { text: "", sticker: null };
+
     // Phase 3.3：按 toolSandbox 过滤可用工具
     const sandbox = loadChannelsSettings().toolSandbox;
     const allTools = toolRegistry.getEnabledTools();
@@ -4022,6 +4750,36 @@ app.whenReady().then(async () => {
     const isQqOwner = !!qqConfig?.ownerQq && qqSenderId === qqConfig.ownerQq;
 
     // 把 IncomingMessage 转成 AguiRunInput，调 CyreneAgent
+    const channelModelSettings = loadModelSettings();
+    const imageSendStrategy = decideImageSendStrategy({
+      provider: channelModelSettings.provider,
+      baseUrl: channelModelSettings.baseUrl,
+      model: channelModelSettings.model,
+      apiKey: channelModelSettings.apiKey,
+      explicitTransport: channelModelSettings.explicitTransport,
+      vision: loadVisionConfig(),
+    });
+    const attachmentInputs = await buildChannelAttachmentInputs(msg, {
+      imageMode: imageSendStrategy.mode,
+      captionImage: async (filePath: string) => {
+        const validated = validateCaptionImagePath(filePath);
+        if (!validated.ok) return { ok: false, error: validated.error };
+        const visionCfg = loadVisionConfig();
+        if (!visionCfg) return { ok: false, error: "未配置视觉模型，无法分析图片" };
+        try {
+          const { captionImage } = await import("./orchestrator/vision-captioner");
+          const caption = await captionImage(
+            { base64: validated.buffer.toString("base64"), mime: validated.mime },
+            IMAGE_CAPTION_PROMPT,
+            visionCfg,
+          );
+          if (caption.startsWith("[错误")) return { ok: false, error: caption };
+          return { ok: true, caption };
+        } catch (err: any) {
+          return { ok: false, error: err?.message || String(err) };
+        }
+      },
+    });
     const { options } = await buildAgentRunOptions(
       {
         messages: [
@@ -4036,10 +4794,8 @@ app.whenReady().then(async () => {
         ],
         style: "01_default.md",
         sessionId,
-        attachments: msg.attachments?.map((a) => ({
-          name: a.filePath ?? a.url ?? "attachment",
-          text: a.caption ?? "",
-        })),
+        attachments: attachmentInputs.attachments,
+        imageAttachments: attachmentInputs.imageAttachments,
         channel: msg.channel,
       },
       buildOptionsDeps,
@@ -4057,16 +4813,20 @@ app.whenReady().then(async () => {
         error: (err) => reject(err instanceof Error ? err : new Error(String(err))),
       });
     });
+    channelResult.text = reply;
     if (agent.lastResult) {
-      await onAgentRunFinished(agent.lastResult, msg.text, onRunFinishedDeps, msg.channel, sessionId);
+      const finished = await onAgentRunFinished(agent.lastResult, msg.text, onRunFinishedDeps, msg.channel, sessionId);
+      // 把 sticker 决定透出给 dispatcher，让它纳入 OutgoingMessage.parts；
+      // 桌面聊天窗的 sticker 仍由 onAgentRunFinished 内部 IPC 广播承担，此处不重复。
+      channelResult.sticker = finished.sticker;
     }
     // 落历史
     void indexConversationTurn(sessionId, msg.text, reply);
-    return reply;
+    return channelResult;
   });
 
-  // Phase 3.1：注入 TTS 合成 —— dispatcher 在 reply 后会用这个生成 mp3
-  setDispatcherSynthesizeTts(async (text: string) => {
+  // Phase 3.1：注入 TTS 合成 —— dispatcher 在 reply 后会用这个生成渠道音频
+  setDispatcherSynthesizeTts(async (text: string, context) => {
     const cfg = loadGeneralSettings();
     if (cfg.ttsEngine === "off") return null;
     if (cfg.ttsEngine === "minimax" && (!cfg.ttsMinimaxKey || !cfg.ttsMinimaxVoiceId)) return null;
@@ -4076,6 +4836,7 @@ app.whenReady().then(async () => {
     // 限制 TTS 文本长度（飞书 audio 100M 限制 + 用户体验，太长应截断）
     const ttsText = text.length > 1000 ? text.slice(0, 1000) + "…" : text;
     try {
+      const requestedFormat = context.channel === "wechat" ? "wav" : "mp3";
       const result = await synthesizeByEngine(cfg.ttsEngine, {
         text: ttsText,
         speed: cfg.ttsSpeed,
@@ -4102,9 +4863,16 @@ app.whenReady().then(async () => {
         // mimo
         voiceAudioPath: cfg.ttsMimoVoiceAudioPath,
         stylePrompt: cfg.ttsMimoStylePrompt,
-        format: "mp3",
+        format: requestedFormat,
       });
-      return result.audio;
+      const headerHex = result.audio.subarray(0, 4).toString("hex");
+      console.log("[TTS verify] engine=", cfg.ttsEngine, "format=", result.format, "header=", headerHex, "size=", result.audio.length);
+      return {
+        audio: result.audio,
+        format: result.format,
+        mime: result.format === "wav" ? "audio/wav" : "audio/mpeg",
+        extension: result.format === "wav" ? ".wav" : ".mp3",
+      };
     } catch (err) {
       console.warn("[Channels] TTS 合成失败:", err instanceof Error ? err.message : err);
       return null;
@@ -4222,10 +4990,31 @@ app.whenReady().then(async () => {
       ? buildRecentScreenObservationContext()
       : "",
     buildSystemPrompt,
+    buildToolSystemPrompt: (enabledTools) => buildToolSystemPrompt(enabledTools as ToolDefinition[]),
+    buildSoulSystemBasePrompt,
+    toolRegistry: { getEnabled: () => toolRegistry.getEnabledTools() },
     logWorldbookInjection,
     normalizeChatMessages: ((raw: ReadonlyArray<unknown>) =>
       normalizeChatMessages(raw as any)) as BuildOptionsDeps["normalizeChatMessages"],
     chatRequestTimeoutMs: CHAT_REQUEST_TIMEOUT_MS,
+    captionImageForFallback: async (filePath: string) => {
+      const validated = validateCaptionImagePath(filePath);
+      if (!validated.ok) return { ok: false, error: validated.error };
+      const visionCfg = loadVisionConfig();
+      if (!visionCfg) return { ok: false, error: "未配置视觉模型，无法分析图片" };
+      try {
+        const { captionImage } = await import("./orchestrator/vision-captioner");
+        const caption = await captionImage(
+          { base64: validated.buffer.toString("base64"), mime: validated.mime },
+          IMAGE_CAPTION_PROMPT,
+          visionCfg,
+        );
+        if (caption.startsWith("[错误")) return { ok: false, error: caption };
+        return { ok: true, caption };
+      } catch (err: any) {
+        return { ok: false, error: err?.message || String(err) };
+      }
+    },
   };
   const onRunFinishedDeps: OnRunFinishedDeps = {
     loadModelSettings: () => loadModelSettings(),
@@ -4292,8 +5081,12 @@ app.whenReady().then(async () => {
   }
   registerAgUiIpc(
     async (input: AguiRunInput) => buildAgentRunOptions(input, buildOptionsDeps),
-    async (result, latestUserText, sessionId) => onAgentRunFinished(result, latestUserText, onRunFinishedDeps, undefined, sessionId),
+    // 桌面 IPC 路径不消费 sticker（sticker 由 onAgentRunFinished 内部 IPC 广播承担）
+    async (result, latestUserText, sessionId) => {
+      await onAgentRunFinished(result, latestUserText, onRunFinishedDeps, undefined, sessionId);
+    },
     () => chatWindow,
+    proactiveConversationLifecycle,
   );
 
   ipcMain.handle(IPC.CHATS_OPEN_IN_CHAT_WINDOW, (_event, sessionId: string) => {
@@ -4329,52 +5122,28 @@ app.whenReady().then(async () => {
   try {
     const modelSettings = loadModelSettings();
     await initRAG("auto", undefined, undefined, modelSettings.embeddingModel);
-      const repairedCompressedMemories = await syncPendingCompressedMemories();
-      if (repairedCompressedMemories > 0) {
-        console.log(`[Memory] 已补建 ${repairedCompressedMemories} 条压缩总结的向量索引`);
-      }
-      const retentionCleanup = await memoryStore.cleanupExpiredConversationMemories();
-      if (retentionCleanup.ragIds.length > 0) deleteMemoryEntries(retentionCleanup.ragIds);
-      // 初始化 MCP Manager；scheduler 启动前等待一次，避免近即时任务早于 MCP 工具恢复。
-      await initMcpManager();
-      console.log("[Cyrene] RAG initialized OK");
+    try {
+      await reconcileUserMemoryIndex();
+    } catch (err) {
+      console.warn("[Memory/RAG] startup reconciliation failed:", err);
+    }
+    const repairedCompressedMemories = await syncPendingCompressedMemories();
+    if (repairedCompressedMemories > 0) {
+      console.log(`[Memory] 已补建 ${repairedCompressedMemories} 条压缩总结的向量索引`);
+    }
+    const retentionCleanup = await memoryStore.cleanupExpiredConversationMemories();
+    if (retentionCleanup.ragIds.length > 0) deleteMemoryEntries(retentionCleanup.ragIds);
+    // 初始化 MCP Manager；scheduler 启动前等待一次，避免近即时任务早于 MCP 工具恢复。
+    await initMcpManager();
+    console.log("[Cyrene] RAG initialized OK");
 
-    await initReranker(modelSettings.rerankerMode);
+    console.log("[Reranker] startup preload skipped; reranker initializes when changed in settings.");
   } catch (err) {
     console.error("[Cyrene] RAG init FAILED:", err);
   }
   memoryV2ArchivistScheduler.start();
 
-  // 初始化表情包 embedding 索引
-  try {
-    const provider = getEmbeddingProvider();
-    if (provider) {
-      stickerEmbeddingIndex = await buildStickerEmbeddingIndex(
-        provider,
-        BUILT_IN_STICKER_DESCRIPTIONS,
-        loadUserStickerManifest(),
-      );
-      console.log(`[StickerEmbedding] index built: ${stickerEmbeddingIndex.length} entries`);
-    } else {
-      console.warn("[StickerEmbedding] Model not found. Sticker matching disabled.");
-    }
-  } catch (err) {
-    console.error("[StickerEmbedding] Init failed:", (err as Error).message);
-  }
-
-  // 初始化场景 embedding 索引（语气注入用，替代关键词匹配）
-  // 用 bge-m3（多语言，中文效果好），和文档/记忆的 minilm 独立
-  try {
-    const sceneProvider = getSceneEmbeddingProvider();
-    if (sceneProvider) {
-      sceneEmbeddingIndex = await buildSceneIndex(sceneProvider);
-      console.log("[SceneEmbedding] index built:", Object.keys(sceneEmbeddingIndex.scenes).length, "scenes");
-    } else {
-      console.warn("[SceneEmbedding] bge-m3 model not found. Scene embedding disabled.");
-    }
-  } catch (err) {
-    console.error("[SceneEmbedding] Init failed:", (err as Error).message);
-  }
+  scheduleStartupEmbeddingRefreshes();
 
   schedulerEngine.start();
   void memoryStore.decayInactiveL2Weights().catch((err) => {
@@ -4406,6 +5175,7 @@ app.on("window-all-closed", () => {});
 
 // 应用退出前把 token 用量缓存落盘（防抖未触发的最后一次写）
 app.on("before-quit", () => {
+  petWindowMoveController.dispose();
   schedulerEngine?.stop();
   memoryV2ArchivistScheduler.stop();
   stopScreenObserver();

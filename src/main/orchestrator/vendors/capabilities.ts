@@ -3,7 +3,7 @@
 // displayName 必须与 renderer settings.ts 的 MODEL_PRESETS.providerName 完全一致。
 import { ProviderCapability } from "./types";
 
-export const PROVIDER_CAPABILITIES: ProviderCapability[] = [
+export const PROVIDER_CAPABILITIES = [
   {
     id: "minimax",
     displayName: "MiniMax（稀宇科技）",
@@ -121,17 +121,34 @@ export const PROVIDER_CAPABILITIES: ProviderCapability[] = [
     transport: "anthropic",
     baseUrl: "https://api.anthropic.com/v1",
     authStyle: "x-api-key",
-    defaultModel: "",
+    defaultModel: "claude-sonnet-4-6",
     supportsTools: true,
     supportsThinking: true,
     thinkingField: "thinking",
     cacheStrategy: "cache_control",
     testStrategy: "text",
-    // Claude 支持多模态 image content block，但 adapter 当前 disabled
+    // Claude 支持多模态 image content block
     supportsVision: true,
-    disabled: true,
   },
-];
+  {
+    id: "mimo",
+    displayName: "MiMo（小米）",
+    // 默认入口：用户切 /anthropic 时由 detectTransport 自动推断
+    transport: "openai",
+    baseUrl: "https://api.xiaomimimo.com/v1",
+    // 官方文档：/v1 与 /anthropic 都支持 Authorization: Bearer
+    authStyle: "bearer",
+    defaultModel: "mimo-v2.5-pro",
+    supportsTools: true,
+    supportsThinking: true,
+    thinkingField: "reasoning_content",
+    cacheStrategy: "auto",
+    testStrategy: "text",
+    supportsVision: true,
+    // 结构上独立：用户切主入口到 /anthropic 时视觉仍由 visionBaseUrl 决定
+    visionBaseUrl: "https://api.xiaomimimo.com/v1",
+  },
+] satisfies readonly ProviderCapability[];
 
 const byDisplayName = new Map(PROVIDER_CAPABILITIES.map(c => [c.displayName, c]));
 

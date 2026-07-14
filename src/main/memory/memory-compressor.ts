@@ -8,7 +8,7 @@
 
 import { memoryStore } from "./memory-store";
 import type { L0WritableField, L2Input } from "./memory-store";
-import { addMemory, getEntriesBySource } from "../rag/index";
+import { addL2MemoryVector, deleteUserMemoryVectors, getEntriesBySource } from "../rag/index";
 import { cosineSimilarity } from "../rag/vectorstore";
 import { L0_FIELD_DESCRIPTIONS } from "./memory-types";
 import type { L2Memory } from "./memory-types";
@@ -162,13 +162,20 @@ interface GroupedEntry {
 export interface CompressionSyncDeps {
   addL2Memory: (input: L2Input) => Promise<L2Memory>;
   addMemory: (text: string, source: string, metadata?: Record<string, unknown>) => Promise<string>;
+  addL2MemoryVector?: (text: string, l2Id: string, metadata?: Record<string, unknown>) => Promise<string>;
+  deleteVectors?: (ragIds: string[]) => Promise<unknown> | unknown;
   markL2SyncStatus: (id: string, status: "pending_sync" | "synced" | "sync_failed", ragId?: string, error?: unknown) => Promise<L2Memory | null>;
   archiveL2Batch: (ids: string[]) => Promise<void>;
 }
 
 const compressionSyncDeps: CompressionSyncDeps = {
   addL2Memory: (input) => memoryStore.addL2Memory(input),
-  addMemory,
+  addMemory: (text, source, metadata) => {
+    const l2Id = typeof metadata?.l2Id === "string" ? metadata.l2Id : "";
+    if (source === "user_memory" && l2Id) return addL2MemoryVector(text, l2Id, metadata);
+    throw new Error("Compressed memories require a stable l2Id");
+  },
+  deleteVectors: (ragIds) => deleteUserMemoryVectors(ragIds),
   markL2SyncStatus: (id, status, ragId, error) => memoryStore.markL2SyncStatus(id, status, ragId, error),
   archiveL2Batch: (ids) => memoryStore.archiveL2Batch(ids),
 };
@@ -228,9 +235,21 @@ export async function commitCompressedSummary(
     };
     if (isGlobalSummary) metadata.globalSummary = true;
     else metadata.sessionId = sourceConversationId;
-    const ragId = await deps.addMemory(compressed.content, "user_memory", metadata);
+    const ragId = deps.addL2MemoryVector
+      ? await deps.addL2MemoryVector(compressed.content, compressed.id, metadata)
+      : await deps.addMemory(compressed.content, "user_memory", metadata);
     await deps.markL2SyncStatus(compressed.id, "synced", ragId);
     await deps.archiveL2Batch(sourceIds);
+    const sourceRagIds = sourceMemories
+      .map((memory) => memory.ragId)
+      .filter((id): id is string => typeof id === "string" && id.length > 0);
+    if (sourceRagIds.length > 0 && deps.deleteVectors) {
+      try {
+        await deps.deleteVectors(sourceRagIds);
+      } catch (cleanupError) {
+        console.warn("[MemoryCompressor] failed to clean archived source vectors:", cleanupError);
+      }
+    }
     return { ok: true, summary: compressed, ragId };
   } catch (err) {
     await deps.markL2SyncStatus(compressed.id, "sync_failed", undefined, err);

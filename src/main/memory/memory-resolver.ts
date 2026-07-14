@@ -3,7 +3,7 @@ import type { ChatMessage, VendorConfig } from "../orchestrator/vendors"
 import { recordUsage } from "../token-usage-store"
 import { getMemoryV2Database } from "../memory-v2/bridge"
 import { isMemoryBackgroundBudgetAvailable, recordMemoryBackgroundCall } from "../memory-v2/background-metrics"
-import { addMemory } from "../rag/index"
+import { addL2MemoryVector } from "../rag/index"
 import { appendMemoryTrace } from "./memory-trace"
 import { memoryStore } from "./memory-store"
 import type { ConflictLog, L2Memory, MemoryEvidence } from "./memory-types"
@@ -314,8 +314,7 @@ async function syncResolvedMemoryToRag(log: ConflictLog): Promise<void> {
   if (!resolvedMemory || resolvedMemory.syncStatus === "synced") return
 
   try {
-    const ragId = await addMemory(resolvedMemory.content, "user_memory", {
-      l2Id: resolvedMemory.id,
+    const ragId = await addL2MemoryVector(resolvedMemory.content, resolvedMemory.id, {
       source: "memory_resolver",
       conflictLogId: log.id,
       resolutionType: log.resolutionType,

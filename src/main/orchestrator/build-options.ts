@@ -22,10 +22,16 @@
 // 这些全部塞到 BuildOptionsDeps 里。dispatcher 在 Phase 1 注入同样的 deps 即可。
 import type { CyreneRunOptions, CyreneRunResult } from "./cyrene-agent";
 import type { ToolDefinition } from "./tool-registry";
-import type { ChatMessage } from "./vendors/types";
+import type { ChatMessage, OpenAIContentBlock } from "./vendors/types";
 import type { AguiRunInput } from "../agui-bridge";
 import { IPC } from "../../shared/ipc-channels";
 import type { RelationshipChannel, RelationshipTurnInput } from "../relationship/relationship-log";
+import { validateCaptionImagePath } from "../chat/image-caption";
+import {
+  buildConversationTimeContext,
+  resolveChatContextTimezone,
+  type ChatContextMessage,
+} from "../chat-time-context";
 
 /** index.ts 模块级符号的最小可注入子集。
  *  类型故意用宽签名（unknown / 任意 shape）—— 因为 build-options 是纯消费者，
@@ -57,9 +63,16 @@ export interface BuildOptionsDeps {
   buildExternalChannelContext?: () => string;
   buildScreenObservationContext?: () => string;
   buildSystemPrompt: (styleFile: string) => string;
+  /** 第一期：工具阶段 system prompt。仅含工具调度规则 + 自动生成的工具目录。 */
+  buildToolSystemPrompt: (enabledTools: ReadonlyArray<unknown>) => string;
+  /** 第一期：Soul 阶段使用的基础 system prompt。工具结果在 FC 循环 Soul 阶段执行前动态追加。 */
+  buildSoulSystemBasePrompt: (styleFile: string) => string;
+  /** 第一期：注入 toolRegistry（用于 buildToolSystemPrompt 自动生成目录）。 */
+  toolRegistry: { getEnabled(): ReadonlyArray<unknown> };
   logWorldbookInjection: (alwaysOnContext: string, systemContent: string) => void;
   normalizeChatMessages: (raw: ReadonlyArray<unknown>) => ChatMessage[];
   chatRequestTimeoutMs: number;
+  captionImageForFallback?: (filePath: string) => Promise<{ ok: boolean; caption?: string; error?: string }>;
 }
 
 /** onRunFinished 副作用所需的 deps（与 BuildOptionsDeps 部分重叠） */
@@ -101,6 +114,9 @@ export interface ModelSettingsLite {
   baseUrl: string;
   model: string;
   apiKey: string;
+  explicitTransport?: "openai" | "anthropic" | "auto";
+  /** 顶层 reasoning 镜像（来自 perProvider[currentProvider].reasoning）。adapter 直接读。 */
+  reasoning?: import("../../shared/reasoning").ReasoningPreference;
   runtimeSync?: string;
   stickerEnabled?: boolean;
   stickerSimilarityThreshold?: number;
@@ -153,6 +169,106 @@ export function buildMessageRhythmSystem(): string {
   ].join("\n");
 }
 
+function contentToText(content: ChatMessage["content"]): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((block): block is { type: "text"; text: string } => block?.type === "text")
+      .map((block) => block.text)
+      .join("\n");
+  }
+  return "";
+}
+
+function stripTurnModelContextForSideEffects(text: string): string {
+  const markers = [
+    "\n\n【本轮文件】",
+    "\n\n【文档内容】",
+    "\n\n【图片视觉信息】",
+    "\n\n【图片附件】",
+    "【本轮文件】",
+    "【文档内容】",
+    "【图片视觉信息】",
+    "【图片附件】",
+  ];
+  const cut = markers
+    .map((marker) => text.indexOf(marker))
+    .filter((index) => index >= 0)
+    .sort((a, b) => a - b)[0];
+  return (cut === undefined ? text : text.slice(0, cut)).trim();
+}
+
+function withDirectImageAttachments(messages: ChatMessage[], input: AguiRunInput): ChatMessage[] {
+  const images = input.imageAttachments?.filter((image) =>
+    typeof image?.filePath === "string" && typeof image?.name === "string",
+  ) ?? [];
+  if (images.length === 0) return messages;
+
+  const latestUserIndex = messages.map((message) => message.role).lastIndexOf("user");
+  if (latestUserIndex < 0) return messages;
+
+  const current = messages[latestUserIndex];
+  const blocks: OpenAIContentBlock[] = [];
+  const text = contentToText(current.content);
+  blocks.push({ type: "text", text });
+
+  for (const image of images) {
+    const validated = validateCaptionImagePath(image.filePath);
+    if (!validated.ok) {
+      blocks.push({
+        type: "text",
+        text: `图片 ${image.name} 无法读取：${validated.error}。请诚实说明暂时无法看清这张图，不要编造图片内容。`,
+      });
+      continue;
+    }
+    blocks.push({
+      type: "image_url",
+      image_url: { url: `data:${validated.mime};base64,${validated.buffer.toString("base64")}` },
+    });
+  }
+
+  const next = messages.slice();
+  next[latestUserIndex] = { ...current, content: blocks };
+  return next;
+}
+
+function buildImageCaptionFallbackMessages(
+  systemContent: string,
+  messages: ChatMessage[],
+  input: AguiRunInput,
+  deps: BuildOptionsDeps,
+): (() => Promise<ChatMessage[]>) | undefined {
+  const images = input.imageAttachments?.filter((image) =>
+    typeof image?.filePath === "string" && typeof image?.name === "string",
+  ) ?? [];
+  if (images.length === 0 || !deps.captionImageForFallback) return undefined;
+
+  return async () => {
+    const fallbackMessages = messages.map((message) => ({ ...message }));
+    const latestUserIndex = fallbackMessages.map((message) => message.role).lastIndexOf("user");
+    if (latestUserIndex < 0) return [{ role: "system", content: systemContent }, ...fallbackMessages];
+
+    const current = fallbackMessages[latestUserIndex];
+    const text = contentToText(current.content);
+    const imageLines: string[] = [];
+    for (const image of images) {
+      const result = await deps.captionImageForFallback!(image.filePath);
+      if (result.ok && result.caption) {
+        imageLines.push(`- ${image.name}：${result.caption}`);
+      } else {
+        imageLines.push(`- ${image.name}：图片分析失败：${result.error || "图片分析失败"}。请诚实说明暂时无法看清这张图。`);
+      }
+    }
+
+    const imageContext = "【图片视觉信息】\n以下内容是视觉模型对用户本轮图片的观察结果，请将其视为你已经看到的图片内容；如果某张图分析失败，请不要编造。\n" + imageLines.join("\n");
+    fallbackMessages[latestUserIndex] = {
+      ...current,
+      content: text ? `${text}\n\n${imageContext}` : imageContext,
+    };
+    return [{ role: "system", content: systemContent }, ...fallbackMessages];
+  };
+}
+
 /**
  * 构造 CyreneAgent.runWithEvents 所需的 options + 提取 latestUserText。
  * 与 index.ts 原 AG-UI bridge 的 buildOptions 行为完全一致。
@@ -171,7 +287,14 @@ export async function buildAgentRunOptions(
   }
   // slim view for downstream helpers that only need { role, content }
   const slimMessages = messages as unknown as Array<{ role: string; content?: string }>;
-  const latestUserText = messages.filter((m) => m.role === "user").at(-1)?.content ?? "";
+  const latestUserText = contentToText(messages.filter((m) => m.role === "user").at(-1)?.content) ?? "";
+  const skillActivation = deps.resolveSlashActivation(slimMessages);
+  const profile = deps.loadUserProfile();
+  const { messages: llmMessages, timeContext: conversationTimeContext } = buildConversationTimeContext(
+    messages as unknown as ChatContextMessage[],
+    resolveChatContextTimezone(profile.timezone),
+  );
+  const slimLlmMessages = llmMessages as Array<{ role: string; content?: string }>;
 
   let alwaysOnContext = "";
   try {
@@ -200,7 +323,6 @@ export async function buildAgentRunOptions(
 
   let environmentContext = "";
   try {
-    const profile = deps.loadUserProfile();
     environmentContext = deps.buildEnvironmentContext(
       { provider: settings.provider, model: settings.model },
       {
@@ -216,7 +338,6 @@ export async function buildAgentRunOptions(
   }
 
   const skillCatalog = deps.buildSkillCatalog(deps.skillRegistry.getEnabled());
-  const skillActivation = deps.resolveSlashActivation(slimMessages);
   const channelSystem = buildChannelSystem(input.channel);
   const messageRhythmSystem = buildMessageRhythmSystem();
   const externalChannelContext = deps.buildExternalChannelContext?.() ?? "";
@@ -228,7 +349,7 @@ export async function buildAgentRunOptions(
     try {
       toneInjection = await deps.buildToneInjection(
         latestUserText,
-        slimMessages,
+        slimLlmMessages,
         deps.getSceneEmbeddingProvider(),
         deps.sceneEmbeddingIndex,
       );
@@ -245,13 +366,40 @@ export async function buildAgentRunOptions(
   }
 
   const isTalkMode = (input.style || "").startsWith("talk");
+  const styleFile = input.style || "01_default.md";
+
+  // 第一期：保留旧 systemContent 兼容（已不再使用，保留字段是为了 logger 诊断）。
+  // 同时新增 toolSystemContent / soulSystemBaseContent 两套。
   const systemContent =
     (environmentContext ? environmentContext + "\n\n" : "") +
+    (conversationTimeContext ? conversationTimeContext + "\n\n---\n\n" : "") +
     (externalChannelContext ? externalChannelContext + "\n\n" : "") +
     (screenObservationContext ? screenObservationContext + "\n\n" : "") +
     (channelSystem ? channelSystem + "\n\n" : "") +
     messageRhythmSystem + "\n\n" +
-    deps.buildSystemPrompt(input.style || "01_default.md") +
+    deps.buildSystemPrompt(styleFile) +
+    (skillCatalog ? "\n\n---\n\n" + skillCatalog : "") +
+    skillActivation +
+    toneInjection +
+    (memoryInjection ? "\n\n" + memoryInjection + "\n\n" : "") +
+    (alwaysOnContext ? "\n\n" + alwaysOnContext + "\n\n" : "") +
+    (relationshipContext ? "\n\n" + relationshipContext + "\n\n" : "") +
+    attachmentContext;
+
+  // 工具阶段：只含 tools_system 规则 + 运行时生成的工具目录。
+  const toolSystemContent = deps.buildToolSystemPrompt(deps.toolRegistry.getEnabled());
+
+  // Soul 阶段基础 system：人设 + 环境/记忆/关系/附件/渠道（这些是"表达"所需）。
+  // 工具结果（role: tool 消息）已在 conversation 中携带，本字段不重复注入；
+  // FC 循环 Soul 阶段执行前会按需动态追加 soulToolResultsSummary。
+  const soulSystemBaseContent =
+    (environmentContext ? environmentContext + "\n\n" : "") +
+    (conversationTimeContext ? conversationTimeContext + "\n\n---\n\n" : "") +
+    (externalChannelContext ? externalChannelContext + "\n\n" : "") +
+    (screenObservationContext ? screenObservationContext + "\n\n" : "") +
+    (channelSystem ? channelSystem + "\n\n" : "") +
+    messageRhythmSystem + "\n\n" +
+    deps.buildSoulSystemBasePrompt(styleFile) +
     (skillCatalog ? "\n\n---\n\n" + skillCatalog : "") +
     skillActivation +
     toneInjection +
@@ -262,10 +410,9 @@ export async function buildAgentRunOptions(
 
   deps.logWorldbookInjection(alwaysOnContext, systemContent);
 
-  const fcMessages: ChatMessage[] = [
-    { role: "system", content: systemContent },
-    ...messages,
-  ];
+  // 第一期：原始 messages 不再携带 system。FC 循环按阶段动态注入。
+  const fcMessages: ChatMessage[] = withDirectImageAttachments(llmMessages as unknown as ChatMessage[], input);
+  const imageCaptionFallback = buildImageCaptionFallbackMessages(toolSystemContent + "\n\n---\n\n" + soulSystemBaseContent, llmMessages as unknown as ChatMessage[], input, deps);
 
   return {
     options: {
@@ -274,9 +421,13 @@ export async function buildAgentRunOptions(
         baseUrl: settings.baseUrl,
         model: settings.model,
         apiKey: settings.apiKey,
+        explicitTransport: settings.explicitTransport,
       },
       messages: fcMessages,
       timeoutMs: deps.chatRequestTimeoutMs,
+      toolSystemContent,
+      soulSystemBaseContent,
+      ...(imageCaptionFallback ? { imageCaptionFallback } : {}),
       ...(isTalkMode ? { tools: [] as ToolDefinition[] } : {}),
     },
     latestUserText,
@@ -288,6 +439,10 @@ export async function buildAgentRunOptions(
  * 与 index.ts 原 AG-UI bridge 的 onRunFinished 行为完全一致。
  *
  * 注意：feeling 字段由 inferRuntimeState 内部副作用更新；本函数只同步 status/expression/updatedAt。
+ *
+ * 渠道（wechat/feishu/...）的 sticker 走 OutgoingMessage.parts（统一消息模型）；
+ * 桌面聊天窗保留 IPC 广播（向后兼容 + 桌面渲染端 sticker 选择器依赖此事件）。
+ * 两者从同一份 sticker 决定出发，不会重复。
  */
 export async function onAgentRunFinished(
   result: CyreneRunResult,
@@ -295,12 +450,13 @@ export async function onAgentRunFinished(
   deps: OnRunFinishedDeps,
   channel?: "wechat" | "feishu" | "qq",
   sessionId = "default",
-): Promise<void> {
+): Promise<{ sticker: string | null }> {
   const chatContent = result.reply;
-  deps.scheduleMemoryWrite(latestUserText, chatContent, sessionId);
+  const sideEffectUserText = stripTurnModelContextForSideEffects(latestUserText);
+  deps.scheduleMemoryWrite(sideEffectUserText, chatContent, sessionId);
 
   const settings = deps.loadModelSettings();
-  const inferredStatus = deps.inferRuntimeState(latestUserText, chatContent, false);
+  const inferredStatus = deps.inferRuntimeState(sideEffectUserText, chatContent, false);
   deps.setRuntimeState({
     status: inferredStatus.status,
     expression: deps.feelingToExpression[deps.runtimeState.feeling ?? ""] ?? 0,
@@ -308,18 +464,19 @@ export async function onAgentRunFinished(
   });
 
   await deps.recordRelationshipTurn({
-    userText: latestUserText,
+    userText: sideEffectUserText,
     assistantText: chatContent,
     cyreneFeeling: deps.runtimeState.feeling ?? "平静",
     channel: channel ?? "desktop",
   });
 
   const stickerIndex = deps.getStickerEmbeddingIndex?.() ?? deps.stickerEmbeddingIndex;
+  const stickerQuery = (chatContent + "\n" + sideEffectUserText).slice(0, 1000);
   const stickerCandidate =
     settings.stickerEnabled && stickerIndex
       ? (
           await deps.matchSticker(
-            chatContent + "\n" + latestUserText,
+            stickerQuery,
             deps.getEmbeddingProvider(),
             stickerIndex,
             settings.stickerSimilarityThreshold ?? 0.55,
@@ -344,7 +501,13 @@ export async function onAgentRunFinished(
     // 心情观察器在 channels bot (wechat/feishu) 上跳过：节省一次 LLM 调用、加快首条回复
     // 桌面聊天（channel === undefined）照常跑，保持 Live2D 表情/心情跟随对话变化
     if (channel !== "wechat" && channel !== "feishu" && channel !== "qq") {
-      void deps.observeRuntimeState(settings, [], latestUserText, chatContent);
+      void deps.observeRuntimeState(settings, [], sideEffectUserText, chatContent);
     }
   }
+
+  // 返回 sticker 决定：
+  // - 桌面聊天窗的 sticker 由 IPC 广播（上面 chatWin.webContents.send）继续承担
+  // - 渠道（wechat/feishu/...）的 sticker 由 dispatcher 收下，纳入 OutgoingMessage.parts
+  // - 桌面路径也返回 sticker 以保持签名一致；dispatcher 路径下 channel !== undefined 才会消费它
+  return { sticker };
 }

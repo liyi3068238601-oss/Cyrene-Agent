@@ -6,12 +6,27 @@ import {
   formatChatRelativeTime,
   type ChatSessionMetaUI,
 } from "../../shared/chat-ui";
+import { normalizeDefaultChatMode, type DefaultChatMode } from "../../shared/preferences";
 import { canUseMinimaxStreamingEarly, extractEarlyTtsSegment } from "../../shared/tts-early-playback";
 import { getStickerSrcForId } from "./sticker-src";
 import { hideVisibleMessages, SessionMessageCache } from "./session-runtime";
 import { resolveAsset } from "../../shared/renderer-base";
 import { getSchedulePanelItems, type ScheduledTask } from "../tasks/task-filter";
-import { splitSmartReply } from "../../shared/smart-segmentation";
+import { formatAttachmentTagDetail, getAttachmentIcon } from "./attachment-labels";
+import {
+  getAssistantReplyBubbleTexts,
+  MAX_ASSISTANT_REPLY_BUBBLES,
+  shouldBreakStreamingBubbleAfterChar,
+  shouldSkipStreamingBubbleLeadingChar,
+  shouldSegmentAssistantReply,
+} from "./message-segmentation";
+import { buildDocumentContextLines, processDocumentsWithWait, type RetrievedDocumentChunk } from "./document-processing";
+import {
+  canCancelDocumentIndexStatus,
+  getDocumentIndexStatusLabel,
+  type DocumentIndexCardStatus,
+  type DocumentIndexProgress,
+} from "./types";
 
 type Role = "user" | "model";
 
@@ -21,10 +36,37 @@ interface Message {
   content: string;
   at: number;
   hidden?: boolean;
+  modelContext?: string;
+  attachments?: MessageAttachment[];
   sticker?: string | null;
   thinking?: boolean;
+  transient?: boolean;
   ttsCacheKey?: string;
   novelAiImage?: { id:string; prompt?:string; model?:string; width?:number; height?:number };
+}
+
+type MessageAttachment = ImageMessageAttachment | DocumentMessageAttachment;
+
+interface ImageMessageAttachment {
+  kind: "image";
+  name: string;
+  filePath: string;
+  mime: string;
+  previewUrl?: string;
+  caption?: string;
+  status: "pending" | "done" | "error";
+}
+
+interface DocumentMessageAttachment {
+  kind: "document";
+  name: string;
+  filePath: string;
+  status: DocumentIndexCardStatus;
+  jobId?: string;
+  processedKind?: "text" | "indexed" | "empty" | "unsupported";
+  chunks?: number;
+  importId?: string;
+  reason?: string;
 }
 
 interface ChatReplyPayload {
@@ -54,15 +96,6 @@ interface ModelConfig {
   model: string;
   connected: boolean;
   stickerSize: "small" | "standard" | "large";
-}
-
-function splitDesktopReply(text: string): string[] {
-  return splitSmartReply(text, {
-    contentThreshold: 400,
-    maxChars: 240,
-    maxParts: 4,
-    sentenceFallback: false,
-  });
 }
 
 interface TokenDayData {
@@ -102,6 +135,12 @@ interface ChatApi {
     isMaximized: () => Promise<boolean>;
     sendMessage: (messages: Array<{ role: "user" | "model"; content: string }>, style: string) => Promise<ChatReplyPayload>;
     ingestDroppedFiles: (files: File[]) => Promise<Attachment[]>;
+    processDocuments: (filePaths: string[], query: string) => Promise<Attachment[]>;
+    onDocumentIndexProgress?: (callback: (progress: DocumentIndexProgress) => void) => () => void;
+    cancelDocumentIndex: (jobId: string) => Promise<boolean>;
+    captionImage: (filePath: string) => Promise<{ ok: boolean; caption?: string; error?: string }>;
+    getImageSendStrategy: () => Promise<{ mode: "direct" | "caption" }>;
+    getGeneralSettings?: () => Promise<{ defaultChatMode?: DefaultChatMode; segmentedOutputMode?: "all" | "chat" | "off" }>;
     getEnabledStickers?: () => Promise<Array<{ id: string; src: string; description?: string }>>;
     onProactiveMessage?: (callback:(payload:{sessionId:string;message:Message})=>void)=>()=>void;
     getScreenObservationStatus?: () => Promise<ScreenObservationStatus>;
@@ -137,7 +176,13 @@ const COPY_ICON_DONE = `<svg class="msg__copy-icon msg__copy-icon--done" viewBox
 </svg>`;
 
 interface AguiApi {
-  run: (input: { messages: unknown[]; style: string; sessionId?: string; attachments?: { name: string; text: string }[] }) => Promise<{ success: boolean; error?: string }>;
+  run: (input: {
+    messages: unknown[];
+    style: string;
+    sessionId?: string;
+    attachments?: { name: string; text: string }[];
+    imageAttachments?: { name: string; filePath: string; mime?: string }[];
+  }) => Promise<{ success: boolean; error?: string }>;
   onEvent: (callback: (event: unknown) => void) => () => void;
   cancel: () => Promise<boolean>;
 }
@@ -171,13 +216,20 @@ interface AguiBaseEvent {
 }
 
 /** 文件摄入结果（与 main 侧 file-ingest.ts 的 Attachment 对齐）。 */
-type AttachmentKind = "text" | "indexed" | "empty" | "unsupported";
+type AttachmentKind = "text" | "indexed" | "empty" | "unsupported" | "error" | "image" | "document";
 
 interface Attachment {
   name: string;
   kind: AttachmentKind;
+  filePath?: string;
+  mime?: string;
+  previewUrl?: string;
+  caption?: string;
+  status?: DocumentIndexCardStatus;
   text?: string;
   chunks?: number;
+  importId?: string;
+  retrievedChunks?: RetrievedDocumentChunk[];
   reason?: string;
 }
 
@@ -349,6 +401,10 @@ const sessionMessageCache = new SessionMessageCache<Message>();
 let currentSessionId: string | null = null;
 let currentSessionIsMain = false;
 window.chat?.onProactiveMessage?.((payload)=>{if(payload.sessionId!==currentSessionId||messages.some((message)=>message.id===payload.message.id))return;messages.push(payload.message);render();void saveSession()});
+let sessionTailStart = 0;
+const sessionTailStarts = new Map<string, number>();
+let segmentedOutputMode: "all" | "chat" | "off" = "off";
+const CHAT_WINDOW_SIZE = 100;
 let currentModelConfig: ModelConfig | null = null;
 
 function formatModelHint(config: ModelConfig | null): string {
@@ -410,6 +466,8 @@ interface ChatStoreSession {
     content: string;
     at: number;
     hidden?: boolean;
+    modelContext?: string;
+    attachments?: MessageAttachment[];
     sticker?: string | null;
     ttsCacheKey?: string;
     novelAiImage?: { id:string; prompt?:string; model?:string; width?:number; height?:number };
@@ -418,14 +476,17 @@ interface ChatStoreSession {
   updatedAt: number;
   schemaVersion: 1;
   isMain?: boolean;
+  purpose?: "proactive-chat";
 }
 
 interface ChatStoreApi {
   list: () => Promise<ChatSessionMetaUI[]>;
   get: (id: string) => Promise<ChatStoreSession | null>;
+  getPage: (id: string, before: number | null, limit: number) => Promise<{ session: Omit<ChatStoreSession, "messages">; messages: ChatStoreSession["messages"]; hasMore: boolean } | null>;
   create: (payload?: { title?: string; identityId?: string | null }) => Promise<ChatStoreSession>;
   append: (id: string, message: unknown) => Promise<ChatStoreSession | null>;
   replaceMessages: (id: string, messages: unknown[]) => Promise<ChatStoreSession | null>;
+  replaceTail: (id: string, startIndex: number, messages: unknown[]) => Promise<ChatStoreSession | null>;
   rename: (id: string, title: string) => Promise<ChatStoreSession | null>;
   delete: (id: string) => Promise<boolean>;
   openFolder: () => Promise<boolean>;
@@ -446,21 +507,25 @@ declare global {
 
 // 把渲染端 Message 数组归一化为后端能持久化的形态：
 // - 过滤空 content / 渲染中的 thinking 占位（thinking=true 时通常 content 为空，但保险起见双重过滤）
-// - 丢弃 thinking 字段（持久化层不存这种瞬态状态）
+// - 丢弃仅用于本轮模型调用的 modelContext 与 thinking 等瞬态字段
 function toPersistableMessages(arr: Message[]): Array<{
-  id: string; role: Role; content: string; at: number; hidden?: boolean; sticker?: StickerId | null; ttsCacheKey?: string; novelAiImage?: Message["novelAiImage"];
+  id: string; role: Role; content: string; at: number; hidden?: boolean; modelContext?: string; attachments?: MessageAttachment[]; sticker?: StickerId | null; ttsCacheKey?: string; novelAiImage?: Message["novelAiImage"];
 }> {
   return arr
-    .filter((m) => {
-      if (!m || (m.role !== "user" && m.role !== "model") || typeof m.content !== "string" || m.thinking) return false;
-      return m.content.replace(/\[sticker:[^\]]+\]/g, "").trim().length > 0;
-    })
+    .filter((m) => m && (m.role === "user" || m.role === "model") && !m.thinking && !m.transient && (
+      typeof m.content === "string" && m.content.trim()
+      || ((m.attachments?.length ?? 0) > 0)
+      || Boolean(m.sticker)
+      || Boolean(m.novelAiImage)
+    ))
     .map((m) => ({
       id: m.id,
       role: m.role,
       content: m.content,
       at: m.at,
       hidden: m.hidden,
+      modelContext: m.modelContext,
+      attachments: m.attachments,
       sticker: m.sticker ?? null,
       ttsCacheKey: m.ttsCacheKey,
       novelAiImage: m.novelAiImage,
@@ -470,7 +535,8 @@ function toPersistableMessages(arr: Message[]): Array<{
 async function saveSessionMessages(sessionId: string | null, source: Message[]): Promise<void> {
   if (!sessionId || !window.chatStore) return;
   try {
-    await window.chatStore.replaceMessages(sessionId, toPersistableMessages(source));
+    const tailStart = sessionTailStarts.get(sessionId) ?? (sessionId === currentSessionId ? sessionTailStart : 0);
+    await window.chatStore.replaceTail(sessionId, tailStart, toPersistableMessages(source));
   } catch (err) {
     console.warn("[Cyrene Chat] saveSession 失败:", err);
   }
@@ -495,16 +561,20 @@ function loadSessionIntoUI(session: ChatStoreSession): void {
   currentSessionId = session.id;
   currentSessionIsMain = session.isMain === true || session.id === "main";
   if (conversationTitleEl) conversationTitleEl.textContent = session.title || "新对话";
+  seenSessionUpdatedAt.set(session.id, session.updatedAt);
+  unreadProactiveSessionIds.delete(session.id);
   const persisted = session.messages.map((m) => ({
-      id: m.id,
-      role: m.role,
-      content: m.content,
-      at: m.at,
-      hidden: m.hidden,
-      sticker: m.sticker ?? null,
-      ttsCacheKey: m.ttsCacheKey,
-      novelAiImage: m.novelAiImage,
-    } satisfies Message));
+    id: m.id,
+    role: m.role,
+    content: m.content,
+    at: m.at,
+    hidden: m.hidden,
+    modelContext: m.modelContext,
+    attachments: m.attachments,
+    sticker: m.sticker ?? null,
+    ttsCacheKey: m.ttsCacheKey,
+    novelAiImage: m.novelAiImage,
+  } satisfies Message));
   messages = sessionMessageCache.load(session.id, persisted);
   // 上报活跃 sessionId（设置面板"删除当前会话"差异化提示用）
   void window.chatStore?.setActiveSession(session.id);
@@ -513,10 +583,34 @@ function loadSessionIntoUI(session: ChatStoreSession): void {
   void renderRailList();
 }
 
+async function loadSessionTailIntoUI(id: string): Promise<boolean> {
+  const page = await window.chatStore?.getPage(id, null, CHAT_WINDOW_SIZE);
+  if (!page) return false;
+  sessionTailStart = Math.max(0, page.session.messageCount - page.messages.length);
+  sessionTailStarts.set(id, sessionTailStart);
+  loadSessionIntoUI({ ...page.session, messages: page.messages });
+  return true;
+}
+
+async function loadEarlierMessages(): Promise<void> {
+  if (!currentSessionId || !window.chatStore || sessionTailStart <= 0) return;
+  const beforeHeight = messagesEl.scrollHeight;
+  const page = await window.chatStore.getPage(currentSessionId, sessionTailStart, CHAT_WINDOW_SIZE);
+  if (!page) return;
+  sessionTailStart -= page.messages.length;
+  sessionTailStarts.set(currentSessionId, sessionTailStart);
+  messages.unshift(...page.messages);
+  render(true);
+  messagesEl.scrollTop = messagesEl.scrollHeight - beforeHeight;
+}
+
 // ── 会话侧栏（点左上角 loader 展开）──
 // 精简版：+新对话 / 列表点击切换 / 活跃高亮。改名删除留设置面板。
 // 渲染逻辑跟 settings.ts 的 renderChatSessions 同源（复用 shared 的格式化函数），
 // 但点击行为不同：这里是本地 loadSessionIntoUI，不走跨窗口 IPC，更快。
+
+const unreadProactiveSessionIds = new Set<string>();
+const seenSessionUpdatedAt = new Map<string, number>();
 
 async function renderRailList(): Promise<void> {
   if (!chatRailList || !window.chatStore) return;
@@ -770,6 +864,7 @@ function buildRailItem(session: ChatSessionMetaUI): HTMLLIElement {
   const titleEl = document.createElement("div");
   titleEl.className = "chat__rail-title";
   titleEl.textContent = session.isMain ? "主会话 · 主动消息" : session.title || "新对话";
+  if (unreadProactiveSessionIds.has(session.id)) titleEl.textContent = `● ${titleEl.textContent}`;
 
   const metaEl = document.createElement("div");
   metaEl.className = "chat__rail-meta";
@@ -788,8 +883,7 @@ function buildRailItem(session: ChatSessionMetaUI): HTMLLIElement {
   // 点击列表项 = 本地切换会话（不走跨窗口 IPC，比设置面板还快）
   li.addEventListener("click", async () => {
     if (session.id === currentSessionId) return;
-    const full = await window.chatStore?.get(session.id);
-    if (full) loadSessionIntoUI(full as ChatStoreSession);
+    await loadSessionTailIntoUI(session.id);
   });
 
   li.appendChild(titleEl);
@@ -859,22 +953,26 @@ async function bootstrap(): Promise<void> {
 
   // 优先级：URL ?sessionId= → 列表最新一条 → 自动建新
   const urlSessionId = new URLSearchParams(window.location.search).get("sessionId");
-  let session: ChatStoreSession | null = null;
+  let sessionId: string | null = null;
 
   if (urlSessionId) {
-    session = await window.chatStore.get(urlSessionId);
+    sessionId = urlSessionId;
   }
-  if (!session) {
+  if (!sessionId) {
     const list = await window.chatStore.list();
     if (list.length > 0) {
-      session = await window.chatStore.get(list[0].id);
+      sessionId = list[0].id;
     }
   }
-  if (!session) {
-    session = await window.chatStore.create({ identityId: null });
+  if (!sessionId) {
+    sessionId = (await window.chatStore.create({ identityId: null })).id;
   }
 
-  loadSessionIntoUI(session);
+  if (!await loadSessionTailIntoUI(sessionId)) {
+    const session = await window.chatStore.create({ identityId: null });
+    sessionTailStart = 0;
+    loadSessionIntoUI(session);
+  }
 }
 
 function formatTime(at: number): string {
@@ -1338,15 +1436,192 @@ function setAvatar(slot: HTMLElement, role: Role): void {
   slot.appendChild(img);
 }
 
-function render(): void {
+function createMessageBubble(text?: string): HTMLElement {
+  const item = document.createElement("div");
+  item.className = "msg__bubble";
+  item.hidden = false;
+  if (text) item.textContent = text;
+  return item;
+}
+
+function getLastBubbleForMessage(messageId: string): HTMLElement | null {
+  const row = messagesEl.querySelector(`[data-msg-id="${messageId}"]`);
+  if (!row) return null;
+  const bubbles = row.querySelectorAll<HTMLElement>(".msg__bubble");
+  return bubbles.length > 0 ? bubbles[bubbles.length - 1] : null;
+}
+
+function appendBubbleForMessage(messageId: string): HTMLElement | null {
+  const row = messagesEl.querySelector(`[data-msg-id="${messageId}"]`);
+  const body = row?.querySelector(".msg__body");
+  if (!body) return null;
+  const bubble = createMessageBubble();
+  bubble.hidden = true;
+  body.appendChild(bubble);
+  return bubble;
+}
+
+function appendStreamingCharToBubble(bubble: HTMLElement, char: string): void {
+  if (shouldSkipStreamingBubbleLeadingChar(char, bubble.childNodes.length === 0)) return;
+  bubble.hidden = false;
+  if (bubble.childNodes.length === 0) {
+    bubble.appendChild(document.createTextNode(char));
+    return;
+  }
+  const span = document.createElement("span");
+  span.className = "msg__char";
+  span.textContent = char;
+  bubble.appendChild(span);
+}
+
+function renderMessageAttachments(body: HTMLElement, attachments: MessageAttachment[] | undefined): void {
+  if (!attachments || attachments.length === 0) return;
+  const list = document.createElement("div");
+  list.className = "msg__attachments";
+  for (const att of attachments) {
+    if (att.kind === "image") {
+      const card = document.createElement("div");
+      card.className = "msg__image-card";
+      const preview = document.createElement("div");
+      preview.className = "msg__image-preview";
+      if (att.previewUrl) {
+        const img = document.createElement("img");
+        img.src = att.previewUrl;
+        img.alt = att.name;
+        img.draggable = false;
+        img.addEventListener("load", () => {
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+        });
+        img.addEventListener("error", () => {
+          preview.classList.add("is-error");
+          preview.textContent = "图片无法预览";
+        });
+        preview.appendChild(img);
+      } else {
+        preview.classList.add("is-error");
+        preview.textContent = "图片无法预览";
+      }
+      const name = document.createElement("div");
+      name.className = "msg__image-name";
+      name.textContent = att.name;
+      card.appendChild(preview);
+      card.appendChild(name);
+      list.appendChild(card);
+    } else if (att.kind === "document") {
+      const card = document.createElement("div");
+      card.className = `msg__document-card msg__document-card--${att.status}`;
+      const icon = document.createElement("div");
+      icon.className = "msg__document-icon";
+      icon.textContent = "📄";
+      const meta = document.createElement("div");
+      meta.className = "msg__document-meta";
+      const name = document.createElement("div");
+      name.className = "msg__document-name";
+      name.textContent = att.name;
+      const status = document.createElement("div");
+      status.className = "msg__document-status";
+      status.textContent = att.status === "done"
+        ? (att.processedKind === "indexed" ? `已索引 ${att.chunks ?? 0} 段` : "已处理")
+        : getDocumentIndexStatusLabel(att.status);
+      meta.appendChild(name);
+      meta.appendChild(status);
+      card.appendChild(icon);
+      card.appendChild(meta);
+      if (canCancelDocumentIndexStatus(att.status) && att.jobId) {
+        const cancel = document.createElement("button");
+        cancel.type = "button";
+        cancel.className = "msg__document-cancel";
+        cancel.textContent = "×";
+        cancel.title = "取消处理";
+        cancel.setAttribute("aria-label", "取消处理");
+        cancel.addEventListener("click", () => {
+          void window.chat?.cancelDocumentIndex(att.jobId!);
+        });
+        card.appendChild(cancel);
+      }
+      list.appendChild(card);
+    } else {
+      continue;
+    }
+  }
+  if (list.childElementCount > 0) body.appendChild(list);
+}
+
+function updateDocumentAttachmentProgress(progress: DocumentIndexProgress): void {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const attachment = messages[index].attachments?.find((item): item is DocumentMessageAttachment =>
+      item.kind === "document"
+      && item.filePath === progress.filePath
+      && (!item.jobId || item.jobId === progress.jobId)
+    );
+    if (!attachment) continue;
+    attachment.jobId = progress.jobId;
+    attachment.status = progress.status;
+    attachment.reason = progress.reason;
+    if (typeof progress.totalChunks === "number") attachment.chunks = progress.totalChunks;
+    return;
+  }
+}
+
+window.chat?.onDocumentIndexProgress?.((progress) => {
+  updateDocumentAttachmentProgress(progress);
+  render();
+});
+
+let transientStatusEl: HTMLElement | null = null;
+
+function showTransientStatus(text: string): void {
+  if (!transientStatusEl) {
+    transientStatusEl = document.createElement("div");
+    transientStatusEl.className = "chat-transient-status";
+    const dots = document.createElement("span");
+    dots.className = "chat-transient-status__dots";
+    for (let i = 0; i < 3; i += 1) {
+      const dot = document.createElement("span");
+      dot.className = "thinking-dot";
+      dots.appendChild(dot);
+    }
+    const label = document.createElement("span");
+    label.className = "chat-transient-status__text";
+    transientStatusEl.appendChild(dots);
+    transientStatusEl.appendChild(label);
+    messagesEl.appendChild(transientStatusEl);
+  }
+  const label = transientStatusEl.querySelector(".chat-transient-status__text");
+  if (label) label.textContent = text;
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function hideTransientStatus(): void {
+  transientStatusEl?.remove();
+  transientStatusEl = null;
+}
+
+function render(preserveScroll = false): void {
   // 空态：当前会话还没有消息时（新建/全清）显示"昔涟期待与你聊天哦 ✨"占位
   // thinking 状态（昔涟主动开场/流式回复中）也算有消息，胶囊应立即消失
   const emptyEl = document.getElementById("chat-empty");
-  const hasMessages = messages.some((m) => !m.hidden && (m.content.trim() || m.thinking));
+  const hasMessages = messages.some((m) =>
+    !m.hidden && (
+      m.content.trim()
+      || m.thinking
+      || ((m.attachments?.length ?? 0) > 0)
+      || Boolean(m.sticker)
+      || Boolean(m.novelAiImage)
+    )
+  );
   if (emptyEl) emptyEl.toggleAttribute("hidden", hasMessages);
   renderInspectorStats();
 
   messagesEl.replaceChildren();
+  if (sessionTailStart > 0) {
+    const loadEarlier = document.createElement("button");
+    loadEarlier.type = "button";
+    loadEarlier.className = "chat__load-earlier";
+    loadEarlier.textContent = "加载更早消息";
+    loadEarlier.addEventListener("click", () => void loadEarlierMessages());
+    messagesEl.appendChild(loadEarlier);
+  }
   for (const m of messages) {
     if (m.hidden) continue;
     const row = document.createElement("div");
@@ -1361,10 +1636,8 @@ function render(): void {
     const body = document.createElement("div");
     body.className = "msg__body";
 
-    const bubble = document.createElement("div");
-    const continuationBubbles: HTMLElement[] = [];
-    bubble.className = "msg__bubble";
-    bubble.hidden = false;
+    const bubbles: HTMLElement[] = [];
+    const bubble = createMessageBubble();
     if (m.thinking) {
       bubble.classList.add("msg__bubble--thinking");
       const dot1 = document.createElement("span");
@@ -1376,19 +1649,21 @@ function render(): void {
       bubble.appendChild(dot1);
       bubble.appendChild(dot2);
       bubble.appendChild(dot3);
+      bubbles.push(bubble);
     } else if (m.role === "user") {
       // 用户消息：去掉 [sticker:xxx] 标记后显示纯文字
       const cleanText = m.content.replace(/\[sticker:[^\]]+\]/g, "").trim();
       if (cleanText) bubble.textContent = cleanText;
       else bubble.hidden = true; // 纯表情包消息不显示气泡
+      if (!bubble.hidden) bubbles.push(bubble);
     } else {
-      const parts = splitDesktopReply(m.content);
-      bubble.textContent = parts[0] ?? m.content;
-      for (const part of parts.slice(1)) {
-        const nextBubble = document.createElement("div");
-        nextBubble.className = "msg__bubble msg__bubble--continuation";
-        nextBubble.textContent = part;
-        continuationBubbles.push(nextBubble);
+      const currentMode = isTalkMode() ? "talk" : "collab";
+      const segments = getAssistantReplyBubbleTexts(m.content, currentMode, segmentedOutputMode, {
+        preserveEmpty: !!m.transient,
+      });
+      for (const segment of segments) {
+        const text = segment.trim();
+        if (text || m.transient) bubbles.push(createMessageBubble(text));
       }
     }
 
@@ -1396,10 +1671,8 @@ function render(): void {
     time.className = "msg__time";
     time.textContent = formatTime(m.at);
 
-    if (!bubble.hidden) {
-      body.appendChild(bubble);
-      for (const continuation of continuationBubbles) body.appendChild(continuation);
-    }
+    for (const item of bubbles) body.appendChild(item);
+    if (m.role === "user") renderMessageAttachments(body, m.attachments);
 
     if (m.sticker) {
       const stickerSrc = getStickerSrc(m.sticker);
@@ -1423,14 +1696,15 @@ function render(): void {
     }
 
     // actions 行：喇叭 / 复制 / 时间三个控件水平排在气泡下方。
-    // 没有可显示控件的消息（纯表情包 / thinking 空内容）跳过整行。
+    // 流式中的 transient 消息会继续追加新气泡；此时先隐藏 actions，
+    // 避免时间戳被夹在第一段气泡和后续气泡之间。
     const actions = document.createElement("div");
     actions.className = "msg__actions";
 
     let hasActionItem = false;
 
     // model 消息加 SVG 朗读按钮（thinking 中的不显示）
-    if (m.role === "model" && !m.thinking && m.content.trim()) {
+    if (!m.transient && m.role === "model" && !m.thinking && m.content.trim()) {
       const speakBtn = document.createElement("button");
       speakBtn.type = "button";
       speakBtn.className = "msg__speak";
@@ -1455,7 +1729,7 @@ function render(): void {
 
     // 复制按钮：user / model 都有，thinking / 空内容 / 纯表情包跳过
     //   user 复制时去掉 [sticker:xxx] 标记，model 直接复制 content
-    if (!m.thinking && m.content.trim()) {
+    if (!m.transient && !m.thinking && m.content.trim()) {
       const copyBtn = document.createElement("button");
       copyBtn.type = "button";
       copyBtn.className = "msg__copy";
@@ -1486,9 +1760,12 @@ function render(): void {
       hasActionItem = true;
     }
 
-    // 时间戳总是显示；哪怕只有一个时间，也用 actions 行保持视觉一致
-    actions.appendChild(time);
-    hasActionItem = true;
+    // 时间戳总是显示；哪怕只有一个时间，也用 actions 行保持视觉一致。
+    // 但流式 transient 阶段先不显示，等最终 render 后再出现到整条消息底部。
+    if (!m.transient) {
+      actions.appendChild(time);
+      hasActionItem = true;
+    }
 
     if (hasActionItem) body.appendChild(actions);
 
@@ -1496,7 +1773,20 @@ function render(): void {
     row.appendChild(body);
     messagesEl.appendChild(row);
   }
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+  if (!preserveScroll) messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+let schedulerEventsOff: (() => void) | null = null;
+const activeAguiOffs = new Set<() => void>();
+
+function registerAguiListener(callback: (event: unknown) => void): () => void {
+  const off = window.agui!.onEvent(callback);
+  const release = () => {
+    if (!activeAguiOffs.delete(release)) return;
+    off();
+  };
+  activeAguiOffs.add(release);
+  return release;
 }
 
 function installSchedulerEventListener(): void {
@@ -1525,7 +1815,8 @@ function installSchedulerEventListener(): void {
     render();
   };
 
-  window.schedulerEvents.onEvent((rawEvent) => {
+  schedulerEventsOff?.();
+  schedulerEventsOff = window.schedulerEvents.onEvent((rawEvent) => {
     const event = rawEvent as AguiBaseEvent;
     if (event.type === "CUSTOM" && event.name === "scheduler.started") {
       const value = event.value as { taskId?: string; title?: string; firedAt?: string; runId?: string } | undefined;
@@ -1669,6 +1960,7 @@ declare global {
 
 // 当前正在播放的 TTS 音频实例（全局唯一）。点新朗读前先停这个，避免重叠。
 let currentTtsAudio: HTMLAudioElement | null = null;
+let currentTtsObjectUrl: string | null = null;
 // 当前正在朗读的消息 ID，用于给对应消息 row 加 .is-speaking class 并切换喇叭图标。
 // null 表示没有正在播放。
 let currentSpeakingMsgId: string | null = null;
@@ -1749,11 +2041,21 @@ function startTextModeMouth(): void {
 /** 停止当前正在播放的 TTS 音频（如果有）。只停 audio，UI 复位由调用方决定。 */
 function stopCurrentTts(): void {
   if (currentTtsAudio) {
-    currentTtsAudio.pause();
-    currentTtsAudio.currentTime = 0;
-    currentTtsAudio = null;
+    releaseCurrentTtsAudio(currentTtsAudio);
   }
   stopLive2dMouth();
+}
+
+function releaseCurrentTtsAudio(audio: HTMLAudioElement): void {
+  if (currentTtsAudio !== audio) return;
+  currentTtsAudio = null;
+  const url = currentTtsObjectUrl;
+  currentTtsObjectUrl = null;
+  audio.pause();
+  audio.currentTime = 0;
+  audio.removeAttribute("src");
+  audio.load();
+  if (url) URL.revokeObjectURL(url);
 }
 
 async function loadTtsSettings(): Promise<TtsSettings | null> {
@@ -1831,12 +2133,12 @@ function playTtsBase64(
   audio.preload = "auto";
   audio.load();
   currentTtsAudio = audio;
+  currentTtsObjectUrl = url;
   // 标记喇叭 UI 进入播放态（即使没传 msgId 也清掉旧的）
   setSpeakingMsgId(msgId ?? null);
 
   audio.onended = () => {
-    URL.revokeObjectURL(url);
-    if (currentTtsAudio === audio) currentTtsAudio = null;
+    releaseCurrentTtsAudio(audio);
     if (speechToken === token) stopLive2dMouth();
     // 复位喇叭 UI：仅当当前记录的就是这条消息才清，避免覆盖后启动的
     if (msgId === undefined || currentSpeakingMsgId === msgId) {
@@ -1850,8 +2152,7 @@ function playTtsBase64(
       await audio.play();
     } catch (err) {
       console.warn("[TTS] 播放失败:", err);
-      URL.revokeObjectURL(url);
-      if (currentTtsAudio === audio) currentTtsAudio = null;
+      releaseCurrentTtsAudio(audio);
       if (speechToken === token) stopLive2dMouth();
       if (msgId === undefined || currentSpeakingMsgId === msgId) {
         setSpeakingMsgId(null);
@@ -1888,6 +2189,8 @@ async function streamAndPlayCached(
   let sourceBuffer: SourceBuffer | null = null;
   let audioEl: HTMLAudioElement | null = null;
   const chunkQueue: Uint8Array[] = [];
+  const maxQueuedAudioBytes = 12 * 1024 * 1024;
+  let queuedAudioBytes = 0;
   let ended = false;
   let resolvedCacheKey: string | null = null;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -1904,6 +2207,8 @@ async function streamAndPlayCached(
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     offChunk?.(); offEnd?.(); offErr?.();
     offChunk = offEnd = offErr = null;
+    chunkQueue.length = 0;
+    queuedAudioBytes = 0;
   };
 
   const finishStream = (result: { cacheKey: string } | null) => {
@@ -1934,10 +2239,12 @@ async function streamAndPlayCached(
       // append 队列里的 chunk（如果 sourceBuffer 空闲）
       if (sourceBuffer && !sourceBuffer.updating && chunkQueue.length > 0) {
         const chunk = chunkQueue.shift()!;
+        queuedAudioBytes -= chunk.byteLength;
         try {
           sourceBuffer.appendBuffer(chunk);
         } catch {
           chunkQueue.unshift(chunk);
+          queuedAudioBytes += chunk.byteLength;
         }
       }
       // 第一块 append 成功后（buffered 有数据）开始播放
@@ -1990,7 +2297,15 @@ async function streamAndPlayCached(
         console.log(`[TTS-Stream] 第一个 chunk +${Math.round(firstChunkAt - t0)}ms`);
       }
       const bytes = Uint8Array.from(atob(payload.base64), (c) => c.charCodeAt(0));
+      if (queuedAudioBytes + bytes.byteLength > maxQueuedAudioBytes) {
+        console.warn("[TTS-Stream] 音频队列超过 12MB，停止本轮流式播放");
+        cleanup();
+        if (audioEl) releaseCurrentTtsAudio(audioEl);
+        finishStream(null);
+        return;
+      }
       chunkQueue.push(bytes);
+      queuedAudioBytes += bytes.byteLength;
     });
     offEnd = window.tts.onStreamEnd((payload) => {
       ended = true;
@@ -2009,12 +2324,12 @@ async function streamAndPlayCached(
     const url = URL.createObjectURL(mediaSource);
     audioEl = new Audio(url);
     currentTtsAudio = audioEl;
+    currentTtsObjectUrl = url;
 
     window.live2dSpeech?.prepare();  // stopLive2dMouth 已在开头 stopCurrentTts 里调过
 
     audioEl.onended = () => {
-      URL.revokeObjectURL(url);
-      if (currentTtsAudio === audioEl) currentTtsAudio = null;
+      releaseCurrentTtsAudio(audioEl!);
       if (speechToken === token) stopLive2dMouth();
       markPlaybackEnded();
     };
@@ -2430,17 +2745,30 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !stickerPicker.hidden) hideStickerPicker();
 });
 
-function buildModelMessages(source: Message[] = messages): Array<{ role: "user" | "model"; content: string }> {
+function buildModelMessages(source: Message[] = messages): Array<{ role: "user" | "model"; content: string; at?: number }> {
   return source
-    .filter((message) => message.content.replace(/\[sticker:[^\]]+\]/g, "").trim())
+    .filter((message) => !message.transient && (message.content.trim() || message.modelContext?.trim() || message.sticker))
     .slice(-16)
     .map((message) => ({
       role: message.role,
-      content: message.content.replace(/\[sticker:([^\]]+)\]/g, (_match, id) => {
+      at: Number.isFinite(message.at) ? message.at : undefined,
+      content: (message.content + (message.modelContext ? "\n\n" + message.modelContext : "")).replace(/\[sticker:([^\]]+)\]/g, (_match, id) => {
         const desc = getStickerDescription(id);
         return `（用户发送表情包：${desc}）`;
       }),
     }));
+}
+
+/** 文档全文、RAG 片段和图片 caption 只服务于当前请求，不能随历史常驻。 */
+function clearModelContexts(source: Message[] = messages): boolean {
+  let changed = false;
+  for (const message of source) {
+    if (message.modelContext !== undefined) {
+      message.modelContext = undefined;
+      changed = true;
+    }
+  }
+  return changed;
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
@@ -2468,11 +2796,13 @@ async function getModelReply(): Promise<ChatReplyPayload> {
   if (!window.chat?.sendMessage) {
     throw new Error("聊天 IPC 尚未就绪，请重启应用后再试。");
   }
+  const modelMessages = buildModelMessages();
   const payload = await withTimeout(
-    window.chat.sendMessage(buildModelMessages(), getCurrentStyle()),
+    window.chat.sendMessage(modelMessages, getCurrentStyle()),
     FRONTEND_REPLY_TIMEOUT_MS,
     "模型响应超时，请稍后重试。",
   );
+  if (clearModelContexts()) void saveSession();
   return normalizeChatReplyPayload(payload);
 }
 
@@ -2558,7 +2888,7 @@ async function triggerCyreneGreeting(): Promise<void> {
   let streamMsgId = "";
   try {
     streamMsgId = String(Date.now() + 1);
-    const streamMsg = { id: streamMsgId, role: "model" as const, content: "", at: Date.now(), thinking: true };
+    const streamMsg = { id: streamMsgId, role: "model" as const, content: "", at: Date.now(), thinking: true, transient: true };
     runMessages.push(streamMsg);
     renderRun();
 
@@ -2582,11 +2912,12 @@ async function triggerCyreneGreeting(): Promise<void> {
     const deltaQueue: string[] = [];
     let playbackTimer: number | null = null;
     let runFinishedArrived = false;
+    let startNextStreamingBubble = false;
+    let streamingBubbleCount = 1;
+    const allowStreamingBubbleSplit = shouldSegmentAssistantReply(isTalkMode() ? "talk" : "collab", segmentedOutputMode);
     const getStreamingBubble = (): HTMLElement | null => {
       if (!isSessionVisible(runSessionId, runMessages)) return null;
-      const row = messagesEl.querySelector(`[data-msg-id="${streamMsgId}"]`);
-      const bubbles = row?.querySelectorAll<HTMLElement>(".msg__bubble");
-      return bubbles && bubbles.length > 0 ? bubbles[bubbles.length - 1] : null;
+      return getLastBubbleForMessage(streamMsgId);
     };
     const tryFinish = (): void => {
       if (runFinishedArrived && deltaQueue.length === 0 && playbackTimer === null) {
@@ -2598,21 +2929,23 @@ async function triggerCyreneGreeting(): Promise<void> {
       playbackTimer = window.setInterval(() => {
         const next = deltaQueue.shift();
         if (next !== undefined) {
-          const previousPartCount = splitDesktopReply(streamContent).length;
           streamContent += next;
-          const nextPartCount = splitDesktopReply(streamContent).length;
           const streamMessage = runMessages.find((message) => message.id === streamMsgId);
           if (streamMessage) streamMessage.content = streamContent;
-          if (streamMessage && previousPartCount > 0 && nextPartCount > previousPartCount) {
-            renderRun();
-            return;
-          }
-          const bubble = getStreamingBubble();
+          const bubble = startNextStreamingBubble
+            ? (appendBubbleForMessage(streamMsgId) ?? getStreamingBubble())
+            : getStreamingBubble();
+          startNextStreamingBubble = false;
           if (bubble) {
-            const span = document.createElement("span");
-            span.className = "msg__char";
-            span.textContent = next;
-            bubble.appendChild(span);
+            appendStreamingCharToBubble(bubble, next);
+          }
+          if (
+            allowStreamingBubbleSplit
+            && streamingBubbleCount < MAX_ASSISTANT_REPLY_BUBBLES
+            && shouldBreakStreamingBubbleAfterChar(next)
+          ) {
+            startNextStreamingBubble = true;
+            streamingBubbleCount += 1;
           }
           if (isSessionVisible(runSessionId, runMessages)) messagesEl.scrollTop = messagesEl.scrollHeight;
           return;
@@ -2621,7 +2954,7 @@ async function triggerCyreneGreeting(): Promise<void> {
         tryFinish();
       }, 40);
     };
-    const offEvent = window.agui!.onEvent((rawEvent) => {
+    const offEvent = registerAguiListener((rawEvent) => {
       try {
         const event = rawEvent as AguiBaseEvent;
         const msg = runMessages.find(m => m.id === streamMsgId);
@@ -2665,7 +2998,7 @@ async function triggerCyreneGreeting(): Promise<void> {
             if (event.delta) {
               ttsContent += event.delta;
               earlyMinimaxPlayback.append(ttsContent);
-              deltaQueue.push(event.delta);
+              deltaQueue.push(...Array.from(event.delta));
               if (!textMouthStarted) {
                 void loadTtsSettings().then((settings) => {
                   if (settings && !settings.ttsAutoRead) {
@@ -2733,6 +3066,7 @@ async function triggerCyreneGreeting(): Promise<void> {
     const msg = runMessages.find(m => m.id === streamMsgId);
     if (msg) {
       msg.thinking = false;
+      msg.transient = false;
       msg.content = streamContent;
       msg.sticker = sticker;
       if(pendingNovelAiImage){
@@ -2763,6 +3097,7 @@ async function triggerCyreneGreeting(): Promise<void> {
     const msg = runMessages.find(m => m.id === streamMsgId);
     if (msg) {
       msg.thinking = false;
+      msg.transient = false;
       msg.content = "连接模型失败：" + message;
     } else {
       runMessages.push({
@@ -2796,60 +3131,44 @@ async function send(): Promise<void> {
   sessionMessageCache.remember(runSessionId, runMessages);
   const renderRun = (): void => renderSessionIfVisible(runSessionId, runMessages);
 
-    // Option C（临时注入）：内容不进 messages 历史，只附在 agui.run payload 传给本轮。
-    // fullUserText 只放精简 hint 进 history，不堆内容。
-    const hintsByKind: string[] = [];
-    const turnTextAttachments: { name: string; text: string }[] = [];
-    let budgetUsed = 0;
-    const budgetExceeded: string[] = [];
-    for (const f of attachedFiles) {
-      switch (f.kind) {
-        case "text":
-          if (f.text) {
-            const remaining = BUDGET_CHARS - budgetUsed;
-            if (f.text.length > remaining) {
-              turnTextAttachments.push({ name: f.name, text: f.text.slice(0, remaining) });
-              budgetExceeded.push(f.name);
-              budgetUsed = BUDGET_CHARS;
-            } else {
-              turnTextAttachments.push({ name: f.name, text: f.text });
-              budgetUsed += f.text.length;
-            }
-          }
-          hintsByKind.push(`📝 ${f.name}（附件，内容已注入本轮上下文）`);
-          break;
-        case "indexed":
-          hintsByKind.push(`📚 ${f.name}（已索引 ${f.chunks ?? 0} 段，可用 imported_docs 工具检索）`);
-          break;
-        case "empty":
-          hintsByKind.push(`📄 ${f.name}（为空）`);
-          break;
-        case "unsupported":
-          hintsByKind.push(`⚠️ ${f.name}（暂不支持：${f.reason || ""}）`);
-          break;
-      }
-    }
-    if (budgetExceeded.length > 0) {
-      hintsByKind.push(`⚠️ ${budgetExceeded.join("、")} 已省略部分内容（超一轮预算）`);
-    }
-    const fileHint = hintsByKind.length > 0
-      ? "\n\n【本轮文件】\n" + hintsByKind.join("\n")
-      : "";
-    const fullUserText = (text || (attachedFiles.length > 0 ? "请帮我看看这些文件" : "")) + fileHint;
-
   sending = true;
   sendBtn.disabled = true;
   await refreshModelConfig();
   chatHintEl.textContent = currentModelConfig?.connected ? `${currentModelConfig.model} 思考中…` : "模型未连接";
 
-  const stickerMatch = fullUserText.match(/\[sticker:([^\]]+)\]/);
+  const filesForThisTurn = [...attachedFiles];
+  const attachmentsForMsg: MessageAttachment[] = filesForThisTurn
+    .filter((f) => (f.kind === "image" || f.kind === "document") && typeof f.filePath === "string")
+    .map((f) => {
+      if (f.kind === "image") {
+        return {
+          kind: "image",
+          name: f.name,
+          filePath: f.filePath!,
+          mime: f.mime || "application/octet-stream",
+          previewUrl: f.previewUrl,
+          caption: f.caption,
+          status: f.status || "pending",
+        };
+      }
+      return {
+        kind: "document",
+        name: f.name,
+        filePath: f.filePath!,
+        status: f.status || "pending",
+      };
+    });
+
+  const stickerMatch = text.match(/\[sticker:([^\]]+)\]/);
   const userStickerId = stickerMatch ? stickerMatch[1] : null;
 
   const userMsg: Message = {
     id: String(Date.now()),
     role: "user",
-    content: fullUserText,
+    content: text,
     at: Date.now(),
+    attachments: attachmentsForMsg.length > 0 ? attachmentsForMsg : undefined,
+    modelContext: undefined,
     sticker: userStickerId,
   };
   runMessages.push(userMsg);
@@ -2859,10 +3178,221 @@ async function send(): Promise<void> {
   void saveSessionMessages(runSessionId, runMessages);
   renderRun();
 
+  const hintsByKind: string[] = [];
+  const modelContextParts: string[] = [];
+  let hasDocumentContext = false;
+  let hasImageCaptionContext = false;
+  let hasDirectImageContext = false;
+  const appendDocumentContext = (lines: string[]) => {
+    if (lines.length === 0) return;
+    if (!hasDocumentContext) {
+      modelContextParts.push(`【文档内容】\n${lines.join("\n\n")}`);
+      hasDocumentContext = true;
+      return;
+    }
+    modelContextParts.push(...lines);
+  };
+  const appendImageCaptionContext = (line: string) => {
+    if (!hasImageCaptionContext) {
+      modelContextParts.push("【图片视觉信息】\n以下内容是视觉模型对用户本轮图片的观察结果，请将其视为你已经看到的图片内容；如果某张图分析失败，请不要编造。\n" + line);
+      hasImageCaptionContext = true;
+      return;
+    }
+    modelContextParts.push(line);
+  };
+  const appendDirectImageContext = (line: string) => {
+    if (!hasDirectImageContext) {
+      modelContextParts.push("【图片附件】\n以下图片已随本轮消息直接发送给主模型，请直接结合图片内容回答。\n" + line);
+      hasDirectImageContext = true;
+      return;
+    }
+    modelContextParts.push(line);
+  };
+  const directImageAttachments: { name: string; filePath: string; mime?: string }[] = [];
+  let budgetUsed = 0;
+  const budgetExceeded: string[] = [];
+  const documentFilesForThisTurn = filesForThisTurn.filter((f) => f.kind === "document" && typeof f.filePath === "string");
+  const imageFilesForThisTurn = filesForThisTurn.filter((f) => f.kind === "image");
+
+  if (documentFilesForThisTurn.length > 0) {
+    showTransientStatus("正在分析文档...");
+    try {
+      let waitMessage: Message | null = null;
+      const processedDocs = await processDocumentsWithWait({
+        processDocuments: async (filePaths, query) => window.chat?.processDocuments(filePaths, query) ?? [],
+        filePaths: documentFilesForThisTurn.map((f) => f.filePath!),
+        query: text,
+        onWaitStart: (content) => {
+          waitMessage = {
+            id: `document-wait-${Date.now()}`,
+            role: "model",
+            content,
+            at: Date.now(),
+            transient: true,
+          };
+          messages.push(waitMessage);
+          render();
+        },
+        onWaitEnd: () => {
+          if (!waitMessage) return;
+          const index = messages.indexOf(waitMessage);
+          if (index >= 0) messages.splice(index, 1);
+          waitMessage = null;
+          render();
+        },
+      });
+      for (const f of documentFilesForThisTurn) {
+        const result = processedDocs.find((doc) => doc.filePath === f.filePath)
+          ?? processedDocs.find((doc) => doc.name === f.name)
+          ?? {
+            name: f.name,
+            kind: "unsupported" as const,
+            filePath: f.filePath,
+            reason: "文档处理未返回结果",
+          };
+        const msgAtt = userMsg.attachments?.find((att): att is DocumentMessageAttachment =>
+          att.kind === "document" && att.filePath === f.filePath
+        );
+        const processedKind = result.kind === "text" || result.kind === "indexed" || result.kind === "empty" || result.kind === "unsupported"
+          ? result.kind
+          : "unsupported";
+        if (msgAtt) {
+          msgAtt.processedKind = processedKind;
+          msgAtt.chunks = result.chunks;
+          msgAtt.importId = result.kind === "indexed" ? result.importId : undefined;
+          msgAtt.reason = result.reason;
+        }
+
+        if (result.kind === "text") {
+          if (msgAtt) msgAtt.status = "done";
+          const docText = result.text || "";
+          const remaining = BUDGET_CHARS - budgetUsed;
+          if (remaining <= 0) {
+            budgetExceeded.push(result.name);
+            hintsByKind.push(`📝 ${result.name}（附件，内容因一轮预算限制未注入）`);
+          } else if (docText.length > remaining) {
+            const clipped = docText.slice(0, remaining);
+            appendDocumentContext([`文档 ${result.name} 内容节选：\n${clipped}`]);
+            budgetExceeded.push(result.name);
+            budgetUsed = BUDGET_CHARS;
+            hintsByKind.push(`📝 ${result.name}（附件，内容已按预算节选注入本轮上下文）`);
+          } else {
+            appendDocumentContext([`文档 ${result.name} 内容：\n${docText}`]);
+            budgetUsed += docText.length;
+            hintsByKind.push(`📝 ${result.name}（附件，内容已注入本轮上下文）`);
+          }
+        } else if (result.kind === "indexed") {
+          if (result.reason && (result.chunks ?? 0) <= 0) {
+            if (msgAtt) msgAtt.status = "error";
+            hintsByKind.push(`⚠️ ${result.name}（文档处理失败）`);
+            appendDocumentContext(buildDocumentContextLines([result]));
+          } else {
+            if (msgAtt) msgAtt.status = "done";
+            hintsByKind.push(`📚 ${result.name}（已索引 ${result.chunks ?? 0} 段）`);
+            appendDocumentContext(buildDocumentContextLines([result]));
+          }
+        } else if (result.kind === "empty") {
+          if (msgAtt) msgAtt.status = "done";
+          hintsByKind.push(`📄 ${result.name}（为空）`);
+          appendDocumentContext(buildDocumentContextLines([result]));
+        } else {
+          const reason = result.reason || "暂不支持或无法读取";
+          if (msgAtt) msgAtt.status = reason === "cancelled" ? "cancelled" : "error";
+          hintsByKind.push(`⚠️ ${result.name}（暂不支持或处理失败）`);
+          appendDocumentContext(buildDocumentContextLines([{ ...result, reason }]));
+        }
+      }
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      for (const f of documentFilesForThisTurn) {
+        const msgAtt = userMsg.attachments?.find((att): att is DocumentMessageAttachment =>
+          att.kind === "document" && att.filePath === f.filePath
+        );
+        if (msgAtt) {
+          msgAtt.status = "error";
+          msgAtt.processedKind = "unsupported";
+          msgAtt.reason = reason;
+        }
+        hintsByKind.push(`⚠️ ${f.name}（文档处理失败）`);
+        appendDocumentContext(buildDocumentContextLines([{ kind: "error", name: f.name, reason }]));
+      }
+    } finally {
+      hideTransientStatus();
+      void saveSession();
+      render();
+    }
+  }
+
+  let imageSendStrategy: { mode: "direct" | "caption" } = { mode: "caption" };
+  if (imageFilesForThisTurn.length > 0) {
+    try {
+      imageSendStrategy = await window.chat.getImageSendStrategy();
+    } catch (err) {
+      console.warn("[Cyrene Chat] 获取图片发送策略失败，回退 caption:", err);
+    }
+  }
+  const shouldCaptionImages = imageFilesForThisTurn.length > 0 && imageSendStrategy.mode !== "direct";
+  if (shouldCaptionImages) showTransientStatus("正在分析图片...");
+  try {
+    for (const f of filesForThisTurn) {
+      switch (f.kind) {
+        case "document":
+          break;
+        case "image": {
+          const msgAtt = userMsg.attachments?.find((att) => att.filePath === f.filePath);
+          if (!f.filePath) {
+            f.status = "error";
+            f.reason = "缺少图片路径";
+            if (msgAtt) msgAtt.status = "error";
+            appendImageCaptionContext(`- ${f.name}：图片分析失败：缺少图片路径。请诚实说明暂时无法看清这张图。`);
+            break;
+          }
+          if (imageSendStrategy.mode === "direct") {
+            f.status = "done";
+            if (msgAtt) msgAtt.status = "done";
+            directImageAttachments.push({ name: f.name, filePath: f.filePath, mime: f.mime });
+            appendDirectImageContext(`- ${f.name}：图片已随本轮消息直接发送给主模型。`);
+            break;
+          }
+          const result = await window.chat?.captionImage(f.filePath);
+          if (result?.ok && result.caption) {
+            f.status = "done";
+            f.caption = result.caption;
+            if (msgAtt) {
+              msgAtt.status = "done";
+              msgAtt.caption = result.caption;
+            }
+            appendImageCaptionContext(`- ${f.name}：${result.caption}`);
+          } else {
+            f.status = "error";
+            f.reason = result?.error || "图片分析失败";
+            if (msgAtt) msgAtt.status = "error";
+            appendImageCaptionContext(`- ${f.name}：图片分析失败：${f.reason}。请诚实说明暂时无法看清这张图。`);
+          }
+          break;
+        }
+        case "unsupported":
+          hintsByKind.push(`⚠️ ${f.name}（暂不支持：${f.reason || ""}）`);
+          break;
+      }
+    }
+  } finally {
+    if (shouldCaptionImages) hideTransientStatus();
+  }
+  if (budgetExceeded.length > 0) {
+    hintsByKind.push(`⚠️ ${budgetExceeded.join("、")} 已省略部分内容（超一轮预算）`);
+  }
+  if (hintsByKind.length > 0) {
+    modelContextParts.unshift("【本轮文件】\n" + hintsByKind.join("\n"));
+  }
+  userMsg.modelContext = modelContextParts.join("\n\n");
+  void saveSession();
+  render();
+
   let streamMsgId = "";
   try {
     streamMsgId = String(Date.now() + 1);
-    const streamMsg = { id: streamMsgId, role: "model", content: "", at: Date.now(), thinking: true };
+    const streamMsg = { id: streamMsgId, role: "model", content: "", at: Date.now(), thinking: true, transient: true };
     runMessages.push(streamMsg);
     renderRun();
 
@@ -2891,12 +3421,13 @@ async function send(): Promise<void> {
     const deltaQueue: string[] = [];
     let playbackTimer: number | null = null;
     let runFinishedArrived = false;
+    let startNextStreamingBubble = false;
+    let streamingBubbleCount = 1;
+    const allowStreamingBubbleSplit = shouldSegmentAssistantReply(isTalkMode() ? "talk" : "collab", segmentedOutputMode);
     /** 找到当前流式消息的气泡 DOM（TEXT_MESSAGE_START 时 render 过一次，带 data-msg-id）。 */
     const getStreamingBubble = (): HTMLElement | null => {
       if (!isSessionVisible(runSessionId, runMessages)) return null;
-      const row = messagesEl.querySelector(`[data-msg-id="${streamMsgId}"]`);
-      const bubbles = row?.querySelectorAll<HTMLElement>(".msg__bubble");
-      return bubbles && bubbles.length > 0 ? bubbles[bubbles.length - 1] : null;
+      return getLastBubbleForMessage(streamMsgId);
     };
     // 终态条件：RUN_FINISHED 到达 AND 回放队列空。两者都满足才 finishRun。
     const tryFinish = (): void => {
@@ -2909,22 +3440,24 @@ async function send(): Promise<void> {
       playbackTimer = window.setInterval(() => {
         const next = deltaQueue.shift();
         if (next !== undefined) {
-          const previousPartCount = splitDesktopReply(streamContent).length;
           streamContent += next;
-          const nextPartCount = splitDesktopReply(streamContent).length;
           const streamMessage = runMessages.find((message) => message.id === streamMsgId);
           if (streamMessage) streamMessage.content = streamContent;
-          if (streamMessage && previousPartCount > 0 && nextPartCount > previousPartCount) {
-            renderRun();
-            return;
-          }
           // 增量追加 span 到气泡，CSS 渐显。不调 render()，避免全量重建卡顿。
-          const bubble = getStreamingBubble();
+          const bubble = startNextStreamingBubble
+            ? (appendBubbleForMessage(streamMsgId) ?? getStreamingBubble())
+            : getStreamingBubble();
+          startNextStreamingBubble = false;
           if (bubble) {
-            const span = document.createElement("span");
-            span.className = "msg__char";
-            span.textContent = next;
-            bubble.appendChild(span);
+            appendStreamingCharToBubble(bubble, next);
+          }
+          if (
+            allowStreamingBubbleSplit
+            && streamingBubbleCount < MAX_ASSISTANT_REPLY_BUBBLES
+            && shouldBreakStreamingBubbleAfterChar(next)
+          ) {
+            startNextStreamingBubble = true;
+            streamingBubbleCount += 1;
           }
           if (isSessionVisible(runSessionId, runMessages)) messagesEl.scrollTop = messagesEl.scrollHeight;
           return;
@@ -2934,7 +3467,7 @@ async function send(): Promise<void> {
         tryFinish();
       }, 40);
     };
-    const offEvent = window.agui!.onEvent((rawEvent) => {
+    const offEvent = registerAguiListener((rawEvent) => {
       try {
         const event = rawEvent as AguiBaseEvent;
         const msg = runMessages.find(m => m.id === streamMsgId);
@@ -2982,7 +3515,7 @@ async function send(): Promise<void> {
             if (event.delta) {
               ttsContent += event.delta;
               earlyMinimaxPlayback.append(ttsContent);
-              deltaQueue.push(event.delta);
+              deltaQueue.push(...Array.from(event.delta));
               if (!textMouthStarted) {
                 void loadTtsSettings().then((settings) => {
                   if (settings && !settings.ttsAutoRead) {
@@ -3043,16 +3576,19 @@ async function send(): Promise<void> {
 
     // invoke 只确认"已发起"，不等 Observable 结束。
     // 真正的完成由事件流 RUN_FINISHED/RUN_ERROR 驱动（await runDone）。
+    const modelMessages = buildModelMessages(runMessages);
     const ack = await window.agui!.run({
-      messages: buildModelMessages(runMessages),
+      messages: modelMessages,
       style: getCurrentStyle(),
       sessionId: runSessionId,
       attachments: turnTextAttachments,
+      imageAttachments: directImageAttachments.length > 0 ? directImageAttachments : undefined,
     });
     if (!ack.success) {
       offEvent();
       throw new Error(ack.error || "模型请求发起失败");
     }
+    if (clearModelContexts(runMessages)) void saveSessionMessages(runSessionId, runMessages);
 
     // 等事件流终态
     await runDone;
@@ -3061,6 +3597,7 @@ async function send(): Promise<void> {
     const msg = runMessages.find(m => m.id === streamMsgId);
     if (msg) {
       msg.thinking = false;
+      msg.transient = false;
       msg.content = streamContent;
       msg.sticker = sticker;
       if(pendingNovelAiImage){
@@ -3094,6 +3631,7 @@ async function send(): Promise<void> {
     const msg = runMessages.find(m => m.id === streamMsgId);
     if (msg) {
       msg.thinking = false;
+      msg.transient = false;
       msg.content = "连接模型失败：" + message;
     } else {
       runMessages.push({
@@ -3183,21 +3721,12 @@ async function ingestDroppedFiles(files: File[]): Promise<void> {
 	    return;
 	  }
 	  attachBtn?.classList.add("has-file");
-	  const kindLabel: Record<AttachmentKind, string> = {
-	    text: "📝",
-	    indexed: "📚",
-	    empty: "📄",
-	    unsupported: "⚠️",
-	  };
 	  attachedFiles.forEach((f, i) => {
 	    const tag = document.createElement("div");
 	    tag.className = "chat__file-tag";
 	    const label = document.createElement("span");
-	    const icon = kindLabel[f.kind] || "📄";
-	    const detail = f.kind === "text" ? "（附件）" :
-	      f.kind === "indexed" ? `（${f.chunks ?? 0} 段）` :
-	      f.kind === "empty" ? "（空）" :
-	      "（暂不支持）";
+	    const icon = getAttachmentIcon(f.kind);
+	    const detail = formatAttachmentTagDetail(f);
 	    label.textContent = `${icon} ${f.name} ${detail}`;
 	    const btn = document.createElement("button");
 	    btn.type = "button";
@@ -3303,6 +3832,17 @@ clearBtn.addEventListener("click", clearChat);
     trigger.classList.add("is-open");
   }
 
+  function selectDropdownOption(id, value) {
+    var menu = menus[id];
+    if (!menu) return;
+    var target = menu.querySelector('.dm-opt[data-value="' + value + '"]');
+    if (!target) return;
+    menu.querySelectorAll(".dm-opt").forEach(function(o) { o.classList.remove("is-active"); });
+    target.classList.add("is-active");
+    var val = values[id];
+    if (val) val.textContent = target.textContent?.trim() || "";
+  }
+
   // Trigger click
   triggers.forEach(function(t) {
     t.addEventListener("click", function(e) {
@@ -3320,14 +3860,136 @@ clearBtn.addEventListener("click", clearChat);
     if (!menu) return;
     menu.querySelectorAll(".dm-opt").forEach(function(opt) {
       opt.addEventListener("click", function() {
-        menu.querySelectorAll(".dm-opt").forEach(function(o) { o.classList.remove("is-active"); });
-        opt.classList.add("is-active");
-        var val = values[id];
-        if (val) val.textContent = opt.textContent?.trim() || "";
+        selectDropdownOption(id, opt.getAttribute("data-value"));
         closeAll();
       });
     });
   });
+
+  // ── 推理下拉：动态生成 ──────────────────────────────
+  let reasoningDropdownActive = false;
+  let reasoningProviderKey = "";
+  let reasoningDropdownDisabled = false;
+  let reasoningActivePreference: unknown = null;
+
+  async function rebuildReasoningDropdown() {
+    try {
+      const state = await window.chat!.getReasoningState() as {
+        providerKey: string; providerId: string; model: string;
+        preference?: { mode: string; effort?: string };
+      };
+      reasoningProviderKey = state.providerKey;
+      // 动态 import 纯函数（vite tree-shake 后仍可执行）
+      const { computeReasoningDropdown, formatReasoningTriggerLabel } = await import("./reasoning-dropdown");
+      const view = computeReasoningDropdown(state.providerId, state.model, state.preference);
+      reasoningDropdownDisabled = view.disabled;
+      reasoningActivePreference = view.activePreference;
+
+      // 填充下拉项
+      const menu = menus["reasoning-dropdown"];
+      if (!menu) return;
+      // 保留 dm-title，清空后续所有 dm-opt
+      const title = menu.querySelector(".dm-title");
+      menu.replaceChildren();
+      if (title) menu.appendChild(title);
+
+      for (const item of view.items) {
+        const opt = document.createElement("div");
+        opt.className = "dm-opt";
+        opt.dataset.reasoningPreference = JSON.stringify(item.preference);
+        opt.textContent = item.label;
+        if (item.disabled) {
+          opt.classList.add("is-disabled");
+          opt.style.opacity = "0.4";
+          opt.style.pointerEvents = "none";
+        }
+        if (item.hint) opt.title = item.hint;
+        // 当前选中
+        if (JSON.stringify(item.preference) === JSON.stringify(view.activePreference)) {
+          opt.classList.add("is-active");
+        }
+        // disabled item 不绑 click
+        if (item.disabled) {
+          opt.addEventListener("click", (e) => e.stopPropagation());
+        } else {
+          opt.addEventListener("click", () => {
+            if (!window.chat) return;
+            window.chat.setReasoning({
+              providerKey: reasoningProviderKey,
+              preference: item.preference,
+            }).then(() => {
+              reasoningActivePreference = item.preference;
+              menu.querySelectorAll(".dm-opt").forEach(o => o.classList.remove("is-active"));
+              opt.classList.add("is-active");
+              const val = values["reasoning-dropdown"];
+              if (val) val.textContent = formatReasoningTriggerLabel(item.label);
+              closeAll();
+            }).catch(() => {});
+          });
+        }
+        menu.appendChild(opt);
+      }
+
+      // 更新触发按钮文案
+      const val = values["reasoning-dropdown"];
+      if (val && view.statusText) {
+        val.textContent = formatReasoningTriggerLabel(view.statusText);
+        // dm-title hidden when dropdown is active (view controls visualization)
+        const title2 = menu.querySelector(".dm-title") as HTMLElement | null;
+        if (title2) title2.style.display = "";
+      }
+      reasoningDropdownActive = true;
+    } catch {
+      // 失败安全占位（用户修正 #4）：塞入 disabled "跟随模型"
+      reasoningDropdownDisabled = true;
+      reasoningDropdownActive = false;
+      const menu = menus["reasoning-dropdown"];
+      if (menu) {
+        const title = menu.querySelector(".dm-title");
+        menu.replaceChildren();
+        if (title) menu.appendChild(title);
+        const opt = document.createElement("div");
+        opt.className = "dm-opt is-disabled";
+        opt.textContent = "跟随模型";
+        opt.style.opacity = "0.4";
+        opt.style.pointerEvents = "none";
+        opt.title = "推理控制暂时不可用";
+        menu.appendChild(opt);
+      }
+      const val = values["reasoning-dropdown"];
+      if (val) val.textContent = "推理 · 跟随模型";
+    }
+  }
+
+  // 初始加载
+  void rebuildReasoningDropdown();
+
+  // trigger 点击时先重渲染（model 可能已切换）
+  const reasoningTrigger = document.querySelector<HTMLElement>('.dropdown-trigger[data-dropdown="reasoning-dropdown"]');
+  if (reasoningTrigger) {
+    reasoningTrigger.addEventListener("click", async (e) => {
+      if (reasoningDropdownDisabled) {
+        e.stopImmediatePropagation(); // 当控件 disabled 时阻止原 handler 打开下拉
+        return;
+      }
+      await rebuildReasoningDropdown();
+      // 不阻止原 handler：原 handler 会 closeAll() + openDropdown(id, t)
+    }, true); // capture phase: 在原 handler (bubble 注册) 之前执行
+  }
+
+  void window.chat?.getGeneralSettings?.()
+    .then(function(settings) {
+      selectDropdownOption("mode-dropdown", normalizeDefaultChatMode(settings?.defaultChatMode));
+      segmentedOutputMode = settings?.segmentedOutputMode === "chat" || settings?.segmentedOutputMode === "off"
+        ? settings.segmentedOutputMode
+        : settings?.segmentedOutputMode === "all" ? "all" : "off";
+      render(true);
+    })
+    .catch(function() {
+      selectDropdownOption("mode-dropdown", "collab");
+      segmentedOutputMode = "off";
+      render(true);
+    });
 
   // Click outside closes
   document.addEventListener("click", closeAll);
@@ -3360,6 +4022,7 @@ let particles: Particle[] = [];
 let particlesDpr = 1;
 let particlesW = 0;
 let particlesH = 0;
+let particlesRaf: number | null = null;
 
 function spawnParticle(): Particle {
   return {
@@ -3412,13 +4075,13 @@ function drawParticles(): void {
     particlesCtx.arc(p.x, p.y, r, 0, Math.PI * 2);
     particlesCtx.fill();
   }
-  requestAnimationFrame(drawParticles);
+  particlesRaf = requestAnimationFrame(drawParticles);
 }
 
 if (particlesCtx) {
   resizeParticles();
   particles = Array.from({ length: PARTICLE_COUNT }, spawnParticle);
-  requestAnimationFrame(drawParticles);
+  particlesRaf = requestAnimationFrame(drawParticles);
   window.addEventListener("resize", resizeParticles);
 }
 
@@ -3439,6 +4102,16 @@ void (async () => {
   window.setInterval(() => void refreshExternalChannelStatus(), 15_000);
   window.setInterval(() => void refreshInspectorData(), 30_000);
 })();
+
+window.addEventListener("beforeunload", () => {
+  for (const off of [...activeAguiOffs]) off();
+  schedulerEventsOff?.();
+  schedulerEventsOff = null;
+  stopCurrentTts();
+  if (particlesRaf !== null) cancelAnimationFrame(particlesRaf);
+  particlesRaf = null;
+  window.removeEventListener("resize", resizeParticles);
+});
 
 // main → renderer：权限审批请求（per-action 档位下工具调用前）
 // 插入一张审批卡片到聊天流；用户点同意/拒绝后回传给主进程。
@@ -3464,12 +4137,28 @@ window.chatStore?.onSwitchSession(async (sessionId) => {
 window.chatStore?.onChanged(async () => {
   // 侧栏展开时刷新列表（收起时不浪费 DOM 写入）
   if (chatRail) void renderRailList();
-
   if (!window.chatStore || !currentSessionId) return;
+  const sessions = await window.chatStore.list();
+  for (const session of sessions) {
+    const seenAt = seenSessionUpdatedAt.get(session.id) ?? 0;
+    if (session.purpose === "proactive-chat" && session.id !== currentSessionId && session.updatedAt > seenAt) {
+      unreadProactiveSessionIds.add(session.id);
+    }
+  }
+  // 标记未读后再刷新，确保红点在本次变更中立即出现。
+  if (chatRail && !chatRail.hidden) void renderRailList();
   const stillExists = await window.chatStore.get(currentSessionId);
-  if (stillExists) return;
+  if (stillExists) {
+    if (
+      stillExists.purpose === "proactive-chat" &&
+      stillExists.updatedAt > (seenSessionUpdatedAt.get(stillExists.id) ?? 0)
+    ) {
+      await loadSessionTailIntoUI(stillExists.id);
+    }
+    return;
+  }
   // 当前会话已被外部删除：fallback 到最新一条 / 自动建新
-  const list = await window.chatStore.list();
+  const list = sessions;
   let next: ChatStoreSession | null = null;
   if (list.length > 0) next = await window.chatStore.get(list[0].id);
   if (!next) next = await window.chatStore.create({ identityId: null });

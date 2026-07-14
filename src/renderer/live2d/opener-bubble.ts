@@ -1,14 +1,17 @@
 // 桌宠气泡 controller：监听 onShowBubble + 显示气泡 + 播 wav + prepare/mouthStart/mouthStop
 // 复用 chat/main.ts playTtsBase64 的口型同步思路。荡秋千随 MOUTH_START 自动触发（SpeakingMotionController）。
 import { IPC } from "../../shared/ipc-channels";
+import type { ShowBubblePayload } from "../../main/opener/opener-types";
 
 const BUBBLE_HOLD_MS = 7000;
 
 export class OpenerBubbleController {
   private bubbleEl: HTMLElement | null;
   private currentAudio: HTMLAudioElement | null = null;
+  private currentAudioUrl: string | null = null;
   private mouthStopTimer: ReturnType<typeof setTimeout> | null = null;
   private fadeTimer: ReturnType<typeof setTimeout> | null = null;
+  private hideTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(bubbleEl: HTMLElement) {
     this.bubbleEl = bubbleEl;
@@ -19,7 +22,7 @@ export class OpenerBubbleController {
     return window.live2dSpeech.onShowBubble((payload) => this.handle(payload));
   }
 
-  private handle(payload: { text: string; audioBase64: string; format: "wav" | "mp3"; durationMs: number; sceneId: string; itemId: string }): void {
+  private handle(payload: ShowBubblePayload): void {
     if (!this.bubbleEl) return;
     this.stopCurrent();
 
@@ -31,7 +34,13 @@ export class OpenerBubbleController {
     // 点击气泡 = 接话
     this.bubbleEl.onclick = () => {
       window.openerBridge?.feedback({ type: "clicked", sceneId: payload.sceneId, itemId: payload.itemId });
+      if (payload.sessionId) void window.openerBridge?.openSession(payload.sessionId);
     };
+
+    if (!payload.audioBase64 || !payload.format || !payload.durationMs) {
+      this.fadeTimer = setTimeout(() => this.fadeOut(), BUBBLE_HOLD_MS);
+      return;
+    }
 
     // prepare（停当前 motion + 嘴动 reset）
     window.live2dSpeech?.prepare();
@@ -43,10 +52,10 @@ export class OpenerBubbleController {
     const url = URL.createObjectURL(blob);
     const audio = new Audio(url);
     this.currentAudio = audio;
+    this.currentAudioUrl = url;
 
     audio.onended = () => {
-      URL.revokeObjectURL(url);
-      if (this.currentAudio === audio) this.currentAudio = null;
+      this.releaseCurrentAudio(audio, url);
       window.live2dSpeech?.stopMouth();
       this.fadeTimer = setTimeout(() => this.fadeOut(), BUBBLE_HOLD_MS);
     };
@@ -59,7 +68,7 @@ export class OpenerBubbleController {
       }, payload.durationMs + 500);
     }).catch((err) => {
       console.warn("[OpenerBubble] 播放失败:", err);
-      URL.revokeObjectURL(url);
+      this.releaseCurrentAudio(audio, url);
       this.fadeOut();
     });
   }
@@ -67,16 +76,39 @@ export class OpenerBubbleController {
   private fadeOut(): void {
     if (!this.bubbleEl) return;
     this.bubbleEl.classList.remove("opener-bubble--show");
-    setTimeout(() => { if (this.bubbleEl) this.bubbleEl.hidden = true; }, 300);
+    if (this.hideTimer) clearTimeout(this.hideTimer);
+    this.hideTimer = setTimeout(() => {
+      this.hideTimer = null;
+      if (this.bubbleEl) this.bubbleEl.hidden = true;
+    }, 300);
   }
 
   private stopCurrent(): void {
     if (this.currentAudio) {
-      this.currentAudio.pause();
-      this.currentAudio = null;
+      this.releaseCurrentAudio(this.currentAudio, this.currentAudioUrl);
     }
     if (this.mouthStopTimer) { clearTimeout(this.mouthStopTimer); this.mouthStopTimer = null; }
     if (this.fadeTimer) { clearTimeout(this.fadeTimer); this.fadeTimer = null; }
+    if (this.hideTimer) { clearTimeout(this.hideTimer); this.hideTimer = null; }
     window.live2dSpeech?.stopMouth();
+  }
+
+  dispose(): void {
+    this.stopCurrent();
+    if (this.bubbleEl) {
+      this.bubbleEl.onclick = null;
+      this.bubbleEl.hidden = true;
+    }
+    this.bubbleEl = null;
+  }
+
+  private releaseCurrentAudio(audio: HTMLAudioElement, url: string | null): void {
+    if (this.currentAudio !== audio) return;
+    this.currentAudio = null;
+    this.currentAudioUrl = null;
+    audio.pause();
+    audio.removeAttribute("src");
+    audio.load();
+    if (url) URL.revokeObjectURL(url);
   }
 }

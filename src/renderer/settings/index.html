@@ -27,7 +27,9 @@
         <button type="button" class="nav-item" data-section="skills"><span>✨</span>技能 Skill</button>
         <button type="button" class="nav-item" data-section="plugins"><span>🔌</span>插件</button>
         <hr class="nav-divider" />
-        <button type="button" class="nav-item is-active" data-section="general"><span>⚙️</span>设置</button>
+        <button type="button" class="nav-item" data-section="preferences"><span>🫧</span>偏好设置</button>
+        <button type="button" class="nav-item" data-section="appearance"><span>🎨</span>外观设置</button>
+        <button type="button" class="nav-item is-active" data-section="general"><span>⚙️</span>通用设置</button>
         <button type="button" class="nav-item" data-section="api"><span>🔑</span>API 设置</button>
         <button type="button" class="nav-item" data-section="cyrene"><span>🌸</span>昔涟设置</button>
         <button type="button" class="nav-item" data-section="channels"><span>📱</span>连接手机</button>
@@ -152,7 +154,8 @@
               </label>
               <label class="field">
                 <span>视觉型号</span>
-                <input id="vision-model" type="text" placeholder="gpt-4o / glm-5v-turbo / qwen-vl-max" autocomplete="off" />
+                <input id="vision-model" type="text" placeholder="gpt-4o / glm-5v-turbo / qwen-vl-max" list="vision-model-suggestions" autocomplete="off" />
+                <datalist id="vision-model-suggestions"></datalist>
               </label>
             </div>
             <p class="vision-hint">ⓘ 该模型需支持 OpenAI 兼容的 /chat/completions 接口及 image_url 多模态能力</p>
@@ -173,12 +176,186 @@
         </form>
 
 
+        <form class="settings-panel is-hidden" id="preferences-form" data-panel="preferences">
+          <div class="panel-heading">
+            <div class="panel-heading__icon">🫧</div>
+            <div>
+              <h1>偏好设置</h1>
+              <p>设置聊天窗口打开后的默认行为。这里的选择会保存为全局默认值。</p>
+            </div>
+          </div>
+
+          <div class="settings-list">
+            <div class="setting-row">
+              <div>
+                <strong>默认聊天模式</strong>
+                <span>打开聊天窗口时默认使用的模式；窗口内仍可临时切换。</span>
+              </div>
+              <div class="option-blocks option-blocks--wide" id="default-chat-mode-select" role="radiogroup" aria-label="默认聊天模式">
+                <button type="button" class="option-block is-active" data-value="collab" aria-pressed="true">协作</button>
+                <button type="button" class="option-block" data-value="talk" aria-pressed="false">日常聊天</button>
+              </div>
+            </div>
+
+            <div class="setting-row">
+              <div>
+                <strong>分段输出</strong>
+                <span>控制昔涟回复在聊天气泡中的分段显示；不会改变模型实际回复内容。</span>
+              </div>
+              <div class="option-blocks option-blocks--wide" id="segmented-output-select" role="radiogroup" aria-label="分段输出">
+                <button type="button" class="option-block" data-value="all" aria-pressed="false">所有</button>
+                <button type="button" class="option-block" data-value="chat" aria-pressed="false">聊天</button>
+                <button type="button" class="option-block is-active" data-value="off" aria-pressed="true">关闭</button>
+              </div>
+            </div>
+
+            <div class="setting-row">
+              <div>
+                <strong>手机信息分段</strong>
+                <span>连接手机回复会按 。！？； 拆成多条发送；请在关闭工具使用后开启。</span>
+              </div>
+              <div class="option-blocks option-blocks--wide" id="mobile-message-segmentation-select" role="radiogroup" aria-label="手机信息分段">
+                <button type="button" class="option-block is-active" data-value="off" aria-pressed="true">关闭</button>
+                <button type="button" class="option-block" data-value="on" aria-pressed="false">开启</button>
+              </div>
+            </div>
+
+            <div class="setting-row">
+              <div>
+                <strong>主动聊天</strong>
+                <span>昔涟会在合适的时间主动发起对话；深夜无操作、正常聊天中和连续两次未回复时不会打扰。</span>
+              </div>
+              <div class="option-blocks option-blocks--wide" id="proactive-chat-select" role="radiogroup" aria-label="主动聊天">
+                <button type="button" class="option-block is-active" data-value="off" aria-pressed="true">关闭</button>
+                <button type="button" class="option-block" data-value="on" aria-pressed="false">开启</button>
+              </div>
+            </div>
+
+            <div class="setting-row proactive-delivery-row" id="proactive-delivery-row" hidden>
+              <div>
+                <strong>主动消息发送到</strong>
+                <span>手机渠道不可用时，本次主动消息会取消，不会改发到本地。</span>
+              </div>
+              <div class="option-blocks option-blocks--wide" id="proactive-delivery-select" role="radiogroup" aria-label="主动消息发送到">
+                <button type="button" class="option-block is-active" data-value="local" aria-pressed="true">仅本地</button>
+                <button type="button" class="option-block" data-value="wechat" aria-pressed="false">仅微信</button>
+                <button type="button" class="option-block" data-value="feishu" aria-pressed="false">仅飞书</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="form-actions">
+            <div class="save-status" id="preferences-save-status">等待保存</div>
+            <button type="submit" class="save-btn">保存偏好</button>
+          </div>
+        </form>
+
+
+        <form class="settings-panel is-hidden" id="appearance-form" data-panel="appearance">
+          <div class="panel-heading">
+            <div class="panel-heading__icon">🎨</div>
+            <div>
+              <h1>外观设置</h1>
+              <p>调整窗口布局、界面主题和昔涟桌宠的显示方式。</p>
+            </div>
+          </div>
+
+          <div class="appearance-section">
+            <div class="appearance-section__heading">
+              <h2>布局</h2>
+              <p>选择昔涟与聊天、状态和日程窗口的组织方式。</p>
+            </div>
+            <div class="appearance-options" aria-label="窗口布局">
+              <button type="button" class="appearance-option is-active" aria-pressed="true">
+                <span class="appearance-option__icon">▦</span>
+                <span class="appearance-option__copy"><strong>多窗口</strong><small>各功能使用独立窗口</small></span>
+              </button>
+              <button type="button" class="appearance-option" disabled>
+                <span class="appearance-option__icon">▣</span>
+                <span class="appearance-option__copy"><strong>单窗口</strong><small>集中在一个主窗口中</small></span>
+                <span class="soon-badge">SOON</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="appearance-section">
+            <div class="appearance-section__heading">
+              <h2>外观主题</h2>
+              <p>主题会立即预览，保存后应用到所有窗口。</p>
+            </div>
+            <div class="option-blocks theme-options" id="ui-theme-select" role="radiogroup" aria-label="界面主题">
+              <button type="button" class="option-block is-active" data-theme="classic" aria-pressed="true">
+                <span class="theme-swatch theme-swatch--classic" aria-hidden="true"></span>
+                <span>默认</span>
+              </button>
+              <button type="button" class="option-block" data-theme="pearl-white" aria-pressed="false">
+                <span class="theme-swatch theme-swatch--white" aria-hidden="true"></span>
+                <span>白调</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="appearance-section">
+            <div class="appearance-section__heading">
+              <h2>个性化</h2>
+              <p>字体和图标会立即应用；请仅导入你有权使用的字体文件。</p>
+            </div>
+            <div class="appearance-placeholder-list">
+              <div class="appearance-font-control">
+                <div class="appearance-font-control__copy"><strong>界面字体</strong><small id="ui-font-current">思源黑体（默认）</small></div>
+                <div class="appearance-font-control__actions">
+                  <button id="ui-font-import" type="button" class="ghost-btn">导入字体</button>
+                  <button id="ui-font-reset" type="button" class="ghost-btn" hidden>恢复默认</button>
+                </div>
+              </div>
+              <div class="appearance-icon-control">
+                <div class="appearance-font-control__copy"><strong>桌面图标</strong><small>切换系统托盘与应用窗口图标。</small></div>
+                <div class="appearance-icon-options" id="ui-icon-select" role="radiogroup" aria-label="桌面图标">
+                  <button type="button" class="appearance-icon-option" data-icon="cyrene-pink" aria-pressed="false" aria-label="图标 1"><img src="../icons/cyrene-pink.png" alt="" /></button>
+                  <button type="button" class="appearance-icon-option is-active" data-icon="cyrene-sun" aria-pressed="true" aria-label="图标 2"><img src="../icons/cyrene-sun.png" alt="" /></button>
+                </div>
+              </div>
+              <button type="button" class="appearance-placeholder" disabled><span>聊天背景</span><span class="soon-badge">SOON</span></button>
+            </div>
+          </div>
+
+          <div class="appearance-section">
+            <div class="appearance-section__heading">
+              <h2>昔涟桌宠</h2>
+              <p>控制 Live2D 桌宠的窗口层级、显示状态和大小。</p>
+            </div>
+            <div class="settings-list">
+              <label class="setting-row">
+                <div><strong>桌宠置顶</strong><span>只让桌宠保持最上层，聊天和侧边窗口不置顶。</span></div>
+                <span class="switch"><input id="pet-always-on-top" type="checkbox" /><span class="switch__track"><span class="switch__thumb"></span></span></span>
+              </label>
+              <label class="setting-row">
+                <div><strong>桌宠显示</strong><span>隐藏或显示 Live2D 桌宠本体。</span></div>
+                <span class="switch"><input id="pet-visible" type="checkbox" /><span class="switch__track"><span class="switch__thumb"></span></span></span>
+              </label>
+              <label class="setting-row">
+                <div><strong>桌宠缩放</strong><span>调整 Live2D 模型大小（0.5× ~ 2.0×），窗口与模型同步缩放。</span></div>
+                <div class="range-row">
+                  <input id="pet-zoom" type="range" min="0.5" max="2" step="0.1" />
+                  <span id="pet-zoom-val" class="range-val">100%</span>
+                </div>
+              </label>
+            </div>
+          </div>
+
+          <div class="form-actions">
+            <div class="save-status" id="appearance-save-status">等待保存</div>
+            <button type="submit" class="save-btn">保存外观设置</button>
+          </div>
+        </form>
+
+
         <form class="settings-panel" id="general-form" data-panel="general">
           <div class="panel-heading">
             <div class="panel-heading__icon">⚙️</div>
             <div>
-              <h1>设置</h1>
-              <p>控制桌宠窗口和基础音频偏好。陪伴状态与日程现已整合到主窗口右栏。</p>
+              <h1>通用设置</h1>
+              <p>控制桌宠窗口、日程、基础音频和系统行为。陪伴状态与日程概览已整合到主窗口右栏。</p>
             </div>
           </div>
 
@@ -207,54 +384,6 @@
                 <input id="sound-volume" type="range" min="0" max="100" />
               </div>
             </label>
-
-            <label class="setting-row">
-              <div>
-                <strong>桌宠置顶</strong>
-                <span>只让桌宠保持最上层，聊天和侧边窗口不置顶。</span>
-              </div>
-              <span class="switch"><input id="pet-always-on-top" type="checkbox" /><span class="switch__track"><span class="switch__thumb"></span></span></span>
-            </label>
-
-            <label class="setting-row">
-              <div>
-                <strong>桌宠显示</strong>
-                <span>隐藏或显示 Live2D 桌宠本体。</span>
-              </div>
-              <span class="switch"><input id="pet-visible" type="checkbox" /><span class="switch__track"><span class="switch__thumb"></span></span></span>
-            </label>
-
-            <label class="setting-row">
-              <div>
-                <strong>桌宠缩放</strong>
-                <span>调整 Live2D 模型大小（0.5× ~ 2.0×），窗口与模型同步缩放。</span>
-              </div>
-              <div class="range-row">
-                <input id="pet-zoom" type="range" min="0.5" max="2" step="0.1" />
-                <span id="pet-zoom-val" class="range-val">100%</span>
-              </div>
-            </label>
-
-            <div class="setting-row">
-              <div>
-                <strong>界面主题</strong>
-                <span>默认保持当前外观；暗系更清透；白调是柔和珍珠白。</span>
-              </div>
-              <div class="option-blocks theme-options" id="ui-theme-select" role="radiogroup" aria-label="界面主题">
-                <button type="button" class="option-block is-active" data-theme="classic" aria-pressed="true">
-                  <span class="theme-swatch theme-swatch--classic" aria-hidden="true"></span>
-                  <span>默认</span>
-                </button>
-                <button type="button" class="option-block" data-theme="polished-pink" aria-pressed="false">
-                  <span class="theme-swatch theme-swatch--pink" aria-hidden="true"></span>
-                  <span>暗系</span>
-                </button>
-                <button type="button" class="option-block" data-theme="pearl-white" aria-pressed="false">
-                  <span class="theme-swatch theme-swatch--white" aria-hidden="true"></span>
-                  <span>白调</span>
-                </button>
-              </div>
-            </div>
 
             <label class="setting-row">
               <div>
@@ -931,9 +1060,25 @@
                 <span class="switch"><input id="channels-mirror-desktop" type="checkbox" /><span class="switch__track"><span class="switch__thumb"></span></span></span>
                 <span class="form-row__label">桌面端镜像显示</span>
               </div>
-              <div class="form-row form-row--inline">
-                <span class="switch"><input id="channels-tool-sandbox" type="checkbox" /><span class="switch__track"><span class="switch__thumb"></span></span></span>
-                <span class="form-row__label">其他外部渠道工具沙箱（QQ 始终为纯聊天）</span>
+              <div class="form-row">
+                <label class="form-label">工具权限</label>
+                <div class="tool-permission-group" role="radiogroup" aria-label="工具权限">
+                  <label class="tool-permission-option">
+                    <input type="radio" name="channels-tool-sandbox" value="all" id="channels-tool-sandbox-all" />
+                    <div class="tool-permission-option__text">
+                      <span class="tool-permission-option__title">全部开启</span>
+                      <span class="tool-permission-option__desc">允许天气、搜索、翻译、文件等工具在飞书/微信中使用。</span>
+                    </div>
+                  </label>
+                  <label class="tool-permission-option">
+                    <input type="radio" name="channels-tool-sandbox" value="safe-only" id="channels-tool-sandbox-safe" />
+                    <div class="tool-permission-option__text">
+                      <span class="tool-permission-option__title">安全模式</span>
+                      <span class="tool-permission-option__desc">仅允许记忆、待办等低风险工具。</span>
+                    </div>
+                  </label>
+                </div>
+                <p class="user-field-hint">此设置仅作用于飞书与微信；QQ 始终保持纯聊天模式。</p>
               </div>
             </div>
           </div>
@@ -1495,6 +1640,12 @@
               </label>
               <button type="button" class="ghost-btn" id="tts-minimax-test">🔊 测试发音</button>
 
+              <!-- MiniMax 配置保存：复用 .save-btn（主题自适应） -->
+              <div class="tts-config-actions">
+                <div class="save-status" id="tts-minimax-save-status"></div>
+                <button type="button" class="save-btn is-hidden" id="tts-minimax-save-btn">保存配置</button>
+              </div>
+
               <!-- 音色快速复刻 -->
               <div class="tts-clone-section">
                 <h3 class="tts-clone-title">🎙️ 音色快速复刻</h3>
@@ -1550,6 +1701,11 @@
               </div>
               <button type="button" class="ghost-btn" id="tts-gptsovits-test">🔊 测试发音</button>
               <div class="tts-clone-status" id="tts-gptsovits-test-status"></div>
+              <!-- GPT-SoVITS 配置保存 -->
+              <div class="tts-config-actions">
+                <div class="save-status" id="tts-gptsovits-save-status"></div>
+                <button type="button" class="save-btn is-hidden" id="tts-gptsovits-save-btn">保存配置</button>
+              </div>
             </div>
 
             <div class="tts-config" id="tts-config-custom-cloud" hidden>
@@ -1579,6 +1735,11 @@
               </div>
               <button type="button" class="ghost-btn" id="tts-custom-cloud-test">🔊 测试发音</button>
               <div class="tts-clone-status" id="tts-custom-cloud-test-status"></div>
+              <!-- 自定义云端配置保存 -->
+              <div class="tts-config-actions">
+                <div class="save-status" id="tts-custom-cloud-save-status"></div>
+                <button type="button" class="save-btn is-hidden" id="tts-custom-cloud-save-btn">保存配置</button>
+              </div>
             </div>
 
             <div class="tts-config" id="tts-config-mimo" hidden>
@@ -1598,6 +1759,11 @@
               </div>
               <button type="button" class="ghost-btn" id="tts-mimo-test">🔊 测试发音</button>
               <div class="tts-clone-status" id="tts-mimo-test-status"></div>
+              <!-- MiMo 配置保存 -->
+              <div class="tts-config-actions">
+                <div class="save-status" id="tts-mimo-save-status"></div>
+                <button type="button" class="save-btn is-hidden" id="tts-mimo-save-btn">保存配置</button>
+              </div>
             </div>
 
             <p class="tts-hint">💡 MiniMax 需在控制台训练音色并填写音色 ID。GPT-SoVITS 需自行启动本地服务并提供参考音频。自定义云端会 POST 固定 JSON 到你的 Endpoint。小米 MiMo 当前使用昔涟参考音频走 voiceclone 非流式 wav 合成。</p>
@@ -1623,6 +1789,17 @@
                   <span class="tts-engine__icon">✨</span>
                   <span class="tts-engine__name">活泼</span>
                 </button>
+              </div>
+              <div class="opener-pack-warning" id="opener-pack-warning" hidden>
+                <div class="opener-pack-warning__body">
+                  <strong>未安装语音包</strong>
+                  <span>主动开口需要在语音包目录放入 manifest.json 和对应 wav 文件。</span>
+                  <code id="opener-pack-path"></code>
+                </div>
+                <div class="opener-pack-warning__actions">
+                  <button type="button" class="ghost-btn" id="opener-open-pack-dir">打开语音包目录</button>
+                  <button type="button" class="ghost-btn" id="opener-show-install-help">查看安装说明</button>
+                </div>
               </div>
               <button type="button" class="ghost-btn" id="opener-test-fire" style="margin-top: 10px;">🔊 测试气泡</button>
             </div>
@@ -1693,6 +1870,12 @@
                 <input type="number" id="asr-vad-silence" placeholder="1000" min="300" max="10000" step="100" value="1000" />
               </div>
               <p class="tts-hint">用户说话后停顿多久判定为说完。有人想词慢就填大一点（如 3000），反应快就填小一点（如 800）。默认 1000ms。</p>
+              <div class="tts-field">
+                <label for="asr-vad-threshold">VAD 音量阈值（0.001 ~ 0.5）</label>
+                <input type="range" id="asr-vad-threshold" min="0.001" max="0.5" step="0.001" value="0.01" />
+                <span id="asr-vad-threshold-value">0.01</span>
+              </div>
+              <p class="tts-hint">麦克风音量低或环境安静时调小（如 0.005），环境吵时调大。默认 0.01。</p>
               <label class="setting-row">
                 <div>
                   <strong>通话中显示文字转写</strong>

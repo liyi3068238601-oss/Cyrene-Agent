@@ -4,7 +4,7 @@ import { MemoryCandidate, L0_FIELD_DESCRIPTIONS, L2Memory } from "./memory-types
 import { findPossibleConflictCandidate } from "./memory-conflict"
 import { scoreMemoryConflict, type ConflictEvidenceLevel } from "./memory-conflict-score"
 import { wasRecentlyInjectedMemory } from "./recent-injected-memory"
-import { addMemory, searchMemoryEntries } from "../rag/index"
+import { addL2MemoryVector, searchMemoryEntries } from "../rag/index"
 
 type L1Field = "recentGoals" | "recentPreferences"
 
@@ -105,7 +105,7 @@ export class MemoryManager {
 
     let ragId: string | undefined
     try {
-      ragId = await addMemory(candidate.content, "user_memory", {
+      ragId = await addL2MemoryVector(candidate.content, l2.id, {
         triggerText: candidate.triggerText,
         confidence: candidate.confidence,
         l2Id: l2.id,

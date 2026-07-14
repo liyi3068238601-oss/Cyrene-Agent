@@ -474,6 +474,10 @@ export class QqNapCatAdapter implements ChannelAdapter {
         return part.caption || part.url || part.filePath ? `[图片] ${part.caption ?? part.url ?? part.filePath}` : "[图片]";
       case "audio":
         return "[语音消息请在桌面端查看]";
+      case "file":
+        return part.name ? `[文件] ${part.name}` : "[文件]";
+      case "video":
+        return part.name ? `[视频] ${part.name}` : "[视频]";
       case "card":
         return [part.title, part.markdown, ...(part.fields ?? []).map((f) => `${f.key}: ${f.value}`)]
           .filter(Boolean)

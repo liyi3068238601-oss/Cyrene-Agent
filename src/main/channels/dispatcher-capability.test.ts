@@ -1,7 +1,7 @@
 // dispatcher.downgradeToCapability 全组合测试
 // 重点验证 8 个能力字段 × 5 个 part kind 的所有边界条件
 import { describe, it, expect } from "vitest";
-import { ChannelDispatcher } from "./dispatcher";
+import { buildTextOutgoingParts, ChannelDispatcher, shouldAppendChannelTtsAudio } from "./dispatcher";
 import type { ChannelCapability, OutgoingMessage, OutgoingPart } from "./types";
 
 function makeCap(over: Partial<ChannelCapability> = {}): ChannelCapability {
@@ -22,6 +22,32 @@ function makeCap(over: Partial<ChannelCapability> = {}): ChannelCapability {
 function makeMsg(parts: OutgoingPart[]): OutgoingMessage {
   return { channel: "feishu", targetId: "oc_x", parts };
 }
+
+describe("buildTextOutgoingParts", () => {
+  it("keeps channel replies as one text part when mobile segmentation is off", () => {
+    expect(buildTextOutgoingParts("第一句。第二句？", "off")).toEqual([
+      { kind: "text", text: "第一句。第二句？" },
+    ]);
+  });
+
+  it("splits channel replies into text parts when mobile segmentation is on", () => {
+    expect(buildTextOutgoingParts("第一句。\n第二句？第三句！", "on")).toEqual([
+      { kind: "text", text: "第一句。" },
+      { kind: "text", text: "第二句？" },
+      { kind: "text", text: "第三句！" },
+    ]);
+  });
+});
+
+describe("shouldAppendChannelTtsAudio", () => {
+  it("does not append TTS audio for WeChat even when TTS and audio capability are enabled", () => {
+    expect(shouldAppendChannelTtsAudio("wechat", true, true, true)).toBe(false);
+  });
+
+  it("can append TTS audio for Feishu when TTS and audio capability are enabled", () => {
+    expect(shouldAppendChannelTtsAudio("feishu", true, true, true)).toBe(true);
+  });
+});
 
 describe("downgradeToCapability", () => {
   // 构造一个最简 dispatcher 实例（只测 downgradeToCapability，不碰 buildAndRunAgent）
@@ -105,6 +131,39 @@ describe("downgradeToCapability", () => {
         expect(p.text).toContain("[语音消息");
         expect(p.text).toContain("audio/mpeg");
       }
+    });
+  });
+
+  describe("file and video parts", () => {
+    it("cap.file=false → 降级为文字描述 [文件]", () => {
+      const msg = makeMsg([{ kind: "file", filePath: "/tmp/report.pdf", name: "report.pdf", mime: "application/pdf" }]);
+      const out = stubDispatcher.downgradeToCapability(msg, makeCap({ file: false }));
+      const p = out.parts[0];
+      expect(p.kind).toBe("text");
+      if (p.kind === "text") {
+        expect(p.text).toContain("[文件]");
+        expect(p.text).toContain("report.pdf");
+      }
+    });
+
+    it("cap.video=false → 降级为文字描述 [视频]", () => {
+      const msg = makeMsg([{ kind: "video", filePath: "/tmp/demo.mp4", name: "demo.mp4", mime: "video/mp4" }]);
+      const out = stubDispatcher.downgradeToCapability(msg, makeCap({ video: false }));
+      const p = out.parts[0];
+      expect(p.kind).toBe("text");
+      if (p.kind === "text") {
+        expect(p.text).toContain("[视频]");
+        expect(p.text).toContain("demo.mp4");
+      }
+    });
+
+    it("cap.file/video=true → 原样保留", () => {
+      const msg = makeMsg([
+        { kind: "file", filePath: "/tmp/report.pdf", name: "report.pdf" },
+        { kind: "video", filePath: "/tmp/demo.mp4", name: "demo.mp4" },
+      ]);
+      const out = stubDispatcher.downgradeToCapability(msg, makeCap({ file: true, video: true }));
+      expect(out.parts).toEqual(msg.parts);
     });
   });
 

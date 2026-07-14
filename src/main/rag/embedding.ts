@@ -4,11 +4,24 @@ import * as path from "path";
 import * as os from "os";
 
 // ── 类型 ──
+export type EmbeddingProviderIdentity = {
+  provider: string;
+  model: string;
+  dimensions: number;
+  endpoint?: string;
+};
+
+export type EmbeddingWorkerConfig =
+  | { provider: "local"; modelKey: string }
+  | { provider: "openai-compat"; baseUrl: string; apiKey: string; model: string };
+
 export interface EmbeddingProvider {
   embed(text: string): Promise<number[]>;
   embedBatch(texts: string[]): Promise<number[][]>;
   readonly dims: number;
   readonly name: string;
+  readonly cacheIdentity?: EmbeddingProviderIdentity;
+  readonly workerConfig?: EmbeddingWorkerConfig;
 }
 
 // ── 模型注册表 ──
@@ -28,7 +41,9 @@ const DEFAULT_MODEL_KEY = "minilm";
 // ── 本地 Pipeline ──
 // 每个模型 key 独立缓存 pipeline，支持多模型同时运行（minilm 管文档/记忆，bgem3 管场景识别）
 const localPipelines: Map<string, any> = new Map();
+const localPipelineLoads: Map<string, Promise<any>> = new Map();
 let currentModelKey: string = DEFAULT_MODEL_KEY;
+let localPipelineInitCount = 0;
 
 const importEsm = new Function("moduleName", "return import(moduleName)") as (moduleName: string) => Promise<any>;
 
@@ -37,8 +52,13 @@ async function getLocalPipeline(modelKey?: string): Promise<any> {
   const config = LOCAL_MODELS[key];
   if (!config) throw new Error("Unknown embedding model: " + key);
 
-  let pipe = localPipelines.get(key);
-  if (!pipe) {
+  const cached = localPipelines.get(key);
+  if (cached) return cached;
+  const loading = localPipelineLoads.get(key);
+  if (loading) return loading;
+
+  const load = (async () => {
+    localPipelineInitCount += 1;
     const { pipeline, env } = await importEsm("@xenova/transformers");
     env.allowLocalModels = true;
     env.allowRemoteModels = false;
@@ -47,12 +67,18 @@ async function getLocalPipeline(modelKey?: string): Promise<any> {
     // 兜底：HF cache，通过 cache_dir 选项传给 pipeline。
     // transformers 内部会按 (localModelPath, cache_dir) 顺序查找文件。
     env.localModelPath = getProjectModelsDir();
-    pipe = await pipeline("feature-extraction", config.hfName, {
+    const pipe = await pipeline("feature-extraction", config.hfName, {
       cache_dir: path.join(os.homedir(), ".cache", "huggingface"),
     });
     localPipelines.set(key, pipe);
+    return pipe;
+  })();
+  localPipelineLoads.set(key, load);
+  try {
+    return await load;
+  } finally {
+    localPipelineLoads.delete(key);
   }
-  return pipe;
 }
 
 export function createLocalEmbeddingProvider(modelKey?: string): EmbeddingProvider | null {
@@ -68,6 +94,12 @@ export function createLocalEmbeddingProvider(modelKey?: string): EmbeddingProvid
   return {
     name: "local-" + config.hfName.split("/").pop(),
     dims: config.dims,
+    cacheIdentity: {
+      provider: "local",
+      model: config.hfName,
+      dimensions: config.dims,
+    },
+    workerConfig: { provider: "local", modelKey: key },
 
     async embed(text: string): Promise<number[]> {
       const pipe = await getLocalPipeline(key);
@@ -93,11 +125,24 @@ export function createOpenAIEmbeddingProvider(
   apiKey: string,
   model = "text-embedding-ada-002"
 ): EmbeddingProvider {
-  const endpoint = baseUrl.replace(/\/+$/, "") + "/embeddings";
+  const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
+  const endpoint = normalizedBaseUrl + "/embeddings";
 
   return {
     name: "openai-compat-" + model,
     dims: 1536,
+    cacheIdentity: {
+      provider: "openai-compat",
+      model,
+      dimensions: 1536,
+      endpoint: normalizedBaseUrl,
+    },
+    workerConfig: {
+      provider: "openai-compat",
+      baseUrl: normalizedBaseUrl,
+      apiKey,
+      model,
+    },
 
     async embed(text: string): Promise<number[]> {
       const res = await fetch(endpoint, {
@@ -163,6 +208,46 @@ export function getEmbeddingProvider(
   return cachedProvider;
 }
 
+export async function getEmbeddingProviderIdentity(): Promise<EmbeddingProviderIdentity> {
+  const provider = getEmbeddingProvider();
+  if (!provider) throw new Error("Embedding provider is not available");
+
+  if (provider.cacheIdentity) return provider.cacheIdentity;
+
+  const localModel = Object.values(LOCAL_MODELS).find(
+    (model) => provider.name === "local-" + model.hfName.split("/").pop(),
+  );
+  if (localModel) {
+    return {
+      provider: "local",
+      model: localModel.hfName,
+      dimensions: provider.dims,
+    };
+  }
+
+  const cloudModelPrefix = "openai-compat-";
+  if (provider.name.startsWith(cloudModelPrefix)) {
+    return {
+      provider: "openai-compat",
+      model: provider.name.slice(cloudModelPrefix.length),
+      dimensions: provider.dims,
+    };
+  }
+
+  return {
+    provider: provider.name,
+    model: provider.name,
+    dimensions: provider.dims,
+  };
+}
+
+export function getEmbeddingWorkerConfig(): EmbeddingWorkerConfig {
+  const provider = getEmbeddingProvider();
+  if (!provider) throw new Error("Embedding provider is not available");
+  if (provider.workerConfig) return provider.workerConfig;
+  return { provider: "local", modelKey: currentModelKey };
+}
+
 export function getCurrentModelKey(): string {
   return currentModelKey;
 }
@@ -177,13 +262,30 @@ export function switchEmbeddingModel(modelKey: string): void {
   if (!config) throw new Error("Unknown embedding model: " + modelKey);
   cachedProvider = null;
   localPipelines.delete(currentModelKey);
+  localPipelineLoads.delete(currentModelKey);
   currentModelKey = modelKey;
 }
 
 export function resetEmbeddingProvider(): void {
   cachedProvider = null;
   localPipelines.clear();
+  localPipelineLoads.clear();
   currentModelKey = DEFAULT_MODEL_KEY;
+  localPipelineInitCount = 0;
+}
+
+export function getEmbeddingDiagnostics(): {
+  currentModelKey: string;
+  cachedPipelineKeys: string[];
+  loadingPipelineKeys: string[];
+  localPipelineInitCount: number;
+} {
+  return {
+    currentModelKey,
+    cachedPipelineKeys: Array.from(localPipelines.keys()),
+    loadingPipelineKeys: Array.from(localPipelineLoads.keys()),
+    localPipelineInitCount,
+  };
 }
 
 // ── 场景识别专用 provider（固定 bge-m3，不受 RAG 模型切换影响）──

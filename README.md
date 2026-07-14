@@ -68,6 +68,7 @@
 - 🔊 **语音通话** — TTS + ASR，解放双手
 - 🛠 **工具生态** — 文档生成、联网搜索、文件操作
 - 📱 **多平台接入** — 飞书、微信 iLink、QQ / NapCat
+- 🌙 **主动聊天** — 路由可控 + 多渠道投递
 
 ---
 
@@ -311,6 +312,10 @@ call 窗口**没有文本输入框**或 PTT（Push-To-Talk）按钮，所有对�
 3. **清理 RAG 文档** —— 设置 → 🧠 记忆 → 导入文档，删除大文件（embedding 后会驻留在向量索引里）。
 4. **重启应用** —— L2 长期记忆、relationship log、conflict log 都是 push 数组，无 cap，长时间运行后**重启是必要的**。
 
+**已知改进**：embedding 索引已迁移到后台 worker 批处理并加缓存；启动时延迟预热；
+批写与流式输出取代了原先一次性大数组写入，**单次文档索引入驻内存峰值明显下降**。
+如遇到持续 OOM，多半与 L2 长期记忆或第三方 MCP 进程（如 Playwright / 浏览器自动化）有关。
+
 如果 OOM 频繁，**用 Chrome DevTools Memory profiler**（dev 模式自动开 DevTools）抓 heap snapshot 找根因，再开 issue 反馈。
 
 ---
@@ -359,6 +364,8 @@ call 窗口**没有文本输入框**或 PTT（Push-To-Talk）按钮，所有对�
   RUN_FINISHED），逐字 delta 流式渲染。
 - **拖拽文件摄入** — 拖入 PDF/MD/DOCX/XLSX... 直接进 RAG 知识库。
 - **贴纸面板** — 内置贴纸选择器，AI 按相似度自动匹配最合适的贴纸。
+- **回复分段与气泡流式** — 「聊天」偏好可设「所有 / 仅聊天 / 关闭」分段模式；
+  启用时回复按句自动拆气泡，长回复不一次性刷到底。
 
 #### 🧠 记忆系统
 - **L0 核心画像 / L1 近期状态 / L2 长期记忆** — 完整证据链，
@@ -401,9 +408,12 @@ call 窗口**没有文本输入框**或 PTT（Push-To-Talk）按钮，所有对�
 #### 📱 外部渠道
 - **飞书 Lark 长连接** — 官方 SDK + WebSocket（无需公网 / 域名 / 内网穿透），
   p2p 私聊，多模态 text / image / audio / video / file / sticker。
-- **微信 iLink Bot** — iLink Bot HTTP / long-poll 35s 拉取 → 自动 sendText。
+- **微信 iLink Bot** — 文本收发基于 iLink HTTP / long-poll 35s 拉取；
+  出站支持图片 / 表情包 / 文件 / 视频经 ilink media 上传，silk 语音编码通路。
+  入站自动按媒体类型分类：图像 / 文件下载到桌面收件夹，语音用 ASR 转写，
+  不支持的类型会被拦截。
 - **QQ / NapCat** — OneBot v11 WebSocket 客户端接入，支持私聊 / 群聊触发、
-  最近消息上下文注入，以及 `send_qq_message` 主动发送 QQ 消息。
+  最近消息上下文注入与真人式分段回复；QQ 保持纯聊天，不用于任务下达。
 
 #### 🤖 Game Bot 游戏自动化
 - `engine.ts` 步骤解释器：`launch / wait / key / click / vlm_click /
@@ -417,6 +427,11 @@ call 窗口**没有文本输入框**或 PTT（Push-To-Talk）按钮，所有对�
 - Meta 工具 `invoke_skill` / `read_skill_reference`，路径穿越防护 + 读
   重放拦截 + 大文本截断。
 - 支持 `/skill_id ...` slash 命令。
+
+#### 🌙 主动聊天
+- **渠道化投递** —— 偏好设置可选「本地 / 微信 / 飞书」作为主动消息目的地；手机渠道不可用时取消发送，不会改投本地。
+- **运行时护栏** —— hard safety policy、guarded prompt、tool-free model runner、proactive session singleton 多层兜底。
+- **不打搅时段** —— 深夜无操作 / 正常聊天中 / 连续两次未回复不会触发。
 
 </details>
 

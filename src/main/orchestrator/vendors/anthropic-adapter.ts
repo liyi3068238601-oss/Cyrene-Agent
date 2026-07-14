@@ -1,11 +1,17 @@
 // Anthropic transport —— MiniMax（主推）/ Claude
 // 请求体协议：POST {baseUrl}/v1/messages（baseUrl 已含 /v1 时只加 /messages）
 // system 顶层 + messages[].content 为 content block 数组 + tools[].input_schema
+//
+// 鉴权由 authHeaderFor 根据 capability.authStyle 决定——Anthropic transport
+// 也可以配 bearer（如 MiMo /anthropic 端点）。
 import {
   ChatMessage, ChatRequest, ChatResponse, ChatVendorAdapter,
   HttpRequest, ProviderCapability, StreamChunk, StreamEvent,
   TestConnectionResult, ToolCall, ToolExecutionResult, VendorConfig,
 } from "./types";
+import { authHeaderFor } from "./auth";
+import { resolveReasoningCapability } from "../../../shared/reasoning";
+import { applyReasoningPreference } from "./reasoning";
 
 const ANTHROPIC_VERSION = "2023-06-01";
 const DEFAULT_MAX_TOKENS = 4096;
@@ -112,15 +118,27 @@ export class AnthropicAdapter implements ChatVendorAdapter {
       body.tool_choice = { type: "auto" };
     }
     if (req.extraBody) Object.assign(body, req.extraBody);
+    // 推理控制：按 (providerId, model) 解析 capability，调用 applyReasoningPreference 转换 body。
+    const reasoningCap = resolveReasoningCapability(this.capability.id, cfg.model);
+    const finalBody = applyReasoningPreference(
+      body,
+      cfg.reasoning ?? { mode: "auto" },
+      reasoningCap,
+      {
+        hasTools: Boolean(req.tools?.length),
+        providerId: this.capability.id,
+        model: cfg.model,
+      },
+    );
     return {
       url: buildUrl(cfg.baseUrl),
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-api-key": cfg.apiKey,
+        ...authHeaderFor(this.capability, cfg.apiKey),
         "anthropic-version": ANTHROPIC_VERSION,
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(finalBody),
     };
   }
 
