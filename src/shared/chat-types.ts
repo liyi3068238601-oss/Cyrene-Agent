@@ -28,6 +28,8 @@ export interface ChatMessage {
   role: ChatRole;
   content: string;
   at: number;
+  /** 仅从聊天窗口隐藏；消息仍持久化，并继续参与会话上下文。 */
+  hidden?: boolean;
   /** 表情包 ID（内置或用户自定义） */
   sticker?: string | null;
   /** TTS 缓存 key。只存 key，不存绝对路径，避免 userData 路径变化后 session JSON 失效。 */
@@ -55,6 +57,8 @@ export interface ChatSession {
   titleIsCustom?: boolean;
   /** 系统主会话：主动消息固定写入，可清空但不可删除。 */
   isMain?: boolean;
+  /** 分支会话软删除时间；存在时不再出现在会话列表中。 */
+  deletedAt?: number;
 }
 
 // index.json 里的轻量元数据（列表渲染用）。

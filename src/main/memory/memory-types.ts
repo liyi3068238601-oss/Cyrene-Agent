@@ -8,12 +8,16 @@ export interface L0Profile {
   isPinned: boolean
   updatedAt: number
 }
-export const L0_FIELD_DESCRIPTIONS: Partial<Record<keyof L0Profile, string>> = {
+export const L0_FIELD_DESCRIPTIONS: Record<string, string> = {
   preferredName:     '用户希望被如何称呼、叫什么名字、昵称。例如："叫我P宝""我叫Playa""以后喊我宝宝"',
   occupation:        '用户的职业、身份、工作。例如："我是前端工程师""我在做设计"',
   longTermInterests: '用户的长期兴趣爱好（稳定的，不是临时的）。例如："我一直喜欢画画""我从小学钢琴"',
   language:          '用户常用的语言或地区习惯。例如："我习惯说中文""我是广东人"',
   permanentNote:     '其他不属于以上四类的稳定个人信息。例如："我有一只猫""我住在上海"',
+  importantAnniversary: '明确且长期有效的重要纪念日，例如生日、相识纪念日',
+  livingCondition: '稳定的生活条件，例如长期居住城市或固定作息条件',
+  primaryDevice: '长期使用的主要设备或固定软件环境',
+  accessibilityNeed: '用户明确提出并长期需要遵守的交互或无障碍要求',
   // isPinned 和 updatedAt 不在这里，代表不暴露给 AI
 }
 
@@ -33,6 +37,10 @@ export interface L2Memory {
   content: string
   triggerText: string
   sourceConversationId: string
+  /** 压缩总结可能来自多个分支；用于保留完整来源范围。 */
+  sourceConversationIds?: string[]
+  /** 来源分支被软删除的时间；到期前仍可由主会话召回。 */
+  sourceDeletedAt?: number
   createdAt: number
   lastAccessedAt: number
   accessCount: number
@@ -165,6 +173,8 @@ export interface MemoryStore {
   evidence?: MemoryEvidence[]
   reflectionLogs?: ReflectionLog[]
   conflictLogs?: ConflictLog[]
+  /** 已软删除的分支及删除时间，用于统一清理 L2 与聊天历史向量。 */
+  deletedConversations?: Record<string, number>
   /** @deprecated Use schemaVersion for memory.json migrations. */
   version: number
 }

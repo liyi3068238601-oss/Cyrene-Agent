@@ -23,9 +23,9 @@ function statePath():string{return path.join(app.getPath("userData"),"proactive-
 export function loadLastSentAt():number{try{return Number(JSON.parse(fs.readFileSync(statePath(),"utf8"))?.lastSentAt)||0}catch{return 0}}
 export function saveLastSentAt(lastSentAt:number):void{try{fs.writeFileSync(statePath(),JSON.stringify({lastSentAt},null,2),"utf8")}catch(error){console.warn("[ProactiveChat] 保存状态失败",error)}}
 
-export function startProactiveChat(getConfig:()=>ProactiveChatConfig,getLastConversationAt:()=>number,onTrigger:()=>Promise<void>):void{
+export function startProactiveChat(getConfig:()=>ProactiveChatConfig,getLastConversationAt:()=>number,onTrigger:()=>Promise<boolean|void>):void{
   stopProactiveChat();
-  const tick=async()=>{const config=getConfig(),now=Date.now();if(!shouldSendProactiveChat(config,{now,hour:new Date(now).getHours(),lastConversationAt:getLastConversationAt(),lastSentAt:loadLastSentAt()}))return;running=true;saveLastSentAt(now);try{await onTrigger()}catch(error){console.warn("[ProactiveChat] 主动消息生成失败",error)}finally{running=false}};
+  const tick=async()=>{const config=getConfig(),now=Date.now();if(!shouldSendProactiveChat(config,{now,hour:new Date(now).getHours(),lastConversationAt:getLastConversationAt(),lastSentAt:loadLastSentAt()}))return;running=true;try{const sent=await onTrigger();if(sent!==false)saveLastSentAt(now)}catch(error){console.warn("[ProactiveChat] 主动消息生成失败",error)}finally{running=false}};
   timer=setInterval(()=>void tick(),TICK_MS);
 }
 

@@ -127,6 +127,42 @@ describe("memoryStore", () => {
     expect(updated.status).toBe("archived")
   })
 
+  it("keeps deleted-branch memories globally after the source conversation is archived", async () => {
+    const { memoryStore, DELETED_CONVERSATION_MEMORY_RETENTION_MS } = await import("./memory-store")
+    const temporary = await memoryStore.addL2Memory({
+      content: "A temporary branch detail",
+      triggerText: "remember temporarily",
+      sourceConversationId: "branch-to-delete",
+      ragId: "rag_temporary",
+      isPinned: false,
+    })
+    const pinned = await memoryStore.addL2Memory({
+      content: "A pinned long-term detail",
+      triggerText: "always remember",
+      sourceConversationId: "branch-to-delete",
+      ragId: "rag_pinned_forever",
+      isPinned: true,
+    })
+    const deletedAt = Date.now()
+
+    expect(await memoryStore.markConversationDeleted("branch-to-delete", deletedAt)).toBe(1)
+    expect((await memoryStore.getAllL2()).find((item) => item.id === temporary.id)?.status).toBe("active")
+    expect((await memoryStore.getAllL2()).find((item) => item.id === pinned.id)?.status).toBe("active")
+
+    const beforeExpiry = await memoryStore.cleanupExpiredConversationMemories(
+      deletedAt + DELETED_CONVERSATION_MEMORY_RETENTION_MS - 1,
+    )
+    expect(beforeExpiry).toEqual({ removed: 0, ragIds: [], conversationIds: [] })
+
+    const afterExpiry = await memoryStore.cleanupExpiredConversationMemories(
+      deletedAt + DELETED_CONVERSATION_MEMORY_RETENTION_MS,
+    )
+    expect(afterExpiry).toEqual({ removed: 0, ragIds: [], conversationIds: [] })
+    expect((await memoryStore.getAllL2()).map((item) => item.id)).toContain(pinned.id)
+    expect((await memoryStore.getAllL2()).map((item) => item.id)).toContain(temporary.id)
+    expect((await memoryStore.load()).evidence?.every((item) => item.sourceStatus === "archived")).toBe(true)
+  })
+
   it("updates L0 and L2 through atomic write APIs", async () => {
     const { memoryStore } = await import("./memory-store")
     await memoryStore.upsertL0Field("preferredName", "伙伴")
@@ -529,8 +565,9 @@ describe("memoryStore", () => {
     const persisted = JSON.parse(fs.readFileSync(memoryPath, "utf8"))
     const backups = fs.readdirSync(electronMock.userDataDir).filter((name) => name.startsWith("memory.backup."))
 
-    expect(store.schemaVersion).toBe(3)
-    expect(persisted.schemaVersion).toBe(3)
+    expect(store.schemaVersion).toBe(4)
+    expect(persisted.schemaVersion).toBe(4)
+    expect(store.deletedConversations).toEqual({})
     expect(store.l0.preferredName).toBe("伙伴")
     expect(store.l1.roundCount).toBe(7)
     expect(store.l2[0].syncStatus).toBe("synced")

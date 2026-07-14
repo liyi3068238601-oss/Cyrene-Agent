@@ -8,6 +8,7 @@ import {
 } from "../../shared/chat-ui";
 import { canUseMinimaxStreamingEarly, extractEarlyTtsSegment } from "../../shared/tts-early-playback";
 import { getStickerSrcForId } from "./sticker-src";
+import { hideVisibleMessages, SessionMessageCache } from "./session-runtime";
 import { resolveAsset } from "../../shared/renderer-base";
 import { getSchedulePanelItems, type ScheduledTask } from "../tasks/task-filter";
 import { splitSmartReply } from "../../shared/smart-segmentation";
@@ -19,6 +20,7 @@ interface Message {
   role: Role;
   content: string;
   at: number;
+  hidden?: boolean;
   sticker?: string | null;
   thinking?: boolean;
   ttsCacheKey?: string;
@@ -342,8 +344,10 @@ function getStickerSrc(id: string): string | undefined {
 // 多会话改造：messages 是当前活跃 session 的消息数组（启动时为空，由 bootstrap 填充）。
 // currentSessionId 是当前正在显示的会话 id，所有持久化操作都基于它。
 // 启动期间 currentSessionId 为 null，发送按钮通过 sending 标志兜底（bootstrap 极快）。
-const messages: Message[] = [];
+let messages: Message[] = [];
+const sessionMessageCache = new SessionMessageCache<Message>();
 let currentSessionId: string | null = null;
+let currentSessionIsMain = false;
 window.chat?.onProactiveMessage?.((payload)=>{if(payload.sessionId!==currentSessionId||messages.some((message)=>message.id===payload.message.id))return;messages.push(payload.message);render();void saveSession()});
 let currentModelConfig: ModelConfig | null = null;
 
@@ -405,6 +409,7 @@ interface ChatStoreSession {
     role: Role;
     content: string;
     at: number;
+    hidden?: boolean;
     sticker?: string | null;
     ttsCacheKey?: string;
     novelAiImage?: { id:string; prompt?:string; model?:string; width?:number; height?:number };
@@ -412,6 +417,7 @@ interface ChatStoreSession {
   createdAt: number;
   updatedAt: number;
   schemaVersion: 1;
+  isMain?: boolean;
 }
 
 interface ChatStoreApi {
@@ -442,7 +448,7 @@ declare global {
 // - 过滤空 content / 渲染中的 thinking 占位（thinking=true 时通常 content 为空，但保险起见双重过滤）
 // - 丢弃 thinking 字段（持久化层不存这种瞬态状态）
 function toPersistableMessages(arr: Message[]): Array<{
-  id: string; role: Role; content: string; at: number; sticker?: StickerId | null; ttsCacheKey?: string; novelAiImage?: Message["novelAiImage"];
+  id: string; role: Role; content: string; at: number; hidden?: boolean; sticker?: StickerId | null; ttsCacheKey?: string; novelAiImage?: Message["novelAiImage"];
 }> {
   return arr
     .filter((m) => {
@@ -454,37 +460,52 @@ function toPersistableMessages(arr: Message[]): Array<{
       role: m.role,
       content: m.content,
       at: m.at,
+      hidden: m.hidden,
       sticker: m.sticker ?? null,
       ttsCacheKey: m.ttsCacheKey,
       novelAiImage: m.novelAiImage,
     }));
 }
 
-async function saveSession(): Promise<void> {
-  if (!currentSessionId || !window.chatStore) return;
+async function saveSessionMessages(sessionId: string | null, source: Message[]): Promise<void> {
+  if (!sessionId || !window.chatStore) return;
   try {
-    await window.chatStore.replaceMessages(currentSessionId, toPersistableMessages(messages));
+    await window.chatStore.replaceMessages(sessionId, toPersistableMessages(source));
   } catch (err) {
     console.warn("[Cyrene Chat] saveSession 失败:", err);
   }
 }
 
+async function saveSession(): Promise<void> {
+  const sessionId = currentSessionId;
+  const source = messages;
+  await saveSessionMessages(sessionId, source);
+}
+
+function isSessionVisible(sessionId: string, source: Message[]): boolean {
+  return currentSessionId === sessionId && messages === source;
+}
+
+function renderSessionIfVisible(sessionId: string, source: Message[]): void {
+  if (isSessionVisible(sessionId, source)) render();
+}
+
 // 把 store 里的 ChatStoreSession 装载到当前窗口（替换 messages 数组并 render）。
 function loadSessionIntoUI(session: ChatStoreSession): void {
   currentSessionId = session.id;
+  currentSessionIsMain = session.isMain === true || session.id === "main";
   if (conversationTitleEl) conversationTitleEl.textContent = session.title || "新对话";
-  messages.length = 0;
-  for (const m of session.messages) {
-    messages.push({
+  const persisted = session.messages.map((m) => ({
       id: m.id,
       role: m.role,
       content: m.content,
       at: m.at,
+      hidden: m.hidden,
       sticker: m.sticker ?? null,
       ttsCacheKey: m.ttsCacheKey,
       novelAiImage: m.novelAiImage,
-    });
-  }
+    } satisfies Message));
+  messages = sessionMessageCache.load(session.id, persisted);
   // 上报活跃 sessionId（设置面板"删除当前会话"差异化提示用）
   void window.chatStore?.setActiveSession(session.id);
   render();
@@ -522,7 +543,7 @@ async function renderRailList(): Promise<void> {
 }
 
 function renderInspectorStats(): void {
-  const visibleMessages = messages.filter((message) => !message.thinking && message.content.trim());
+  const visibleMessages = messages.filter((message) => !message.hidden && !message.thinking && message.content.trim());
   const userMessages = visibleMessages.filter((message) => message.role === "user");
   if (inspectorMessageCountEl) inspectorMessageCountEl.textContent = String(visibleMessages.length);
   if (inspectorUserCountEl) inspectorUserCountEl.textContent = String(userMessages.length);
@@ -1321,12 +1342,13 @@ function render(): void {
   // 空态：当前会话还没有消息时（新建/全清）显示"昔涟期待与你聊天哦 ✨"占位
   // thinking 状态（昔涟主动开场/流式回复中）也算有消息，胶囊应立即消失
   const emptyEl = document.getElementById("chat-empty");
-  const hasMessages = messages.some((m) => m.content.trim() || m.thinking);
+  const hasMessages = messages.some((m) => !m.hidden && (m.content.trim() || m.thinking));
   if (emptyEl) emptyEl.toggleAttribute("hidden", hasMessages);
   renderInspectorStats();
 
   messagesEl.replaceChildren();
   for (const m of messages) {
+    if (m.hidden) continue;
     const row = document.createElement("div");
     row.className = `msg msg--${m.role}`;
     row.dataset.msgId = m.id;
@@ -2408,8 +2430,8 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !stickerPicker.hidden) hideStickerPicker();
 });
 
-function buildModelMessages(): Array<{ role: "user" | "model"; content: string }> {
-  return messages
+function buildModelMessages(source: Message[] = messages): Array<{ role: "user" | "model"; content: string }> {
+  return source
     .filter((message) => message.content.replace(/\[sticker:[^\]]+\]/g, "").trim())
     .slice(-16)
     .map((message) => ({
@@ -2519,6 +2541,10 @@ function onPresetClick(preset: QuickPreset): void {
  */
 async function triggerCyreneGreeting(): Promise<void> {
   if (sending || !currentSessionId) return;
+  const runSessionId = currentSessionId;
+  const runMessages = messages;
+  sessionMessageCache.remember(runSessionId, runMessages);
+  const renderRun = (): void => renderSessionIfVisible(runSessionId, runMessages);
 
   // 立即隐藏空态（胶囊），不等 refreshModelConfig 异步完成
   const emptyEl = document.getElementById("chat-empty");
@@ -2533,8 +2559,8 @@ async function triggerCyreneGreeting(): Promise<void> {
   try {
     streamMsgId = String(Date.now() + 1);
     const streamMsg = { id: streamMsgId, role: "model" as const, content: "", at: Date.now(), thinking: true };
-    messages.push(streamMsg);
-    render();
+    runMessages.push(streamMsg);
+    renderRun();
 
     let streamContent = "";
     let ttsContent = "";
@@ -2557,6 +2583,7 @@ async function triggerCyreneGreeting(): Promise<void> {
     let playbackTimer: number | null = null;
     let runFinishedArrived = false;
     const getStreamingBubble = (): HTMLElement | null => {
+      if (!isSessionVisible(runSessionId, runMessages)) return null;
       const row = messagesEl.querySelector(`[data-msg-id="${streamMsgId}"]`);
       const bubbles = row?.querySelectorAll<HTMLElement>(".msg__bubble");
       return bubbles && bubbles.length > 0 ? bubbles[bubbles.length - 1] : null;
@@ -2574,10 +2601,10 @@ async function triggerCyreneGreeting(): Promise<void> {
           const previousPartCount = splitDesktopReply(streamContent).length;
           streamContent += next;
           const nextPartCount = splitDesktopReply(streamContent).length;
-          const streamMessage = messages.find((message) => message.id === streamMsgId);
+          const streamMessage = runMessages.find((message) => message.id === streamMsgId);
+          if (streamMessage) streamMessage.content = streamContent;
           if (streamMessage && previousPartCount > 0 && nextPartCount > previousPartCount) {
-            streamMessage.content = streamContent;
-            render();
+            renderRun();
             return;
           }
           const bubble = getStreamingBubble();
@@ -2587,7 +2614,7 @@ async function triggerCyreneGreeting(): Promise<void> {
             span.textContent = next;
             bubble.appendChild(span);
           }
-          messagesEl.scrollTop = messagesEl.scrollHeight;
+          if (isSessionVisible(runSessionId, runMessages)) messagesEl.scrollTop = messagesEl.scrollHeight;
           return;
         }
         if (playbackTimer !== null) { clearInterval(playbackTimer); playbackTimer = null; }
@@ -2597,7 +2624,7 @@ async function triggerCyreneGreeting(): Promise<void> {
     const offEvent = window.agui!.onEvent((rawEvent) => {
       try {
         const event = rawEvent as AguiBaseEvent;
-        const msg = messages.find(m => m.id === streamMsgId);
+        const msg = runMessages.find(m => m.id === streamMsgId);
         switch (event.type) {
           case "TOOL_CALL_START": {
             const bubble = getStreamingBubble();
@@ -2632,7 +2659,7 @@ async function triggerCyreneGreeting(): Promise<void> {
             break;
           }
           case "TEXT_MESSAGE_START":
-            if (msg) { msg.thinking = false; render(); }
+            if (msg) { msg.thinking = false; renderRun(); }
             break;
           case "TEXT_MESSAGE_CONTENT":
             if (event.delta) {
@@ -2668,8 +2695,10 @@ async function triggerCyreneGreeting(): Promise<void> {
             } else if (event.name === "cyrene.choice") {
               const choiceData = event.value as { id: string; question: string; options: Array<{ label: string; value: string; description?: string }>; default?: string };
               const card = buildChoiceCardEl(choiceData);
-              messagesEl.appendChild(card);
-              messagesEl.scrollTop = messagesEl.scrollHeight;
+              if (isSessionVisible(runSessionId, runMessages)) {
+                messagesEl.appendChild(card);
+                messagesEl.scrollTop = messagesEl.scrollHeight;
+              }
             }
             break;
           case "RUN_FINISHED":
@@ -2691,7 +2720,7 @@ async function triggerCyreneGreeting(): Promise<void> {
     const ack = await window.agui!.run({
       messages: [{ role: "user", content: "[internal] 用户点击了「和昔涟聊天」，请你主动开口聊几句，像朋友打招呼一样自然开场。" }],
       style: getCurrentStyle(),
-      sessionId: currentSessionId || undefined,
+      sessionId: runSessionId,
     });
     if (!ack.success) {
       offEvent();
@@ -2701,7 +2730,7 @@ async function triggerCyreneGreeting(): Promise<void> {
     await runDone;
     offEvent();
 
-    const msg = messages.find(m => m.id === streamMsgId);
+    const msg = runMessages.find(m => m.id === streamMsgId);
     if (msg) {
       msg.thinking = false;
       msg.content = streamContent;
@@ -2710,39 +2739,41 @@ async function triggerCyreneGreeting(): Promise<void> {
         msg.novelAiImage={id:String(pendingNovelAiImage.id||""),prompt:String(pendingNovelAiImage.prompt||""),model:String(pendingNovelAiImage.model||""),width:Number(pendingNovelAiImage.width)||undefined,height:Number(pendingNovelAiImage.height)||undefined};
       }
     }
-    void saveSession();
+    void saveSessionMessages(runSessionId, runMessages);
     const finishedMsgId = streamMsgId;
     void pendingTtsCachePromise?.then((cache) => {
       if (!cache) return;
-      const latestMsg = messages.find(m => m.id === finishedMsgId);
+      const latestMsg = runMessages.find(m => m.id === finishedMsgId);
       if (!latestMsg) return;
       latestMsg.ttsCacheKey = cache.cacheKey;
-      void saveSession();
+      void saveSessionMessages(runSessionId, runMessages);
     });
-    render();
+    renderRun();
     if (pendingWeatherCard) {
-      const card = buildWeatherCardEl(pendingWeatherCard);
-      messagesEl.appendChild(card);
-      messagesEl.scrollTop = messagesEl.scrollHeight;
+      if (isSessionVisible(runSessionId, runMessages)) {
+        const card = buildWeatherCardEl(pendingWeatherCard);
+        messagesEl.appendChild(card);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
       pendingWeatherCard = null;
     }
     pendingNovelAiImage = null;
   } catch (err) {
     const message = err instanceof Error ? err.message : "模型请求失败";
-    const msg = messages.find(m => m.id === streamMsgId);
+    const msg = runMessages.find(m => m.id === streamMsgId);
     if (msg) {
       msg.thinking = false;
       msg.content = "连接模型失败：" + message;
     } else {
-      messages.push({
+      runMessages.push({
         id: String(Date.now() + 2),
         role: "model",
         content: "连接模型失败：" + message,
         at: Date.now(),
       });
     }
-    void saveSession();
-    render();
+    void saveSessionMessages(runSessionId, runMessages);
+    renderRun();
   } finally {
     sending = false;
     sendBtn.disabled = false;
@@ -2760,6 +2791,10 @@ async function send(): Promise<void> {
     console.warn("[Cyrene Chat] 会话尚未初始化完成，已忽略此次发送");
     return;
   }
+  const runSessionId = currentSessionId;
+  const runMessages = messages;
+  sessionMessageCache.remember(runSessionId, runMessages);
+  const renderRun = (): void => renderSessionIfVisible(runSessionId, runMessages);
 
     // Option C（临时注入）：内容不进 messages 历史，只附在 agui.run payload 传给本轮。
     // fullUserText 只放精简 hint 进 history，不堆内容。
@@ -2817,19 +2852,19 @@ async function send(): Promise<void> {
     at: Date.now(),
     sticker: userStickerId,
   };
-  messages.push(userMsg);
+  runMessages.push(userMsg);
   inputEl.value = "";
   autosize();
   removeAttachedFiles();
-  void saveSession();
-  render();
+  void saveSessionMessages(runSessionId, runMessages);
+  renderRun();
 
   let streamMsgId = "";
   try {
     streamMsgId = String(Date.now() + 1);
     const streamMsg = { id: streamMsgId, role: "model", content: "", at: Date.now(), thinking: true };
-    messages.push(streamMsg);
-    render();
+    runMessages.push(streamMsg);
+    renderRun();
 
     let streamContent = "";
     let ttsContent = "";
@@ -2858,6 +2893,7 @@ async function send(): Promise<void> {
     let runFinishedArrived = false;
     /** 找到当前流式消息的气泡 DOM（TEXT_MESSAGE_START 时 render 过一次，带 data-msg-id）。 */
     const getStreamingBubble = (): HTMLElement | null => {
+      if (!isSessionVisible(runSessionId, runMessages)) return null;
       const row = messagesEl.querySelector(`[data-msg-id="${streamMsgId}"]`);
       const bubbles = row?.querySelectorAll<HTMLElement>(".msg__bubble");
       return bubbles && bubbles.length > 0 ? bubbles[bubbles.length - 1] : null;
@@ -2876,10 +2912,10 @@ async function send(): Promise<void> {
           const previousPartCount = splitDesktopReply(streamContent).length;
           streamContent += next;
           const nextPartCount = splitDesktopReply(streamContent).length;
-          const streamMessage = messages.find((message) => message.id === streamMsgId);
+          const streamMessage = runMessages.find((message) => message.id === streamMsgId);
+          if (streamMessage) streamMessage.content = streamContent;
           if (streamMessage && previousPartCount > 0 && nextPartCount > previousPartCount) {
-            streamMessage.content = streamContent;
-            render();
+            renderRun();
             return;
           }
           // 增量追加 span 到气泡，CSS 渐显。不调 render()，避免全量重建卡顿。
@@ -2890,7 +2926,7 @@ async function send(): Promise<void> {
             span.textContent = next;
             bubble.appendChild(span);
           }
-          messagesEl.scrollTop = messagesEl.scrollHeight;
+          if (isSessionVisible(runSessionId, runMessages)) messagesEl.scrollTop = messagesEl.scrollHeight;
           return;
         }
         // 队列空了
@@ -2901,7 +2937,7 @@ async function send(): Promise<void> {
     const offEvent = window.agui!.onEvent((rawEvent) => {
       try {
         const event = rawEvent as AguiBaseEvent;
-        const msg = messages.find(m => m.id === streamMsgId);
+        const msg = runMessages.find(m => m.id === streamMsgId);
         switch (event.type) {
           case "TOOL_CALL_START": {
             // 工具调用开始：在 thinking 气泡里显示"🔧 调用中：xxx"，替换三个点
@@ -2940,7 +2976,7 @@ async function send(): Promise<void> {
           case "TEXT_MESSAGE_START":
             // 切换 thinking 点 → 空气泡，render 一次建立 DOM（带 data-msg-id）
             // 工具提示（若有）会被 render 重建清掉，自然过渡到文字
-            if (msg) { msg.thinking = false; render(); }
+            if (msg) { msg.thinking = false; renderRun(); }
             break;
           case "TEXT_MESSAGE_CONTENT":
             if (event.delta) {
@@ -2982,8 +3018,10 @@ async function send(): Promise<void> {
               // 选择卡片：立即插入聊天流（不等 runDone，因为要即时交互）
               const choiceData = event.value as { id: string; question: string; options: Array<{ label: string; value: string; description?: string }>; default?: string };
               const card = buildChoiceCardEl(choiceData);
-              messagesEl.appendChild(card);
-              messagesEl.scrollTop = messagesEl.scrollHeight;
+              if (isSessionVisible(runSessionId, runMessages)) {
+                messagesEl.appendChild(card);
+                messagesEl.scrollTop = messagesEl.scrollHeight;
+              }
             }
             break;
           case "RUN_FINISHED":
@@ -3006,9 +3044,9 @@ async function send(): Promise<void> {
     // invoke 只确认"已发起"，不等 Observable 结束。
     // 真正的完成由事件流 RUN_FINISHED/RUN_ERROR 驱动（await runDone）。
     const ack = await window.agui!.run({
-      messages: buildModelMessages(),
+      messages: buildModelMessages(runMessages),
       style: getCurrentStyle(),
-      sessionId: currentSessionId || undefined,
+      sessionId: runSessionId,
       attachments: turnTextAttachments,
     });
     if (!ack.success) {
@@ -3020,7 +3058,7 @@ async function send(): Promise<void> {
     await runDone;
     offEvent();
 
-    const msg = messages.find(m => m.id === streamMsgId);
+    const msg = runMessages.find(m => m.id === streamMsgId);
     if (msg) {
       msg.thinking = false;
       msg.content = streamContent;
@@ -3029,42 +3067,44 @@ async function send(): Promise<void> {
         msg.novelAiImage={id:String(pendingNovelAiImage.id||""),prompt:String(pendingNovelAiImage.prompt||""),model:String(pendingNovelAiImage.model||""),width:Number(pendingNovelAiImage.width)||undefined,height:Number(pendingNovelAiImage.height)||undefined};
       }
     }
-    void saveSession();
+    void saveSessionMessages(runSessionId, runMessages);
     const finishedMsgId = streamMsgId;
     void pendingTtsCachePromise?.then((cache) => {
       if (!cache) return;
-      const latestMsg = messages.find(m => m.id === finishedMsgId);
+      const latestMsg = runMessages.find(m => m.id === finishedMsgId);
       if (!latestMsg) return;
       latestMsg.ttsCacheKey = cache.cacheKey;
-      void saveSession();
+      void saveSessionMessages(runSessionId, runMessages);
     });
-    render();
+    renderRun();
     // 天气卡片在 render 后追加到末尾（模型回复之后）
     if (pendingWeatherCard) {
       console.log("[Chat] 插入天气卡片");
-      const card = buildWeatherCardEl(pendingWeatherCard);
-      messagesEl.appendChild(card);
-      messagesEl.scrollTop = messagesEl.scrollHeight;
+      if (isSessionVisible(runSessionId, runMessages)) {
+        const card = buildWeatherCardEl(pendingWeatherCard);
+        messagesEl.appendChild(card);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
       pendingWeatherCard = null;
     }
     pendingNovelAiImage = null;
     // TTS 已在 TEXT_MESSAGE_END 时触发，这里不再重复朗读
   } catch (err) {
     const message = err instanceof Error ? err.message : "模型请求失败";
-    const msg = messages.find(m => m.id === streamMsgId);
+    const msg = runMessages.find(m => m.id === streamMsgId);
     if (msg) {
       msg.thinking = false;
       msg.content = "连接模型失败：" + message;
     } else {
-      messages.push({
+      runMessages.push({
         id: String(Date.now() + 2),
         role: "model",
         content: "连接模型失败：" + message,
         at: Date.now(),
       });
     }
-    void saveSession();
-    render();  } finally {
+    void saveSessionMessages(runSessionId, runMessages);
+    renderRun();  } finally {
     sending = false;
     sendBtn.disabled = false;
     chatHintEl.textContent = formatModelHint(currentModelConfig);
@@ -3073,10 +3113,15 @@ async function send(): Promise<void> {
 }
 function clearChat(): void {
   if (sending) return;
-  if (messages.length === 0) return;
-  const ok = window.confirm("清空当前对话？");
+  const visibleMessages = messages.filter((message) => !message.hidden);
+  if (visibleMessages.length === 0) return;
+  const prompt = currentSessionIsMain
+    ? "清理主会话窗口？\n\n历史消息仍会保留，并继续作为 Cyrene 的对话上下文。"
+    : "清空当前对话？";
+  const ok = window.confirm(prompt);
   if (!ok) return;
-  messages.length = 0;
+  if (currentSessionIsMain) hideVisibleMessages(messages);
+  else messages.length = 0;
   void saveSession();
   render();
 }

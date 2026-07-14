@@ -26,12 +26,18 @@ const ROOT_DIR_NAME = "cyrene-chats";
 const SESSIONS_SUBDIR = "sessions";
 const INDEX_FILE = "index.json";
 export const MAIN_SESSION_ID = "main";
+export const DELETED_SESSION_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 let rootDir = "";
 let sessionsDir = "";
 let indexPath = "";
 let indexCache: ChatSessionMeta[] = [];
 let initialized = false;
+let deletedSessionArchiver: ((session: ChatSession) => boolean) | null = null;
+
+export function setDeletedSessionArchiver(archiver: ((session: ChatSession) => boolean) | null): void {
+  deletedSessionArchiver = archiver;
+}
 
 function ensureDirs(): void {
   if (!fs.existsSync(rootDir)) fs.mkdirSync(rootDir, { recursive: true });
@@ -163,6 +169,40 @@ function cleanupStickerOnlySessions(): void {
   persistIndex();
 }
 
+/** Removes expired soft-deleted sessions and keeps them out of the visible index. */
+export function cleanupExpiredDeletedSessions(
+  now = Date.now(),
+  retentionMs = DELETED_SESSION_RETENTION_MS,
+): number {
+  if (!fs.existsSync(sessionsDir)) return 0;
+  let removed = 0;
+  const deletedIds = new Set<string>();
+  for (const fileName of fs.readdirSync(sessionsDir)) {
+    if (!fileName.endsWith(".json")) continue;
+    const id = fileName.slice(0, -5);
+    if (id === MAIN_SESSION_ID) continue;
+    const session = readSessionFile(id);
+    if (!session?.deletedAt) continue;
+    deletedIds.add(id);
+    if (now - session.deletedAt < retentionMs) continue;
+    if (!deletedSessionArchiver || !deletedSessionArchiver(session)) {
+      console.warn("[chats-store] 过期会话尚未完成压缩归档，保留原文件:", id);
+      continue;
+    }
+    try {
+      fs.unlinkSync(sessionPath(id));
+      removed += 1;
+    } catch (err) {
+      console.warn("[chats-store] 清理过期软删除会话失败:", id, err);
+    }
+  }
+  if (deletedIds.size > 0) {
+    indexCache = indexCache.filter((meta) => !deletedIds.has(meta.id));
+    persistIndex();
+  }
+  return removed;
+}
+
 export function initialize(): void {
   if (initialized) return;
   rootDir = path.join(app.getPath("userData"), ROOT_DIR_NAME);
@@ -170,6 +210,7 @@ export function initialize(): void {
   indexPath = path.join(rootDir, INDEX_FILE);
   ensureDirs();
   indexCache = readIndexFromDisk();
+  cleanupExpiredDeletedSessions();
   cleanupStickerOnlySessions();
   ensureMainSession();
   initialized = true;
@@ -177,7 +218,7 @@ export function initialize(): void {
 
 function ensureMainSession():ChatSession{
   const existing=readSessionFile(MAIN_SESSION_ID);
-  if(existing){existing.isMain=true;existing.title="主会话";existing.titleIsCustom=true;writeSessionFile(existing);upsertMeta(metaFromSession(existing));return existing}
+  if(existing){existing.isMain=true;existing.deletedAt=undefined;existing.title="主会话";existing.titleIsCustom=true;writeSessionFile(existing);upsertMeta(metaFromSession(existing));return existing}
   const now=Date.now();const session:ChatSession={id:MAIN_SESSION_ID,title:"主会话",identityId:null,messages:[],createdAt:now,updatedAt:now,schemaVersion:CHAT_SCHEMA_VERSION,titleIsCustom:true,isMain:true};writeSessionFile(session);upsertMeta(metaFromSession(session));return session;
 }
 
@@ -191,7 +232,8 @@ export function listSessions(): ChatSessionMeta[] {
 }
 
 export function getSession(id: string): ChatSession | null {
-  return readSessionFile(id);
+  const session = readSessionFile(id);
+  return session?.deletedAt ? null : session;
 }
 
 export function createSession(opts?: {
@@ -217,7 +259,7 @@ export function createSession(opts?: {
 
 export function appendMessage(id: string, message: ChatMessage): ChatSession | null {
   const session = readSessionFile(id);
-  if (!session) return null;
+  if (!session || session.deletedAt) return null;
   if (!isMeaningfulMessage(message)) return session;
   session.messages.push(message);
   session.updatedAt = Date.now();
@@ -235,7 +277,7 @@ export function appendMessage(id: string, message: ChatMessage): ChatSession | n
 // updatedAt 一并刷新；用户没手动改名时根据新内容重新派生。
 export function replaceMessages(id: string, messages: ChatMessage[]): ChatSession | null {
   const session = readSessionFile(id);
-  if (!session) return null;
+  if (!session || session.deletedAt) return null;
   session.messages = messages.filter(isMeaningfulMessage);
   session.updatedAt = Date.now();
   if (session.isMain) session.title="主会话";
@@ -249,7 +291,7 @@ export function replaceMessages(id: string, messages: ChatMessage[]): ChatSessio
 
 export function renameSession(id: string, title: string): ChatSession | null {
   const session = readSessionFile(id);
-  if (!session) return null;
+  if (!session || session.deletedAt) return null;
   if(session.isMain)return session;
   const trimmed = title.trim();
   if (!trimmed) return session;
@@ -261,17 +303,14 @@ export function renameSession(id: string, title: string): ChatSession | null {
   return session;
 }
 
-export function deleteSession(id: string): boolean {
+export function deleteSession(id: string, deletedAt = Date.now()): boolean {
   if(id===MAIN_SESSION_ID)return false;
-  const filePath = sessionPath(id);
-  let fileExisted = false;
-  if (fs.existsSync(filePath)) {
-    try {
-      fs.unlinkSync(filePath);
-      fileExisted = true;
-    } catch (err) {
-      console.warn("[chats-store] 删除 session 文件失败:", id, err);
-    }
+  const session = readSessionFile(id);
+  let fileExisted = Boolean(session);
+  if (session) {
+    session.deletedAt = deletedAt;
+    session.updatedAt = deletedAt;
+    writeSessionFile(session);
   }
   const inIndex = indexCache.some((m) => m.id === id);
   if (inIndex) removeMetaById(id);

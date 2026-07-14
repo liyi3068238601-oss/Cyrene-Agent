@@ -7,8 +7,8 @@
 // 通过 enqueueLLMTask 在后台执行，不影响主对话流程。
 
 import { memoryStore } from "./memory-store";
-import type { L0WritableField } from "./memory-store";
-import { getEntriesBySource } from "../rag/index";
+import type { L0WritableField, L2Input } from "./memory-store";
+import { addMemory, getEntriesBySource } from "../rag/index";
 import { cosineSimilarity } from "../rag/vectorstore";
 import { L0_FIELD_DESCRIPTIONS } from "./memory-types";
 import type { L2Memory } from "./memory-types";
@@ -17,6 +17,8 @@ import * as path from "path";
 import { app } from "electron";
 import { getAdapterForConfig } from "../orchestrator/vendors";
 import { recordUsage } from "../token-usage-store";
+import { getMemoryV2Database } from "../memory-v2/bridge";
+import { isMemoryBackgroundBudgetAvailable, recordMemoryBackgroundCall } from "../memory-v2/background-metrics";
 
 // ── LLM 调用（复用与 MemoryJudge 相同的 API 模式） ──
 
@@ -49,9 +51,17 @@ function loadModelSettings(): ModelSettings {
   } catch { return defaults; }
 }
 
-async function callLLM(messages: Array<{ role: "system" | "user"; content: string }>, maxTokens = 500): Promise<string> {
+export async function callMemoryBackgroundModel(messages: Array<{ role: "system" | "user"; content: string }>, maxTokens = 500): Promise<string> {
+  const startedAt = Date.now();
+  let inputTokens = 0;
+  let outputTokens = 0;
+  const metricsDb = getMemoryV2Database();
+  if (!isMemoryBackgroundBudgetAvailable(metricsDb)) throw new Error("memory_background_daily_budget_exhausted");
   const settings = loadModelSettings();
-  if (!settings.apiKey) throw new Error("missing api key");
+  if (!settings.apiKey) {
+    recordMemoryBackgroundCall(metricsDb, { kind: "archivist", durationMs: Date.now() - startedAt, failed: true });
+    throw new Error("missing api key");
+  }
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 30000);
@@ -92,9 +102,15 @@ async function callLLM(messages: Array<{ role: "system" | "user"; content: strin
 
     if (parsed.usage) {
       recordUsage(parsed.usage.input, parsed.usage.output, 1);
+      inputTokens = parsed.usage.input;
+      outputTokens = parsed.usage.output;
     }
 
+    recordMemoryBackgroundCall(metricsDb, { kind: "archivist", durationMs: Date.now() - startedAt, inputTokens, outputTokens });
     return parsed.text ?? "";
+  } catch (error) {
+    recordMemoryBackgroundCall(metricsDb, { kind: "archivist", durationMs: Date.now() - startedAt, inputTokens, outputTokens, failed: true });
+    throw error;
   } finally {
     clearTimeout(timer);
   }
@@ -141,6 +157,102 @@ const MIN_GROUP_SIZE = 3;
 interface GroupedEntry {
   l2: L2Memory;
   embedding: number[];
+}
+
+export interface CompressionSyncDeps {
+  addL2Memory: (input: L2Input) => Promise<L2Memory>;
+  addMemory: (text: string, source: string, metadata?: Record<string, unknown>) => Promise<string>;
+  markL2SyncStatus: (id: string, status: "pending_sync" | "synced" | "sync_failed", ragId?: string, error?: unknown) => Promise<L2Memory | null>;
+  archiveL2Batch: (ids: string[]) => Promise<void>;
+}
+
+const compressionSyncDeps: CompressionSyncDeps = {
+  addL2Memory: (input) => memoryStore.addL2Memory(input),
+  addMemory,
+  markL2SyncStatus: (id, status, ragId, error) => memoryStore.markL2SyncStatus(id, status, ragId, error),
+  archiveL2Batch: (ids) => memoryStore.archiveL2Batch(ids),
+};
+
+function uniqueStrings(values: Array<string | undefined>): string[] {
+  return [...new Set(values.filter((value): value is string => Boolean(value)))];
+}
+
+function sameIds(left: string[] | undefined, right: string[]): boolean {
+  if (!left || left.length !== right.length) return false;
+  const expected = new Set(right);
+  return left.every((id) => expected.has(id));
+}
+
+/** Writes a compressed summary to both memory.json and RAG before archiving its sources. */
+export async function commitCompressedSummary(
+  summaryText: string,
+  sourceMemories: L2Memory[],
+  deps: CompressionSyncDeps = compressionSyncDeps,
+  existingSummary?: L2Memory,
+): Promise<{ ok: boolean; summary: L2Memory | null; ragId?: string }> {
+  if (!summaryText.trim() || sourceMemories.length === 0) return { ok: false, summary: null };
+  const sourceIds = sourceMemories.map((memory) => memory.id);
+  const sourceConversationIds = uniqueStrings(sourceMemories.flatMap((memory) => (
+    memory.sourceConversationIds?.length ? memory.sourceConversationIds : [memory.sourceConversationId]
+  )));
+  const isGlobalSummary = sourceConversationIds.length > 1;
+  const sourceConversationId = isGlobalSummary ? "main" : (sourceConversationIds[0] ?? "main");
+  const evidenceIds = uniqueStrings(sourceMemories.flatMap((memory) => memory.evidenceIds ?? []));
+  const sourceMessageIds = uniqueStrings(sourceMemories.flatMap((memory) => memory.sourceMessageIds ?? []));
+
+  const compressed = existingSummary ?? await deps.addL2Memory({
+    content: summaryText.trim(),
+    triggerText: sourceMemories[0].triggerText,
+    sourceConversationId,
+    sourceConversationIds,
+    embedding: [],
+    isPinned: false,
+    isSummary: true,
+    subEntryIds: sourceIds,
+    evidenceIds,
+    sourceMessageIds,
+    syncStatus: "pending_sync",
+  });
+
+  if (compressed.syncStatus === "synced" && compressed.ragId) {
+    await deps.archiveL2Batch(sourceIds);
+    return { ok: true, summary: compressed, ragId: compressed.ragId };
+  }
+
+  try {
+    const metadata: Record<string, unknown> = {
+      triggerText: compressed.triggerText,
+      l2Id: compressed.id,
+      isSummary: true,
+      sourceSessionIds: sourceConversationIds,
+    };
+    if (isGlobalSummary) metadata.globalSummary = true;
+    else metadata.sessionId = sourceConversationId;
+    const ragId = await deps.addMemory(compressed.content, "user_memory", metadata);
+    await deps.markL2SyncStatus(compressed.id, "synced", ragId);
+    await deps.archiveL2Batch(sourceIds);
+    return { ok: true, summary: compressed, ragId };
+  } catch (err) {
+    await deps.markL2SyncStatus(compressed.id, "sync_failed", undefined, err);
+    return { ok: false, summary: compressed };
+  }
+}
+
+/** Repairs summaries created by older versions or previous failed RAG writes. */
+export async function syncPendingCompressedMemories(): Promise<number> {
+  const allL2 = await memoryStore.getAllL2();
+  const byId = new Map(allL2.map((memory) => [memory.id, memory]));
+  let repaired = 0;
+  for (const summary of allL2) {
+    if (!summary.isSummary || (summary.syncStatus === "synced" && summary.ragId)) continue;
+    const sources = (summary.subEntryIds ?? [])
+      .map((id) => byId.get(id))
+      .filter((memory): memory is L2Memory => Boolean(memory));
+    if (sources.length === 0) continue;
+    const result = await commitCompressedSummary(summary.content, sources, compressionSyncDeps, summary);
+    if (result.ok) repaired += 1;
+  }
+  return repaired;
 }
 
 async function compressMemories(): Promise<number> {
@@ -208,6 +320,21 @@ async function compressMemories(): Promise<number> {
   let totalCompressed = 0;
   for (const group of groups) {
     try {
+      const sourceMemories = group.map((entry) => entry.l2);
+      const sourceIds = sourceMemories.map((memory) => memory.id);
+      const pendingSummary = allL2.find((memory) => (
+        memory.isSummary &&
+        !(memory.syncStatus === "synced" && memory.ragId) &&
+        sameIds(memory.subEntryIds, sourceIds)
+      ));
+      if (pendingSummary) {
+        const retry = await commitCompressedSummary(pendingSummary.content, sourceMemories, compressionSyncDeps, pendingSummary);
+        if (retry.ok) {
+          totalCompressed += sourceIds.length;
+          console.log(`[MemoryCompressor] 已修复旧压缩总结索引，归档 ${sourceIds.length} 条原始记忆`);
+        }
+        continue;
+      }
       const texts = group.map((g) => `- ${g.l2.content}`);
       const prompt = [
         "你是一个记忆总结助手。以下是一组相似的用户记忆条目，请将它们合并成一条简洁的总结。",
@@ -221,7 +348,7 @@ async function compressMemories(): Promise<number> {
         ...texts,
       ].join("\n");
 
-      const summary = await callLLM([
+      const summary = await callMemoryBackgroundModel([
         { role: "system", content: "你是一个简洁的记忆总结助手。" },
         { role: "user", content: prompt },
       ], 300);
@@ -229,33 +356,21 @@ async function compressMemories(): Promise<number> {
       const cleanSummary = summary.replace(/^["「『]|["」』]$/g, "").trim();
       if (!cleanSummary || cleanSummary.length < 5) continue;
 
-      // 收集原始条目 id
-      const subEntryIds = group.map((g) => g.l2.id);
-
-      // 创建压缩总结条目
-      await memoryStore.addL2Memory({
-        content: cleanSummary,
-        triggerText: group[0].l2.triggerText,
-        sourceConversationId: group[0].l2.sourceConversationId,
-        ragId: undefined,
-        embedding: [],
-        isPinned: false,
-        isSummary: true,
-        subEntryIds,
-      });
-
-      // 原始条目归档
-      await memoryStore.archiveL2Batch(subEntryIds);
+      const committed = await commitCompressedSummary(cleanSummary, sourceMemories);
+      if (!committed.ok) {
+        console.warn("[MemoryCompressor] 总结已生成但 RAG 同步失败，保留原始记忆为 active");
+        continue;
+      }
 
       // 记录日志
       await memoryStore.appendReflectionLog({
         type: "compression",
-        summary: `压缩 ${subEntryIds.length} 条记忆为一条总结`,
+        summary: `压缩 ${sourceIds.length} 条记忆为一条总结`,
         details: `原条目：${texts.join(" | ")}\n总结：${cleanSummary}`,
       });
 
-      totalCompressed += subEntryIds.length;
-      console.log(`[MemoryCompressor] 压缩了 ${subEntryIds.length} 条 → "${cleanSummary.slice(0, 40)}"`);
+      totalCompressed += sourceIds.length;
+      console.log(`[MemoryCompressor] 压缩了 ${sourceIds.length} 条 → "${cleanSummary.slice(0, 40)}"`);
     } catch (err) {
       console.warn("[MemoryCompressor] 组压缩失败:", err);
     }
@@ -313,7 +428,7 @@ async function runReflection(): Promise<void> {
       "只输出 JSON，不要额外解释。",
     ].join("\n");
 
-    const raw = await callLLM([
+    const raw = await callMemoryBackgroundModel([
       { role: "system", content: "你是一个谨慎的用户画像反思助手。只输出 JSON 数组。" },
       { role: "user", content: prompt },
     ], 500);

@@ -11,6 +11,7 @@ import { BrowserWindow, ipcMain } from "electron";
 import { IPC } from "../../shared/ipc-channels";
 import type { ChatMessage } from "../../shared/chat-types";
 import * as chatsStore from "./chats-store";
+import { memoryStore } from "../memory/memory-store";
 
 function broadcastChanged(): void {
   for (const win of BrowserWindow.getAllWindows()) {
@@ -75,10 +76,14 @@ export function registerChatsIpc(): void {
     },
   );
 
-  ipcMain.handle(IPC.CHATS_DELETE, (_event, id: string) => {
+  ipcMain.handle(IPC.CHATS_DELETE, async (_event, id: string) => {
     if (!id) return false;
-    const ok = chatsStore.deleteSession(id);
-    if (ok) broadcastChanged();
+    const deletedAt = Date.now();
+    const ok = chatsStore.deleteSession(id, deletedAt);
+    if (ok) {
+      await memoryStore.markConversationDeleted(id, deletedAt);
+      broadcastChanged();
+    }
     return ok;
   });
 

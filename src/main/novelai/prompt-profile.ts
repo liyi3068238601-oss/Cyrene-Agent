@@ -1,4 +1,4 @@
-import type { DrawingCharacterProfile, NovelAiConfig, OutfitPreset, VisualMode } from "./types";
+import type { DrawingCharacterProfile, DrawingSubject, NovelAiConfig, OutfitPreset, VisualMode } from "./types";
 
 function joinTags(...values: Array<string | undefined>): string {
   const seen = new Set<string>();
@@ -18,6 +18,22 @@ export function getActiveCharacter(config:NovelAiConfig,requestedId?:string):Dra
   const id=String(requestedId===undefined?config.activeCharacterId:requestedId).trim();
   if(id==="__none__")return null;
   return config.characters.find((character)=>character.id===id)||null;
+}
+
+export function getAgentCharacter(config: NovelAiConfig): DrawingCharacterProfile | null {
+  const explicit = config.characters.find((character) => character.id === config.agentCharacterId);
+  return explicit || config.characters.find((character) => character.protected) || config.characters.find((character) => character.id === "cyrene") || null;
+}
+
+export function resolveDrawingCharacterId(
+  config: NovelAiConfig,
+  subject: DrawingSubject = "current",
+  requestedId?: string,
+): string | undefined {
+  if (subject === "self") return getAgentCharacter(config)?.id || "__none__";
+  if (subject === "none") return "__none__";
+  if (subject === "character") return String(requestedId || "").trim() || "__none__";
+  return requestedId === undefined ? undefined : String(requestedId).trim();
 }
 
 export function getActiveOutfit(config: NovelAiConfig, requestedId?: string, character?:DrawingCharacterProfile|null): OutfitPreset | null {

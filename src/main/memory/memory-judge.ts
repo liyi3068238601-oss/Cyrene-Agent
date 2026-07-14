@@ -5,6 +5,8 @@ import type { VendorConfig, ChatMessage } from "../orchestrator/vendors"
 import { app } from "electron"
 import { MemoryCandidate, L0_FIELD_DESCRIPTIONS, MemoryJudgeTurn } from "./memory-types"
 import { recordUsage } from "../token-usage-store"
+import { getMemoryV2Database } from "../memory-v2/bridge"
+import { isMemoryBackgroundBudgetAvailable, recordMemoryBackgroundCall } from "../memory-v2/background-metrics"
 
 interface ModelSettings {
   provider: string
@@ -198,6 +200,11 @@ async function callChatCompletions(
   timeoutMs: number,
   label: string,
 ): Promise<string> {
+  const startedAt = Date.now()
+  let inputTokens = 0
+  let outputTokens = 0
+  const metricsDb = getMemoryV2Database()
+  if (!isMemoryBackgroundBudgetAvailable(metricsDb)) throw new Error("memory_background_daily_budget_exhausted")
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
 
@@ -242,8 +249,14 @@ async function callChatCompletions(
     // 记录 token 用量（统一字段，OpenAI / Anthropic adapter 都映射成 {input, output}）
     if (parsed.usage) {
       recordUsage(parsed.usage.input, parsed.usage.output, 1)
+      inputTokens = parsed.usage.input
+      outputTokens = parsed.usage.output
     }
+    recordMemoryBackgroundCall(metricsDb, { kind: `scribe:${label}`, durationMs: Date.now() - startedAt, inputTokens, outputTokens })
     return stripThinkBlocks(parsed.text ?? "")
+  } catch (error) {
+    recordMemoryBackgroundCall(metricsDb, { kind: `scribe:${label}`, durationMs: Date.now() - startedAt, inputTokens, outputTokens, failed: true })
+    throw error
   } finally {
     clearTimeout(timer)
   }

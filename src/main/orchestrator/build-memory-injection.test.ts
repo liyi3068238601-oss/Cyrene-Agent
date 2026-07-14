@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 import { clearRecentMemoryInjections, wasRecentlyInjectedMemory } from "../memory/recent-injected-memory"
 
 const ragMock = vi.hoisted(() => ({
+  addMemory: vi.fn(),
   searchMemory: vi.fn(),
   searchMemoryEntries: vi.fn(),
   updateWorldbookActivation: vi.fn(),
@@ -60,7 +61,7 @@ describe("buildMemoryInjection", () => {
     expect(ragMock.searchMemoryEntries).toHaveBeenCalledWith("跑步", "user_memory", 40, { recordRecall: false })
   })
 
-  it("keeps branch memories isolated while the main session can read all", async () => {
+  it("shares long-term memories across every conversation", async () => {
     ragMock.searchMemoryEntries.mockResolvedValue([
       { id: "a", text: "A memory", createdAt: 1, score: 0.9, metadata: { l2Id: "l2a", sessionId: "branch-a" } },
       { id: "b", text: "B memory", createdAt: 1, score: 0.8, metadata: { l2Id: "l2b", sessionId: "branch-b" } },
@@ -71,10 +72,29 @@ describe("buildMemoryInjection", () => {
     const branch = await buildMemoryInjection("memory", { sessionId: "branch-a" })
     expect(branch).toContain("A memory")
     expect(branch).toContain("Legacy memory")
-    expect(branch).not.toContain("B memory")
+    expect(branch).toContain("B memory")
 
     const main = await buildMemoryInjection("memory", { sessionId: "main", includeAllSessions: true })
     expect(main).toContain("A memory")
     expect(main).toContain("B memory")
+  })
+
+  it("shares cross-session compressed summaries with branch conversations", async () => {
+    ragMock.searchMemoryEntries.mockResolvedValue([
+      {
+        id: "global-summary",
+        text: "Cross-session compressed memory",
+        createdAt: 1,
+        score: 0.95,
+        metadata: { l2Id: "summary", globalSummary: true, sourceSessionIds: ["a", "b"] },
+      },
+    ])
+    memoryStoreMock.getAllL2.mockResolvedValue([
+      { id: "summary", content: "Cross-session compressed memory", status: "active" },
+    ])
+    const { buildMemoryInjection } = await import("./index")
+
+    expect(await buildMemoryInjection("memory", { sessionId: "a" })).toContain("Cross-session")
+    expect(await buildMemoryInjection("memory", { sessionId: "main", includeAllSessions: true })).toContain("Cross-session")
   })
 })

@@ -3,10 +3,12 @@ import * as path from "path"
 import { app } from "electron"
 import { ConflictLog, L0Profile, L1Profile, L2Memory, L2SyncStatus, MemoryConflictResolution, MemoryEvidence, MemoryStore, ReflectionLog } from "./memory-types"
 import { appendMemoryTrace } from "./memory-trace"
+import { mirrorLegacyStoreToMemoryV2 } from "../memory-v2/bridge"
 
-const CURRENT_SCHEMA_VERSION = 3
+const CURRENT_SCHEMA_VERSION = 4
 const DEFAULT_L2_WEIGHT = 30
 const QUOTE_SNIPPET_MAX = 300
+export const DELETED_CONVERSATION_MEMORY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 const RESOLVER_PRIORITY_RANK: Record<string, number> = {
   high: 3,
   normal: 2,
@@ -41,6 +43,7 @@ const DEFAULT_STORE: MemoryStore = {
   evidence: [],
   reflectionLogs: [],
   conflictLogs: [],
+  deletedConversations: {},
   version: 1,
 }
 
@@ -61,6 +64,7 @@ function cloneDefaultStore(): MemoryStore {
     evidence: [],
     reflectionLogs: [],
     conflictLogs: [],
+    deletedConversations: {},
   }
 }
 
@@ -97,6 +101,9 @@ export function repairMigrations(store: Partial<MemoryStore>): MemoryStore {
       resolverStatus: log.resolverStatus ?? (log.resolverPriority && log.resolverPriority !== "none" ? "queued" : "not_queued"),
       resolverAttemptCount: typeof log.resolverAttemptCount === "number" ? log.resolverAttemptCount : 0,
     })) : [],
+    deletedConversations: store.deletedConversations && typeof store.deletedConversations === "object"
+      ? store.deletedConversations
+      : {},
     version: typeof store.version === "number" ? store.version : 1,
   }
 }
@@ -157,6 +164,7 @@ class MemoryStoreManager {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
     fs.writeFileSync(filePath, JSON.stringify(store, null, 2), "utf8")
     this.cache = store
+    mirrorLegacyStoreToMemoryV2(store)
   }
 
   async getL0(): Promise<L0Profile> {
@@ -661,6 +669,58 @@ class MemoryStoreManager {
       details: { delta, changed },
     })
     return changed
+  }
+
+  async markConversationDeleted(conversationId: string, deletedAt = Date.now()): Promise<number> {
+    if (!conversationId) return 0
+    const store = await this.load()
+    let changed = 0
+    let evidenceChanged = 0
+    store.deletedConversations = {
+      ...(store.deletedConversations ?? {}),
+      [conversationId]: deletedAt,
+    }
+    for (const memory of store.l2) {
+      if (memory.sourceConversationId !== conversationId || memory.isPinned) continue
+      memory.sourceDeletedAt = deletedAt
+      changed += 1
+    }
+    for (const evidence of store.evidence ?? []) {
+      if (evidence.conversationId === conversationId && evidence.sourceStatus === "active") {
+        evidence.sourceStatus = "archived"
+        evidenceChanged += 1
+      }
+    }
+    await this.save(store)
+    appendMemoryTrace({
+      op: "conversation.softDelete",
+      layer: "L2",
+      status: changed > 0 ? "ok" : "skip",
+      details: { conversationId, deletedAt, changed, evidenceChanged },
+    })
+    return changed
+  }
+
+  async cleanupExpiredConversationMemories(
+    now = Date.now(),
+    retentionMs = DELETED_CONVERSATION_MEMORY_RETENTION_MS,
+  ): Promise<{ removed: number; ragIds: string[]; conversationIds: string[] }> {
+    const store = await this.load()
+    const conversationIds = Object.entries(store.deletedConversations ?? {})
+      .filter(([, deletedAt]) => now - deletedAt >= retentionMs)
+      .map(([conversationId]) => conversationId)
+    if (conversationIds.length === 0) return { removed: 0, ragIds: [], conversationIds: [] }
+    for (const conversationId of conversationIds) {
+      delete store.deletedConversations?.[conversationId]
+    }
+    await this.save(store)
+    appendMemoryTrace({
+      op: "conversation.retentionCleanup",
+      layer: "L2",
+      status: "ok",
+      details: { removed: 0, ragIds: [], conversationIds, memoryRetention: "global" },
+    })
+    return { removed: 0, ragIds: [], conversationIds: [] }
   }
 
   async decayInactiveL2Weights(now = Date.now(), graceDays = 7): Promise<number> {

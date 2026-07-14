@@ -48,6 +48,10 @@ export type GetChatWindowFn = () => { webContents: WebContents; isDestroyed(): b
 /** 单次对话的活跃订阅（用于取消）。键 = runId。 */
 const activeRuns = new Map<string, Subscription>();
 
+export function hasActiveAgUiRuns(): boolean {
+  return activeRuns.size > 0;
+}
+
 let buildOptionsFn: BuildOptionsFn | null = null;
 let getChatWindowFn: GetChatWindowFn = () => null;
 

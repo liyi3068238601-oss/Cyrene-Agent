@@ -34,6 +34,12 @@ function isRateLimitError(err: unknown): boolean {
 // 每次 enqueue 把任务挂在 tail 后面，tail 更新到这个任务。
 // 这样多个 enqueue 调用会自然串行，不需要锁。
 let tail: Promise<unknown> = Promise.resolve();
+let queuedTasks = 0;
+let activeTasks = 0;
+
+export function getLLMQueueStatus(): { queued: number; active: number; idle: boolean } {
+  return { queued: queuedTasks, active: activeTasks, idle: queuedTasks === 0 && activeTasks === 0 };
+}
 
 /**
  * 入队一个后台 LLM 任务。FIFO 串行执行；限流时自动退避 5s 重试 1 次。
@@ -43,8 +49,15 @@ let tail: Promise<unknown> = Promise.resolve();
  * @returns 任务结果的 Promise；失败时 reject，调用方自己处理（一般 .catch 吞掉，不影响主流程）
  */
 export function enqueueLLMTask<T>(label: string, task: () => Promise<T>): Promise<T> {
+  queuedTasks += 1;
   const next = tail.then(async (): Promise<T> => {
-    return runWithRetry(label, task);
+    queuedTasks = Math.max(0, queuedTasks - 1);
+    activeTasks += 1;
+    try {
+      return await runWithRetry(label, task);
+    } finally {
+      activeTasks = Math.max(0, activeTasks - 1);
+    }
   });
   // tail 必须包住错误，否则一个失败的任务会让整条链断（后续任务永远不执行）
   tail = next.catch(() => {

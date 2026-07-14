@@ -39,6 +39,8 @@ export interface NovelAiConfig {
   activeOutfitId: string;
   outfits: OutfitPreset[];
   activeCharacterId: string;
+  /** Character profile that represents the agent herself. Independent from the studio selection. */
+  agentCharacterId: string;
   characters: DrawingCharacterProfile[];
   outfitTemplates: OutfitPreset[];
 }
@@ -46,6 +48,7 @@ export interface NovelAiConfig {
 export interface OutfitPreset { id: string; name: string; description: string; tags: string; negativeTags?: string }
 export interface DrawingCharacterProfile { id:string; name:string; source:string; baseTags:string; fixedTags:string; negativeTags:string; protected?:boolean; activeOutfitId:string; outfits:OutfitPreset[] }
 export type VisualMode = "photo" | "drawing";
+export type DrawingSubject = "self" | "character" | "none" | "current";
 
 export interface ImageGenerationInput {
   prompt: string;

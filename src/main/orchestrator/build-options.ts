@@ -146,6 +146,7 @@ export function buildChannelSystem(channel?: RelationshipChannel): string {
 export function buildMessageRhythmSystem(): string {
   return [
     "【图片分享方式】当绘图工具已经把图片显示在聊天中时，要像真人发照片一样自然、简短地邀请用户看看。除非用户明确追问技术细节，否则不要提及文件名、保存路径、图片 ID、提示词、模型参数、NovelAI、绘图工作台或工具调用。",
+    "【绘图身份】当画面主体是你自己、昔涟、Cyrene，或用户要求你的自拍/照片时，调用 generate_novelai_image 必须传 subject=self，由后端绑定你的完整角色档案。画其他已建档角色用 subject=character，原创人物或不绑定角色用 subject=none。不要仅在普通 prompt 中写你的名字来代替身份绑定；不确定角色、衣柜、参考素材或供应商能力时，先调用 inspect_drawing_context。",
     "【消息节奏】",
     "请根据当前人格、情绪和内容决定消息节奏。自然闲聊中，只有当语气确实像连续发送的两条消息时，才用空行分开。",
     "不要为了分段而分段；一个完整意思尽量放在一起。代码、列表、步骤、任务结果、严肃说明和长篇内容保持结构完整。",

@@ -175,13 +175,20 @@ export class JsonVectorStore {
   }
 
   private save(): void {
+    let temporaryPath: string | null = null;
     try {
       const dir = path.dirname(this.filePath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(this.filePath, JSON.stringify(this.entries, null, 2), "utf8");
+      temporaryPath = `${this.filePath}.${process.pid}.${Date.now()}.tmp`;
+      fs.writeFileSync(temporaryPath, JSON.stringify(this.entries, null, 2), "utf8");
+      fs.renameSync(temporaryPath, this.filePath);
       this.dirty = false;
     } catch (err) {
       console.warn("[RAG] failed to save vector store:", err);
+      if (temporaryPath) {
+        try { fs.unlinkSync(temporaryPath); } catch { /* best-effort cleanup */ }
+      }
+      throw err;
     }
   }
 
@@ -247,6 +254,58 @@ export class JsonVectorStore {
     };
 
     this.entries.push(entry);
+    this.dirty = true;
+    this.markIndexDirty();
+    this.save();
+    return entry;
+  }
+
+  /**
+   * Idempotent derived-index write. indexKey is the stable identity owned by
+   * SQLite; retries replace the same vector instead of appending duplicates.
+   */
+  async upsert(
+    indexKey: string,
+    text: string,
+    source: string,
+    provider: EmbeddingProvider,
+    metadata: Record<string, unknown> = {},
+  ): Promise<MemoryEntry> {
+    if (!indexKey.trim()) throw new Error("RAG upsert requires a stable indexKey");
+    const matches = this.entries.filter((entry) => (
+      entry.source === source && (
+        entry.metadata?.indexKey === indexKey ||
+        (
+          (typeof metadata.memoryV2Id === "string" || typeof metadata.l2Id === "string") &&
+          entry.metadata?.memoryV2 === true &&
+          (entry.metadata?.memoryV2Id ?? entry.metadata?.l2Id) === (metadata.memoryV2Id ?? metadata.l2Id) &&
+          (entry.metadata?.memoryLayer ?? "fragment") === (metadata.memoryLayer ?? "fragment")
+        )
+      )
+    ));
+    const existing = matches[0];
+    const embedding = await provider.embed(text);
+    const now = Date.now();
+    const entry: MemoryEntry = existing ?? {
+      id: `${source}_${indexKey.replace(/[^a-zA-Z0-9_-]/g, "_")}`,
+      text,
+      embedding,
+      source,
+      weight: 1,
+      createdAt: now,
+      lastRecalledAt: now,
+      metadata: {},
+    };
+    entry.text = text;
+    entry.embedding = embedding;
+    entry.source = source;
+    entry.metadata = { ...metadata, indexKey };
+    entry.lastRecalledAt = now;
+    if (!existing) this.entries.push(entry);
+    if (matches.length > 1) {
+      const duplicateIds = new Set(matches.slice(1).map((item) => item.id));
+      this.entries = this.entries.filter((item) => !duplicateIds.has(item.id));
+    }
     this.dirty = true;
     this.markIndexDirty();
     this.save();
@@ -375,6 +434,64 @@ export class JsonVectorStore {
     this.markIndexDirty();
     this.save();
     return before - this.entries.length;
+  }
+
+  deleteByIds(ids: Iterable<string>): number {
+    const targets = new Set(ids);
+    if (targets.size === 0) return 0;
+    const before = this.entries.length;
+    this.entries = this.entries.filter((entry) => !targets.has(entry.id));
+    const deleted = before - this.entries.length;
+    if (deleted > 0) {
+      this.dirty = true;
+      this.markIndexDirty();
+      this.save();
+    }
+    return deleted;
+  }
+
+  deleteByIndexKeys(indexKeys: Iterable<string>): number {
+    const targets = new Set(indexKeys);
+    if (targets.size === 0) return 0;
+    const before = this.entries.length;
+    this.entries = this.entries.filter((entry) => (
+      typeof entry.metadata?.indexKey !== "string" || !targets.has(entry.metadata.indexKey)
+    ));
+    const deleted = before - this.entries.length;
+    if (deleted > 0) {
+      this.dirty = true;
+      this.markIndexDirty();
+      this.save();
+    }
+    return deleted;
+  }
+
+  listEntries(source?: string): MemoryEntry[] {
+    return this.entries
+      .filter((entry) => !source || entry.source === source)
+      .map((entry) => ({
+        ...entry,
+        embedding: [...entry.embedding],
+        metadata: entry.metadata ? { ...entry.metadata } : undefined,
+      }));
+  }
+
+  deleteConversationHistory(sessionIds: Iterable<string>): number {
+    const targets = new Set(sessionIds);
+    if (targets.size === 0) return 0;
+    const before = this.entries.length;
+    this.entries = this.entries.filter((entry) => (
+      entry.source !== "chat_history" ||
+      typeof entry.metadata?.sessionId !== "string" ||
+      !targets.has(entry.metadata.sessionId)
+    ));
+    const deleted = before - this.entries.length;
+    if (deleted > 0) {
+      this.dirty = true;
+      this.markIndexDirty();
+      this.save();
+    }
+    return deleted;
   }
 
   // 删除导入文档

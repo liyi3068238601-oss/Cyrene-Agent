@@ -359,6 +359,21 @@ const memoryPanelApi = {
   deleteImportedDoc: (importId: string, fileName?: string) => ipcRenderer.invoke(IPC.MEMORY_PANEL_DELETE_IMPORTED_DOC, { importId, fileName }),
   saveL0: (patch: Record<string, unknown>) => ipcRenderer.invoke(IPC.MEMORY_PANEL_SAVE_L0, patch),
   saveL1: (patch: Record<string, unknown>) => ipcRenderer.invoke(IPC.MEMORY_PANEL_SAVE_L1, patch),
+  setEngine: (mode: "legacy" | "v2-shadow" | "v2") => ipcRenderer.invoke(IPC.MEMORY_PANEL_SET_ENGINE, mode),
+  backup: () => ipcRenderer.invoke(IPC.MEMORY_PANEL_BACKUP),
+  exportMemory: () => ipcRenderer.invoke(IPC.MEMORY_PANEL_EXPORT),
+  importMemory: () => ipcRenderer.invoke(IPC.MEMORY_PANEL_IMPORT),
+  editV2: (type: "core" | "state" | "fragment", id: string, patch: Record<string, unknown>) => ipcRenderer.invoke(IPC.MEMORY_PANEL_EDIT_V2, { type, id, patch }),
+  expireState: (id: string) => ipcRenderer.invoke(IPC.MEMORY_PANEL_EXPIRE_STATE, id),
+  restoreState: (id: string) => ipcRenderer.invoke(IPC.MEMORY_PANEL_RESTORE_STATE, id),
+  forgetFragment: (id: string) => ipcRenderer.invoke(IPC.MEMORY_PANEL_FORGET_FRAGMENT, id),
+  getDetail: (type: string, id: string) => ipcRenderer.invoke(IPC.MEMORY_PANEL_GET_DETAIL, { type, id }),
+  confirmPending: (id: string) => ipcRenderer.invoke(IPC.MEMORY_PANEL_CONFIRM_PENDING, id),
+  rejectPending: (id: string) => ipcRenderer.invoke(IPC.MEMORY_PANEL_REJECT_PENDING, id),
+  setPaused: (paused: boolean) => ipcRenderer.invoke(IPC.MEMORY_PANEL_SET_PAUSED, paused),
+  openSource: (type: string, id: string) => ipcRenderer.invoke(IPC.MEMORY_PANEL_OPEN_SOURCE, { type, id }),
+  mergeEntity: (sourceId: string, targetId: string) => ipcRenderer.invoke(IPC.MEMORY_PANEL_MERGE_ENTITY, { sourceId, targetId }),
+  mergeFragment: (sourceId: string, targetId: string) => ipcRenderer.invoke(IPC.MEMORY_PANEL_MERGE_FRAGMENT, { sourceId, targetId }),
 };
 
 contextBridge.exposeInMainWorld("user", userApi);

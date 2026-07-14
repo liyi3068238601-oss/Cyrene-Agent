@@ -439,86 +439,74 @@
         </form>
 
 
-                <section class="settings-panel is-hidden" id="memory-panel" data-panel="memory">
+        <section class="settings-panel is-hidden" id="memory-panel" data-panel="memory">
           <div class="panel-heading">
             <div class="panel-heading__icon">🧠</div>
             <div>
-              <h1>昔涟记忆</h1>
-              <p>昔涟对你的认知和记忆，你可以查看、编辑和管理。</p>
+              <h1>记忆中心</h1>
+              <p>全局记忆、时间线与证据记录</p>
             </div>
           </div>
-          <div class="panel-body">
-            <!-- L0 -->
-            <div class="memory-card">
-              <div class="memory-card__head">
-                <span>📌</span>
-                <div>
-                  <h2>长期画像</h2>
-                  <p>昔涟一直记得、基本不会变化的信息</p><p class="memory-card__hint">手动修改的内容优先级高于自动推断</p>
-                </div>
-                <span class="memory-card__badge">L0</span>
+          <div class="panel-body memory-center" id="memory-center-root">
+            <div class="memory-center__toolbar">
+              <div class="memory-engine-control">
+                <label for="memory-engine-mode">记忆引擎</label>
+                <select id="memory-engine-mode">
+                  <option value="v2">Memory v2</option>
+                  <option value="v2-shadow">影子验证</option>
+                  <option value="legacy">旧版兼容</option>
+                </select>
+                <span class="memory-health" id="memory-health">检查中</span>
               </div>
-              <div class="memory-fields">
-                <div class="memory-field"><label>称呼</label><input id="memory-l0-name" type="text" placeholder="未设置" disabled /></div>
-                <div class="memory-field"><label>职业 / 身份</label><input id="memory-l0-occupation" type="text" placeholder="未设置" disabled /></div>
-                <div class="memory-field"><label>长期兴趣</label><input id="memory-l0-interests" type="text" placeholder="未设置" disabled /></div>
-                <div class="memory-field"><label>常用语言</label><input id="memory-l0-language" type="text" placeholder="未设置" disabled /></div>
-                <div class="memory-field memory-field--full"><label>永久备注</label><textarea id="memory-l0-note" placeholder="未设置" rows="2" disabled></textarea></div>
+              <div class="memory-center__actions">
+                <button type="button" class="ghost-btn" id="memory-pause-btn">暂停全部</button>
+                <button type="button" class="ghost-btn" id="memory-refresh-btn" title="刷新">↻</button>
+                <button type="button" class="ghost-btn" id="memory-backup-btn">备份</button>
+                <button type="button" class="ghost-btn" id="memory-export-btn">导出</button>
+                <button type="button" class="ghost-btn" id="memory-import-btn">导入</button>
               </div>
-              <button type="button" class="ghost-btn" id="memory-l0-edit-btn" disabled>✏️ 编辑</button> <button type="button" class="ghost-btn is-hidden" id="memory-l0-cancel-btn">取消</button>
             </div>
-            <!-- L1 -->
-            <div class="memory-card">
-              <div class="memory-card__head">
-                <span>🌱</span>
-                <div>
-                  <h2>当前阶段</h2>
-                  <p>最近的目标、偏好和状态，会随时间变化</p><p class="memory-card__hint">手动修改的内容优先级高于自动推断</p>
-                </div>
-                <span class="memory-card__badge">L1</span>
-              </div>
-              <div class="memory-fields">
-                <div class="memory-field memory-field--full"><label>最近目标</label><textarea id="memory-l1-goals" placeholder="未设置" rows="2" disabled></textarea></div>
-                <div class="memory-field memory-field--full"><label>近期偏好</label><textarea id="memory-l1-preferences" placeholder="未设置" rows="2" disabled></textarea></div>
-                <div class="memory-field memory-field--full"><label>当前项目</label><textarea id="memory-l1-project" placeholder="未设置" rows="2" disabled></textarea></div>
-              </div>
-              <button type="button" class="ghost-btn" id="memory-l1-edit-btn" disabled>✏️ 编辑</button> <button type="button" class="ghost-btn is-hidden" id="memory-l1-cancel-btn">取消</button>
+
+            <div class="memory-tabs" role="tablist" aria-label="记忆视图">
+              <button type="button" class="memory-tab is-active" data-memory-tab="overview">概览</button>
+              <button type="button" class="memory-tab" data-memory-tab="entities">实体</button>
+              <button type="button" class="memory-tab" data-memory-tab="timeline">时间线</button>
+              <button type="button" class="memory-tab" data-memory-tab="pending">待确认 <span id="memory-pending-count"></span></button>
+              <button type="button" class="memory-tab" data-memory-tab="archive">归档</button>
+              <button type="button" class="memory-tab" data-memory-tab="system">系统</button>
             </div>
-            <!-- L2 -->
-            <div class="memory-card">
-              <div class="memory-card__head">
-                <span>📝</span>
-                <div>
-                  <h2>事件记忆</h2>
-                  <p>从聊天中提炼的重要事件，可搜索和管理</p>
+
+            <div class="memory-tab-panel" data-memory-view="overview">
+              <div class="memory-metrics" id="memory-overview-metrics"></div>
+              <section class="memory-section">
+                <div class="memory-section__heading"><h2>核心画像</h2><span>固定字段</span></div>
+                <div class="memory-core-grid" id="memory-core-grid"></div>
+              </section>
+              <section class="memory-section">
+                <div class="memory-section__heading"><h2>当前状态</h2><span>会随时间过期</span></div>
+                <div class="memory-stream" id="memory-state-list"></div>
+              </section>
+              <section class="memory-section">
+                <div class="memory-section__heading">
+                  <h2>记忆片段</h2>
+                  <input class="memory-inline-search" id="memory-v2-search" type="search" placeholder="搜索片段" />
                 </div>
-                <span class="memory-card__badge">L2</span>
-              </div>
-              <div class="memory-search"><input id="memory-l2-search" type="text" placeholder="搜索记忆..." /></div>
-              <div class="memory-list" id="memory-l2-list"><div class="memory-list__empty"><span>📭</span><p>暂无事件记忆</p><p class="memory-list__hint">聊天后昔涟会自动提炼重要信息</p></div></div>
+                <div class="memory-stream memory-stream--scroll" id="memory-fragment-list"></div>
+              </section>
             </div>
-            <!-- import -->
-            <div class="memory-card">
-              <div class="memory-card__head">
-                <span>📚</span>
-                <div>
-                  <h2>导入知识</h2>
-                  <p>用户上传的文档和知识库</p>
-                </div>
-              </div>
-              <div class="memory-list" id="memory-imported-list"><div class="memory-list__empty"><span>📭</span><p>暂无导入文档</p><p class="memory-list__hint">在聊天窗口上传文件后会自动索引</p></div></div>
-            </div>
-            <!-- reflection -->
-            <div class="memory-card">
-              <div class="memory-card__head">
-                <span>📖</span>
-                <div>
-                  <h2>阶段总结</h2>
-                  <p>AI 自动生成的阶段性回顾</p>
-                </div>
-              </div>
-              <div class="memory-list" id="memory-reflection-list"><div class="memory-list__empty"><span>📭</span><p>暂无阶段总结</p><p class="memory-list__hint">持续聊天后会自动生成</p></div></div>
-            </div>
+
+            <div class="memory-tab-panel is-hidden" data-memory-view="entities"><div class="memory-entity-grid" id="memory-entity-list"></div></div>
+            <div class="memory-tab-panel is-hidden" data-memory-view="timeline"><div class="memory-timeline" id="memory-timeline-list"></div></div>
+            <div class="memory-tab-panel is-hidden" data-memory-view="pending"><div class="memory-stream" id="memory-pending-list"></div></div>
+            <div class="memory-tab-panel is-hidden" data-memory-view="archive"><div class="memory-stream" id="memory-archive-list"></div></div>
+            <div class="memory-tab-panel is-hidden" data-memory-view="system"><div class="memory-system" id="memory-system-view"></div></div>
+
+            <section class="memory-section">
+              <div class="memory-section__heading"><h2>导入知识</h2><span>RAG 文档</span></div>
+              <div class="memory-list" id="memory-imported-list"></div>
+            </section>
+            <div class="is-hidden" id="memory-l2-list"></div>
+            <div class="is-hidden" id="memory-reflection-list"></div>
           </div>
         </section>
 

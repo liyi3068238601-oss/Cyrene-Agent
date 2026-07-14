@@ -22,6 +22,7 @@ const baseConfig: NovelAiConfig = {
   activeOutfitId: "default",
   outfits: [{ id: "default", name: "默认", description: "", tags: "white dress" }],
   activeCharacterId:"cyrene",
+  agentCharacterId:"cyrene",
   characters:[{id:"cyrene",name:"昔涟",source:"",baseTags:"pink hair",fixedTags:"purple eyes",negativeTags:"wrong hair",activeOutfitId:"default",outfits:[{id:"default",name:"默认",description:"",tags:"white dress"}]}],
   outfitTemplates:[],
 };

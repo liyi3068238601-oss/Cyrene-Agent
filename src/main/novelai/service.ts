@@ -4,9 +4,9 @@ import * as path from "path";
 import { IPC } from "../../shared/ipc-channels";
 import { toolRegistry } from "../orchestrator/tool-registry";
 import { getImageProvider, getProviderCapabilities, upscaleWithGateway } from "./providers";
-import { compileVisualPrompt, normalizeCharacters, normalizeOutfits } from "./prompt-profile";
+import { compileVisualPrompt, getAgentCharacter, normalizeCharacters, normalizeOutfits, resolveDrawingCharacterId } from "./prompt-profile";
 import { ImageTaskQueue, type ImageTask } from "./task-queue";
-import type { CharacterComposition, ImageProviderKind, NovelAiConfig, VisualMode } from "./types";
+import type { CharacterComposition, DrawingSubject, ImageProviderKind, NovelAiConfig, VisualMode } from "./types";
 export type { NovelAiConfig } from "./types";
 
 interface StoredConfig extends Omit<NovelAiConfig, "apiKey"> { encryptedApiKey?: string; apiKeyPlain?: string }
@@ -31,6 +31,7 @@ const defaults: NovelAiConfig = {
   activeOutfitId: "default",
   outfits: [{ id: "default", name: "默认服装", description: "昔涟的日常默认穿搭", tags: "white and purple dress, floral ornament" }],
   activeCharacterId:"cyrene",
+  agentCharacterId:"cyrene",
   characters:[{id:"cyrene",name:"昔涟",source:"崩坏：星穹铁道",baseTags:"1girl, Cyrene (Honkai: Star Rail), pink hair, long hair, purple eyes",fixedTags:"detailed eyes, gentle expression",negativeTags:"different character, wrong hair color, wrong eye color",protected:true,activeOutfitId:"default",outfits:[{id:"default",name:"默认服装",description:"昔涟的日常默认穿搭",tags:"white and purple dress, floral ornament"}]}],
   outfitTemplates:[],
 };
@@ -63,6 +64,8 @@ export function loadNovelAiConfig(): NovelAiConfig {
     if(!merged.characters.length)merged.characters=normalizeCharacters([{id:"cyrene",name:merged.characterName||"昔涟",source:"崩坏：星穹铁道",baseTags:merged.characterBaseTags,fixedTags:merged.characterFixedTags,negativeTags:merged.characterNegativeTags,protected:true,activeOutfitId:merged.activeOutfitId,outfits:merged.outfits}]);
     merged.activeCharacterId=String(stored.activeCharacterId||merged.characters[0]?.id||"__none__");
     if(merged.activeCharacterId!=="__none__"&&!merged.characters.some((item)=>item.id===merged.activeCharacterId))merged.activeCharacterId="__none__";
+    const requestedAgentId=String(stored.agentCharacterId||"").trim();
+    merged.agentCharacterId=merged.characters.find((item)=>item.id===requestedAgentId)?.id||merged.characters.find((item)=>item.protected)?.id||merged.characters.find((item)=>item.id==="cyrene")?.id||"__none__";
     merged.outfitTemplates=normalizeOutfits(stored.outfitTemplates);
     return merged;
   } catch { return { ...defaults }; }
@@ -89,6 +92,7 @@ export function saveNovelAiConfig(raw: Partial<NovelAiConfig>): NovelAiConfig {
     activeOutfitId: String(next.activeOutfitId || "").trim(),
     outfits: normalizeOutfits(next.outfits),
     activeCharacterId:String(next.activeCharacterId||"__none__"),
+    agentCharacterId:String(next.agentCharacterId||next.characters.find((item)=>item.protected)?.id||"cyrene"),
     characters:normalizeCharacters(next.characters),
     outfitTemplates:normalizeOutfits(next.outfitTemplates),
   };
@@ -111,6 +115,13 @@ async function performNovelAiImage(raw: Record<string, unknown>, isCancelled: ()
   const config = loadNovelAiConfig();
   const prompt = String(raw.prompt || "").trim();
   if (!prompt) throw new Error("请输入绘图提示词");
+  const subjectValue=String(raw.subject||"current");
+  const subject:DrawingSubject=["self","character","none","current"].includes(subjectValue)?subjectValue as DrawingSubject:"current";
+  const resolvedCharacterId=resolveDrawingCharacterId(config,subject,raw.characterId===undefined?undefined:String(raw.characterId));
+  if(subject==="self"&&!getAgentCharacter(config))throw new Error("尚未配置 Cyrene 的 Agent 本体角色档案");
+  if(subject==="character"&&(resolvedCharacterId==="__none__"||!config.characters.some((item)=>item.id===resolvedCharacterId))){
+    throw new Error(`未找到指定绘图角色。可用角色：${config.characters.map((item)=>`${item.name}(${item.id})`).join("、")||"无"}`);
+  }
   const width = Math.max(64, Math.min(1600, Number(raw.width) || 1024));
   const height = Math.max(64, Math.min(1600, Number(raw.height) || 1024));
   const negativePrompt = String(raw.negativePrompt || config.defaultNegativePrompt || "");
@@ -119,21 +130,33 @@ async function performNovelAiImage(raw: Record<string, unknown>, isCancelled: ()
   const provider = getImageProvider(config.providerMode);
   const characters:CharacterComposition[]=Array.isArray(raw.characters)?raw.characters.slice(0,6).flatMap((entry,index)=>{if(!entry||typeof entry!=="object")return[];const item=entry as Record<string,unknown>;const characterPrompt=String(item.prompt||"").trim();if(!characterPrompt)return[];const x=Number(item.x),y=Number(item.y);return[{id:String(item.id||`character-${index+1}`),name:String(item.name||`角色 ${index+1}`),prompt:characterPrompt,negativePrompt:String(item.negativePrompt||""),x:Math.max(0,Math.min(1,Number.isFinite(x)?x:0.5)),y:Math.max(0,Math.min(1,Number.isFinite(y)?y:0.5))}]}):[];
   const fallbackCharacters=!provider.capabilities.multiCharacter&&characters.length?`, ${characters.map((item)=>`${item.name}: ${item.prompt}, positioned at ${Math.round(item.x*100)}% from left and ${Math.round(item.y*100)}% from top`).join(", ")}`:"";
-  const compiled = compileVisualPrompt(config, prompt+fallbackCharacters, negativePrompt, mode, raw.outfitId===undefined?undefined:String(raw.outfitId),raw.characterId===undefined?undefined:String(raw.characterId));
-  const referenceImages = Array.isArray(raw.referenceImages) ? raw.referenceImages.flatMap((entry) => {
+  const compiled = compileVisualPrompt(config, prompt+fallbackCharacters, negativePrompt, mode, raw.outfitId===undefined?undefined:String(raw.outfitId),resolvedCharacterId);
+  const inlineReferenceImages = Array.isArray(raw.referenceImages) ? raw.referenceImages.flatMap((entry) => {
     if (!entry || typeof entry !== "object") return [];
     const item = entry as Record<string, unknown>;
     const image = String(item.image || "").replace(/^data:image\/[^;]+;base64,/, "");
     return image ? [{ image, strength: Math.max(0, Math.min(1, Number(item.strength) || 0.7)), informationExtracted: Math.max(0, Math.min(1, Number(item.informationExtracted) || 1)) }] : [];
   }) : [];
+  const requestedAssetIds=Array.isArray(raw.referenceAssetIds)?raw.referenceAssetIds.map((id)=>String(id||"").trim()).filter(Boolean).slice(0,4):[];
+  const assetMap=new Map(loadAssetCatalog().map((asset)=>[asset.id,asset]));
+  const missingAssetIds=requestedAssetIds.filter((id)=>!assetMap.has(id));
+  if(missingAssetIds.length)throw new Error(`未找到参考素材：${missingAssetIds.join("、")}。请先调用 inspect_drawing_context 获取可用素材。`);
+  const assetReferenceImages=requestedAssetIds.flatMap((id)=>{const asset=assetMap.get(id);if(!asset)return[];try{const image=fs.readFileSync(path.join(assetsDir(),path.basename(asset.file))).toString("base64");return[{image,strength:Math.max(0,Math.min(1,Number(raw.referenceStrength)||0.7)),informationExtracted:Math.max(0,Math.min(1,Number(raw.referenceInformationExtracted)||1))}]}catch{return[]}});
+  const referenceImages=[...inlineReferenceImages,...assetReferenceImages];
+  const referenceImage=String(raw.referenceImage||"").replace(/^data:image\/[^;]+;base64,/,"")||assetReferenceImages[0]?.image;
+  const referenceModeValue=String(raw.referenceMode||"none");
+  const referenceMode=["img2img","inpaint","outpaint","vibe","director-character","director-style","director-both"].includes(referenceModeValue)?referenceModeValue:"none";
+  const requiredCapability=referenceMode==="img2img"?provider.capabilities.img2img:["inpaint","outpaint"].includes(referenceMode)?provider.capabilities.inpaint:referenceMode==="vibe"?provider.capabilities.vibe:referenceMode.startsWith("director-")?provider.capabilities.directorReference:true;
+  if(!requiredCapability)throw new Error(`当前绘图供应商不支持 ${referenceMode} 参考模式。请调用 inspect_drawing_context 查看可用能力。`);
+  if(referenceMode!=="none"&&!referenceImage&&!referenceImages.length)throw new Error(`${referenceMode} 参考模式需要 referenceAssetIds。请先从素材库选择参考图片。`);
   const result = await provider.generate(config, {
     prompt: compiled.prompt, negativePrompt: compiled.negativePrompt, model, width, height,
     steps: Math.max(1, Math.min(50, Number(raw.steps) || 28)),
     scale: Math.max(0, Math.min(10, Number(raw.scale) || 5)),
     sampler: String(raw.sampler || "k_euler_ancestral"),
     seed: Number.isFinite(Number(raw.seed)) && String(raw.seed).trim() ? Number(raw.seed) : -1,
-    referenceMode: ["img2img", "inpaint", "outpaint", "vibe", "director-character", "director-style", "director-both"].includes(String(raw.referenceMode)) ? raw.referenceMode as any : "none",
-    referenceImage: String(raw.referenceImage || "").replace(/^data:image\/[^;]+;base64,/, "") || undefined,
+    referenceMode: referenceMode as any,
+    referenceImage: referenceImage || undefined,
     maskImage: String(raw.maskImage || "").replace(/^data:image\/[^;]+;base64,/, "") || undefined,
     referenceImages,
     referenceStrength: Math.max(0, Math.min(1, Number(raw.referenceStrength) || 0.7)),
@@ -147,11 +170,11 @@ async function performNovelAiImage(raw: Record<string, unknown>, isCancelled: ()
   const imagePath = path.join(outputDir(), `${id}.${ext}`);
   fs.writeFileSync(imagePath, result.bytes);
   const meta = {
-    id, prompt, compiledPrompt: compiled.prompt, negativePrompt: compiled.negativePrompt,
+    id, prompt, compiledPrompt: compiled.prompt, negativePrompt: compiled.negativePrompt, subject,
     model, providerMode: config.providerMode, mode,
     characterId:compiled.character?.id||null,characterName:compiled.character?.name||null,
     outfitId: compiled.outfit?.id || null, outfitName: compiled.outfit?.name || null,
-    referenceMode: String(raw.referenceMode || "none"),
+    referenceMode,
     referenceStrength: Number(raw.referenceStrength) || null,
     referenceInformationExtracted: Number(raw.referenceInformationExtracted) || null,
     characters,
@@ -223,10 +246,15 @@ async function upscaleImageById(rawId:unknown,rawScale:unknown):Promise<Record<s
 
 interface ImageAsset { id:string; name:string; file:string; mimeType:string; createdAt:string; category?:string; favorite?:boolean; dataUrl?:string }
 function assetMetaPath(id:string):string{return path.join(assetsDir(),`${id}.json`)}
-function loadAssets():ImageAsset[]{
+function loadAssetCatalog():ImageAsset[]{
   ensureDirs();
   return fs.readdirSync(assetsDir()).filter((file)=>file.endsWith(".json")).sort().reverse().flatMap((file)=>{
-    try{const meta=JSON.parse(fs.readFileSync(path.join(assetsDir(),file),"utf8")) as ImageAsset;const bytes=fs.readFileSync(path.join(assetsDir(),path.basename(meta.file)));return[{...meta,dataUrl:`data:${meta.mimeType};base64,${bytes.toString("base64")}`}]}catch{return[]}
+    try{return[JSON.parse(fs.readFileSync(path.join(assetsDir(),file),"utf8")) as ImageAsset]}catch{return[]}
+  });
+}
+function loadAssets():ImageAsset[]{
+  return loadAssetCatalog().flatMap((meta)=>{
+    try{const bytes=fs.readFileSync(path.join(assetsDir(),path.basename(meta.file)));return[{...meta,dataUrl:`data:${meta.mimeType};base64,${bytes.toString("base64")}`}]}catch{return[]}
   });
 }
 function deleteAsset(rawId:unknown):boolean{
@@ -284,24 +312,61 @@ export function registerNovelAiIpc(openWindow: () => void, minimizeWindow: () =>
 }
 
 toolRegistry.register({
+  id: "inspect_drawing_context",
+  name: "查看绘图上下文",
+  description: "读取当前绘图工作台可用的角色档案、各角色衣柜、参考素材和供应商能力。需要选择角色、服装、参考图，或不确定当前绘图能力时先调用；返回内容不包含 API Key 和图片数据。",
+  enabled: true,
+  inputSchema: { type: "object", properties: {} },
+  execute: async () => {
+    const config=loadNovelAiConfig();
+    const agentCharacter=getAgentCharacter(config);
+    const capabilities=getProviderCapabilities(config.providerMode);
+    const assets=loadAssetCatalog().slice(0,100).map(({dataUrl:_dataUrl,file:_file,...asset})=>asset);
+    return JSON.stringify({
+      identityRules:{
+        selfSubject:"画 Cyrene/昔涟本人、自拍、她自己的照片时必须使用 subject=self；角色身份标签会由后端完整注入，不要手写或改写。",
+        otherCharacter:"画其他角色时使用 subject=character 并提供 characterId；不要注入 Cyrene 标签。",
+        noProfile:"画原创人物或不绑定档案时使用 subject=none。",
+      },
+      agentCharacter:agentCharacter?{id:agentCharacter.id,name:agentCharacter.name,source:agentCharacter.source,outfits:agentCharacter.outfits.map((outfit)=>({id:outfit.id,name:outfit.name,description:outfit.description})),activeOutfitId:agentCharacter.activeOutfitId}:null,
+      studioSelection:config.activeCharacterId,
+      characters:config.characters.map((character)=>({id:character.id,name:character.name,source:character.source,isAgentSelf:character.id===agentCharacter?.id,activeOutfitId:character.activeOutfitId,outfits:character.outfits.map((outfit)=>({id:outfit.id,name:outfit.name,description:outfit.description}))})),
+      referenceAssets:assets.map((asset)=>({id:asset.id,name:asset.name,category:asset.category||"other",favorite:Boolean(asset.favorite)})),
+      provider:{kind:config.providerMode,model:config.model,capabilities},
+      limits:{count:[1,4],referenceAssets:4,width:[64,1600],height:[64,1600],steps:[1,50],scale:[0,10]},
+    },null,2);
+  },
+});
+
+toolRegistry.register({
   id: "generate_novelai_image",
   name: "AI 绘图",
-  description: "生成图片并直接作为聊天图片分享给用户。用户明确要求画图、生成插画、角色图或想看照片时使用。提示词应具体描述主体、构图、服装、表情、光线和画风；生成后用自然聊天口吻分享，不要向用户复述文件名、路径、图片 ID、模型参数或内部工作流。",
+  description: "生成图片并直接分享到聊天。必须明确 subject：画 Cyrene/昔涟本人、自拍或她自己的照片一律用 self，后端会强制注入完整本体角色标签；画档案中的其他角色用 character；原创人物或不绑定角色用 none。需要角色、衣柜、素材 ID 或能力信息时先调用 inspect_drawing_context。",
   enabled: true,
   risk: "network",
   inputSchema: {
     type: "object",
     properties: {
       prompt: { type: "string", description: "详细的英文 NovelAI 绘图提示词" },
+      subject:{type:"string",enum:["self","character","none","current"],description:"绘图主体语义。self=Cyrene/昔涟本人并强制绑定本体档案；character=指定其他角色；none=不注入固定角色；current=明确沿用工作台选择。"},
       negativePrompt: { type: "string", description: "可选的负面提示词" },
       width: { type: "number", description: "宽度，默认 1024" },
       height: { type: "number", description: "高度，默认 1024" },
-      characterId:{type:"string",description:"绘图角色档案 ID；传 __none__ 不注入角色，留空使用工作台当前选择。"},
+      model:{type:"string",description:"可选模型；留空使用工作台当前模型。"},
+      steps:{type:"number",description:"采样步数，1 到 50，默认 28。"},
+      scale:{type:"number",description:"提示词遵循强度，0 到 10，默认 5。"},
+      sampler:{type:"string",description:"采样器；留空使用 k_euler_ancestral。"},
+      seed:{type:"number",description:"可选随机种子；复现画面时使用。"},
+      characterId:{type:"string",description:"subject=character 时必填的角色档案 ID；subject=self 时会被忽略并强制使用 Agent 本体。"},
       outfitId: { type: "string", description: "可选服装预设 ID；留空使用当前选择，传 __none__ 则不注入服装。" },
       characters: { type: "array", description: "可选的多角色构图，坐标范围 0 到 1。", items: { type: "object", properties: { name:{type:"string"}, prompt:{type:"string"}, negativePrompt:{type:"string"}, x:{type:"number"}, y:{type:"number"} }, required:["prompt","x","y"] } },
+      referenceMode:{type:"string",enum:["none","img2img","vibe","director-character","director-style","director-both"],description:"参考素材用途。使用前通过 inspect_drawing_context 确认当前供应商支持。"},
+      referenceAssetIds:{type:"array",description:"素材库中的参考图片 ID，最多 4 个。",items:{type:"string"}},
+      referenceStrength:{type:"number",description:"参考强度，0 到 1，默认 0.7。"},
+      referenceInformationExtracted:{type:"number",description:"参考图信息提取量，0 到 1，默认 1。"},
       count: { type: "number", description: "生成变体数量，1 到 4，默认 1。" },
     },
-    required: ["prompt"],
+    required: ["prompt","subject"],
   },
   execute: async (args) => {
     const count=Math.max(1,Math.min(4,Number(args.count)||1));const results:Record<string,unknown>[]=[];
@@ -317,11 +382,12 @@ toolRegistry.register({
 toolRegistry.register({
   id: "change_visual_outfit",
   name: "切换绘图穿搭",
-  description: "切换后续绘图使用的角色服装预设，也可以传 __none__ 取消服装注入。",
+  description: "切换后续绘图使用的角色服装预设。给 Cyrene/昔涟本人换装时使用 subject=self，避免修改工作台当前选中的其他角色；不知道服装 ID 时先调用 inspect_drawing_context。",
   enabled: true,
   inputSchema: {
     type: "object",
     properties: {
+      subject:{type:"string",enum:["self","character","current"],description:"self=Cyrene/昔涟本人；character=指定角色；current=工作台当前角色。"},
       characterId:{type:"string",description:"角色档案 ID；留空使用当前绘图角色"},
       outfitId: { type: "string", description: "穿搭预设 ID" },
       outfitName: { type: "string", description: "不知道 ID 时可传穿搭名称" },
@@ -329,7 +395,9 @@ toolRegistry.register({
   },
   execute: async (args) => {
     const config = loadNovelAiConfig();
-    const characterId=String(args.characterId||config.activeCharacterId||"");
+    const subjectValue=String(args.subject||"current");
+    const subject:DrawingSubject=["self","character","current"].includes(subjectValue)?subjectValue as DrawingSubject:"current";
+    const characterId=resolveDrawingCharacterId(config,subject,args.characterId===undefined?undefined:String(args.characterId))||config.activeCharacterId;
     const character=config.characters.find((item)=>item.id===characterId);
     if(!character)return `[error] 当前没有可用绘图角色。请先选择角色；可用角色：${config.characters.map((item)=>`${item.name}(${item.id})`).join("、")||"无"}`;
     const id = String(args.outfitId || "").trim();

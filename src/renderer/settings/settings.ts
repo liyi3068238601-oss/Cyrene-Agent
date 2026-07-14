@@ -309,6 +309,112 @@ interface MemoryPanelPayload {
     body: string;
     meta: string;
   }>;
+  v2?: {
+    mode: "legacy" | "v2-shadow" | "v2";
+    initialized: boolean;
+    path?: string;
+    health?: { schemaVersion: number; integrity: string; foreignKeyViolations: number; path: string };
+    lastSyncAt?: number;
+    lastError?: string;
+  };
+  memoryV2?: {
+    core: Record<string, unknown> | null;
+    coreFacts: Array<Record<string, unknown>>;
+    states: Array<Record<string, unknown>>;
+    archivedStates: Array<Record<string, unknown>>;
+    fragments: Array<Record<string, unknown>>;
+    archivedFragments: Array<Record<string, unknown>>;
+    entities: Array<Record<string, unknown>>;
+    archivedRelations: Array<Record<string, unknown>>;
+    episodes: Array<Record<string, unknown>>;
+    sagas: Array<Record<string, unknown>>;
+    pending: Array<Record<string, unknown>>;
+    archives: Array<Record<string, unknown>>;
+    revisions: Array<Record<string, unknown>>;
+    system: {
+      paused: boolean;
+      counts: Record<string, number>;
+      jobs: Array<Record<string, unknown>>;
+      meta: Record<string, { value: unknown; updatedAt: unknown }>;
+      vector?: {
+        counts: Record<string, number>;
+        reconcile: Record<string, unknown> | null;
+      };
+      shadowRecall?: {
+        count: number;
+        averageOverlapRatio: number;
+        averageLegacyDurationMs: number;
+        averageV2DurationMs: number;
+        lastAt: number;
+      };
+      backgroundModel?: {
+        calls: number;
+        failed: number;
+        inputTokens: number;
+        outputTokens: number;
+        averageDurationMs: number;
+        failureRate: number;
+        lastAt: number;
+      };
+      databaseBytes?: number;
+      diagnostics?: {
+        noEvidence: number;
+        noEvidenceFragments: number;
+        noEvidenceStates: number;
+        noEvidenceRelations: number;
+        brokenSources: number;
+        mergeCycles: number;
+        expiredStates: number;
+      };
+    };
+  } | null;
+}
+
+let _cySelectOverlay: HTMLElement | null = null;
+function showSelectModal(options: {
+  title: string;
+  message: string;
+  choices: Array<{ value: string; label: string }>;
+  confirmText?: string;
+}): Promise<string | null> {
+  if (!_cySelectOverlay) {
+    _cySelectOverlay = document.createElement("div");
+    _cySelectOverlay.className = "cy-modal-overlay is-hidden";
+    _cySelectOverlay.innerHTML = [
+      '<div class="cy-modal" role="dialog" aria-modal="true" style="width:min(480px,90vw);">',
+      '  <div class="cy-modal__head"><h3 class="cy-modal__title" data-select-title></h3></div>',
+      '  <hr class="cy-modal__divider">',
+      '  <p class="cy-modal__body" data-select-message></p>',
+      '  <select data-select-field style="width:100%;height:40px;padding:0 10px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);background:var(--rb-bg-1);color:var(--rb-text-strong);margin-bottom:12px;"></select>',
+      '  <div class="cy-modal__actions"><button type="button" class="ghost-btn" data-select-cancel>取消</button><button type="button" class="btn-primary" data-select-confirm>合并</button></div>',
+      '</div>',
+    ].join("\n");
+    document.body.appendChild(_cySelectOverlay);
+  }
+  const overlay = _cySelectOverlay;
+  const title = overlay.querySelector<HTMLElement>("[data-select-title]");
+  const message = overlay.querySelector<HTMLElement>("[data-select-message]");
+  const select = overlay.querySelector<HTMLSelectElement>("[data-select-field]");
+  const cancel = overlay.querySelector<HTMLButtonElement>("[data-select-cancel]");
+  const confirm = overlay.querySelector<HTMLButtonElement>("[data-select-confirm]");
+  if (!title || !message || !select || !cancel || !confirm) return Promise.resolve(null);
+  title.textContent = options.title;
+  message.textContent = options.message;
+  select.innerHTML = options.choices.map((choice) => `<option value="${escapeHtml(choice.value)}">${escapeHtml(choice.label)}</option>`).join("");
+  confirm.textContent = options.confirmText || "合并";
+  overlay.classList.remove("is-hidden");
+  return new Promise((resolve) => {
+    const finish = (value: string | null) => {
+      overlay.classList.add("is-hidden");
+      cancel.removeEventListener("click", onCancel);
+      confirm.removeEventListener("click", onConfirm);
+      resolve(value);
+    };
+    const onCancel = () => finish(null);
+    const onConfirm = () => finish(select.value || null);
+    cancel.addEventListener("click", onCancel);
+    confirm.addEventListener("click", onConfirm);
+  });
 }
 
 interface MemoryPanelApi {
@@ -316,6 +422,26 @@ interface MemoryPanelApi {
   deleteImportedDoc: (importId: string, fileName?: string) => Promise<{ ok: boolean; deleted: number }>;
   saveL0: (patch: Record<string, unknown>) => Promise<{ ok: boolean }>;
   saveL1: (patch: Record<string, unknown>) => Promise<{ ok: boolean }>;
+  setEngine: (mode: "legacy" | "v2-shadow" | "v2") => Promise<{ ok: boolean }>;
+  backup: () => Promise<{ ok: boolean; backupPath?: string; error?: string }>;
+  exportMemory: () => Promise<{ ok: boolean; canceled?: boolean; filePath?: string; error?: string }>;
+  importMemory: () => Promise<{ ok: boolean; canceled?: boolean; filePath?: string; backupPath?: string; imported?: { importedRows: number; queuedVectorUpserts: number }; error?: string }>;
+  editV2: (type: "core" | "state" | "fragment", id: string, patch: Record<string, unknown>) => Promise<{ ok: boolean }>;
+  expireState: (id: string) => Promise<{ ok: boolean }>;
+  restoreState: (id: string) => Promise<{ ok: boolean }>;
+  forgetFragment: (id: string) => Promise<{ ok: boolean }>;
+  getDetail: (type: string, id: string) => Promise<{
+    sources: Array<Record<string, unknown>>;
+    revisions: Array<Record<string, unknown>>;
+    claim?: Record<string, unknown> | null;
+    dependencies?: Array<Record<string, unknown>> | Record<string, Array<Record<string, unknown>>>;
+  }>;
+  confirmPending: (id: string) => Promise<{ ok: boolean }>;
+  rejectPending: (id: string) => Promise<{ ok: boolean }>;
+  setPaused: (paused: boolean) => Promise<{ ok: boolean; paused: boolean }>;
+  openSource: (type: string, id: string) => Promise<{ ok: boolean; archived?: boolean }>;
+  mergeEntity: (sourceId: string, targetId: string) => Promise<{ ok: boolean }>;
+  mergeFragment: (sourceId: string, targetId: string) => Promise<{ ok: boolean }>;
 }
 
 interface SettingsApi {
@@ -2931,6 +3057,25 @@ const memoryL0EditBtn = document.getElementById("memory-l0-edit-btn") as HTMLBut
 const memoryL0CancelBtn = document.getElementById("memory-l0-cancel-btn") as HTMLButtonElement | null;
 const memoryL1EditBtn = document.getElementById("memory-l1-edit-btn") as HTMLButtonElement | null;
 const memoryL1CancelBtn = document.getElementById("memory-l1-cancel-btn") as HTMLButtonElement | null;
+const memoryCenterRoot = document.getElementById("memory-center-root") as HTMLElement | null;
+const memoryEngineMode = document.getElementById("memory-engine-mode") as HTMLSelectElement | null;
+const memoryHealth = document.getElementById("memory-health") as HTMLElement | null;
+const memoryOverviewMetrics = document.getElementById("memory-overview-metrics") as HTMLElement | null;
+const memoryCoreGrid = document.getElementById("memory-core-grid") as HTMLElement | null;
+const memoryStateList = document.getElementById("memory-state-list") as HTMLElement | null;
+const memoryFragmentList = document.getElementById("memory-fragment-list") as HTMLElement | null;
+const memoryEntityList = document.getElementById("memory-entity-list") as HTMLElement | null;
+const memoryTimelineList = document.getElementById("memory-timeline-list") as HTMLElement | null;
+const memoryPendingList = document.getElementById("memory-pending-list") as HTMLElement | null;
+const memoryArchiveList = document.getElementById("memory-archive-list") as HTMLElement | null;
+const memorySystemView = document.getElementById("memory-system-view") as HTMLElement | null;
+const memoryPendingCount = document.getElementById("memory-pending-count") as HTMLElement | null;
+const memoryV2Search = document.getElementById("memory-v2-search") as HTMLInputElement | null;
+const memoryRefreshBtn = document.getElementById("memory-refresh-btn") as HTMLButtonElement | null;
+const memoryBackupBtn = document.getElementById("memory-backup-btn") as HTMLButtonElement | null;
+const memoryExportBtn = document.getElementById("memory-export-btn") as HTMLButtonElement | null;
+const memoryImportBtn = document.getElementById("memory-import-btn") as HTMLButtonElement | null;
+const memoryPauseBtn = document.getElementById("memory-pause-btn") as HTMLButtonElement | null;
 
 let memoryPanelCache: MemoryPanelPayload | null = null;
 let l0Editing = false;
@@ -3035,11 +3180,486 @@ function renderL2List(query = ""): void {
   );
 }
 
+function memoryText(value: unknown): string {
+  return value === null || value === undefined ? "" : String(value);
+}
+
+function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const unit = Math.min(units.length - 1, Math.floor(Math.log(value) / Math.log(1024)));
+  const amount = value / 1024 ** unit;
+  return `${amount >= 10 || unit === 0 ? Math.round(amount) : amount.toFixed(1)} ${units[unit]}`;
+}
+
+function memoryEmpty(container: HTMLElement | null, text: string): void {
+  if (container) container.innerHTML = `<div class="memory-center-empty">${escapeHtml(text)}</div>`;
+}
+
+function renderMemoryV2(): void {
+  const payload = memoryPanelCache;
+  const data = payload?.memoryV2;
+  const bridge = payload?.v2;
+  if (memoryEngineMode && bridge?.mode) memoryEngineMode.value = bridge.mode;
+  if (memoryHealth) {
+    const healthy = bridge?.initialized && bridge.health?.integrity === "ok" && Number(bridge.health?.foreignKeyViolations ?? 0) === 0;
+    memoryHealth.textContent = healthy ? `正常 · schema ${bridge?.health?.schemaVersion ?? "-"}` : bridge?.lastError || "未就绪";
+    memoryHealth.classList.toggle("is-error", !healthy);
+  }
+  if (!data) {
+    memoryEmpty(memoryCoreGrid, "Memory v2 尚未初始化");
+    return;
+  }
+
+  const counts = data.system.counts;
+  if (memoryPauseBtn) {
+    memoryPauseBtn.textContent = data.system.paused ? "恢复全部" : "暂停全部";
+    memoryPauseBtn.classList.toggle("is-active", data.system.paused);
+    memoryPauseBtn.dataset.paused = data.system.paused ? "1" : "0";
+  }
+  if (memoryOverviewMetrics) {
+    memoryOverviewMetrics.innerHTML = [
+      ["片段", counts.fragments ?? 0],
+      ["实体", counts.entities ?? 0],
+      ["情节", counts.episodes ?? 0],
+      ["待确认", counts.pending ?? 0],
+    ].map(([label, value]) => `<div class="memory-metric"><strong>${value}</strong><span>${label}</span></div>`).join("");
+  }
+  if (memoryPendingCount) memoryPendingCount.textContent = counts.pending ? String(counts.pending) : "";
+
+  const core = data.core ?? {};
+  const coreFields = [
+    ["preferredName", "preferred_name", "称呼"],
+    ["occupation", "occupation", "职业 / 身份"],
+    ["longTermInterests", "long_term_interests", "长期兴趣"],
+    ["language", "language", "常用语言"],
+    ["permanentNote", "permanent_note", "永久备注"],
+  ];
+  if (memoryCoreGrid) {
+    const fixedFields = coreFields.map(([field, column, label]) => [
+      '<label class="memory-core-field">',
+      `  <span>${label}</span>`,
+      `  <input type="text" value="${escapeHtml(memoryText(core[column]))}" data-memory-edit="core" data-memory-id="1" data-memory-field="${field}" placeholder="未设置" />`,
+      '</label>',
+    ].join("\n")).join("");
+    const extraFacts = data.coreFacts.filter((row) => row.status === "active").map((row) => [
+      '<label class="memory-core-field">',
+      `  <span>${escapeHtml(`${memoryText(row.namespace)}.${memoryText(row.key)}`)}</span>`,
+      `  <input type="text" value="${escapeHtml(memoryText(row.value))}" data-memory-edit="core" data-memory-id="${escapeHtml(memoryText(row.id))}" placeholder="未设置" />`,
+      '</label>',
+    ].join("\n")).join("");
+    memoryCoreGrid.innerHTML = fixedFields + extraFacts;
+  }
+
+  if (memoryStateList) {
+    if (data.states.length === 0) memoryEmpty(memoryStateList, "暂无当前状态");
+    else memoryStateList.innerHTML = data.states.map((row) => {
+      const id = escapeHtml(memoryText(row.id));
+      const expires = row.expires_at ? `到期 ${formatDateTime(Number(row.expires_at))}` : "长期有效";
+      return [
+        '<article class="memory-v2-record">',
+        '  <div class="memory-v2-record__main">',
+        `    <textarea data-memory-edit="state" data-memory-id="${id}" rows="2">${escapeHtml(memoryText(row.content))}</textarea>`,
+        `    <p>${escapeHtml(memoryText(row.state_type))} · ${escapeHtml(expires)} · 可信度 ${Math.round(Number(row.confidence ?? 0) * 100)}%</p>`,
+        '  </div>',
+        '  <div class="memory-v2-record__actions">',
+        `    <button type="button" data-memory-action="pin-state" data-id="${id}" data-pinned="${Number(row.pinned ?? 0)}" title="置顶">${Number(row.pinned ?? 0) ? "★" : "☆"}</button>`,
+        `    <button type="button" data-memory-action="detail-state" data-id="${id}" title="查看来源">⌕</button>`,
+        `    <button type="button" data-memory-action="open-state" data-id="${id}" title="打开来源会话">↗</button>`,
+        `    <button type="button" data-memory-action="expire-state" data-id="${id}" title="结束状态">✓</button>`,
+        '  </div>',
+        '</article>',
+      ].join("\n");
+    }).join("");
+  }
+  renderMemoryFragments();
+
+  if (memoryEntityList) {
+    if (data.entities.length === 0) memoryEmpty(memoryEntityList, "暂无实体");
+    else memoryEntityList.innerHTML = data.entities.map((row) => {
+      const id = memoryText(row.id);
+      const sameType = data.entities.filter((candidate) => (
+        memoryText(candidate.id) !== id && memoryText(candidate.entity_type) === memoryText(row.entity_type)
+      ));
+      const mergeControl = sameType.length > 0 ? [
+        '<div class="memory-entity__merge">',
+        `  <select aria-label="将 ${escapeHtml(memoryText(row.canonical_name))} 合并到">`,
+        '    <option value="">选择规范实体</option>',
+        ...sameType.map((candidate) => `    <option value="${escapeHtml(memoryText(candidate.id))}">${escapeHtml(memoryText(candidate.canonical_name))}</option>`),
+        '  </select>',
+        `  <button type="button" class="memory-text-btn" data-memory-action="merge-entity" data-id="${escapeHtml(id)}">合并</button>`,
+        '</div>',
+      ].join("\n") : "";
+      return [
+        '<article class="memory-entity">',
+        `  <strong>${escapeHtml(memoryText(row.canonical_name))}</strong>`,
+        `  <span>${escapeHtml(memoryText(row.entity_type))} · ${Number(row.fragment_count ?? 0)} 条关联</span>`,
+        `  <p>${escapeHtml(memoryText(row.overview) || "尚无概述")}</p>`,
+        `  <button type="button" class="memory-text-btn" data-memory-action="detail-entity" data-id="${escapeHtml(id)}">查看关联记忆</button>`,
+        mergeControl,
+        '</article>',
+      ].join("\n");
+    }).join("");
+  }
+
+  if (memoryTimelineList) {
+    const sagas = data.sagas.map((row) => ({ ...row, timelineType: "saga" }));
+    const episodes = data.episodes.map((row) => ({ ...row, timelineType: "episode" }));
+    const timeline = [...sagas, ...episodes].sort((a, b) => Number(b.updated_at ?? 0) - Number(a.updated_at ?? 0));
+    if (timeline.length === 0) memoryEmpty(memoryTimelineList, "持续相处后会形成情节与篇章");
+    else memoryTimelineList.innerHTML = timeline.map((row) => {
+      const isSaga = row.timelineType === "saga";
+      const id = escapeHtml(memoryText(row.id));
+      return [
+        `<article class="memory-timeline-item ${isSaga ? "is-saga" : ""}">`,
+        `  <span class="memory-timeline-item__dot"></span>`,
+        '  <div>',
+        `    <p class="memory-timeline-item__type">${isSaga ? "篇章" : "情节"} · v${Number(row.version ?? 1)}</p>`,
+        `    <h3>${escapeHtml(memoryText(isSaga ? row.theme : row.title))}</h3>`,
+        `    <p>${escapeHtml(memoryText(row.content))}</p>`,
+        `    <button type="button" class="memory-text-btn" data-memory-action="detail-${isSaga ? "saga" : "episode"}" data-id="${id}">${isSaga ? "查看关联情节" : "查看来源"}</button>`,
+        !isSaga ? `    <button type="button" class="memory-text-btn" data-memory-action="open-episode" data-id="${id}">打开来源会话</button>` : "",
+        '  </div>',
+        '</article>',
+      ].join("\n");
+    }).join("");
+  }
+
+  if (memoryPendingList) {
+    if (data.pending.length === 0) memoryEmpty(memoryPendingList, "没有需要确认的记忆");
+    else memoryPendingList.innerHTML = data.pending.map((row) => {
+      const id = escapeHtml(memoryText(row.id));
+      const reason = row.conflictWith ? "与已有记忆冲突" : row.sourceType === "screen" ? "来自屏幕观察" : "可信度不足";
+      return [
+        '<article class="memory-v2-record memory-v2-record--pending">',
+        '  <div class="memory-v2-record__main">',
+        `    <strong>${escapeHtml(memoryText(row.content))}</strong>`,
+        `    <p>${reason} · 可信度 ${Math.round(Number(row.confidence ?? 0) * 100)}%</p>`,
+        '  </div>',
+        '  <div class="memory-v2-record__actions">',
+        `    <button type="button" data-memory-action="confirm-pending" data-id="${id}" title="确认">✓</button>`,
+        `    <button type="button" data-memory-action="reject-pending" data-id="${id}" title="拒绝">×</button>`,
+        '  </div>',
+        '</article>',
+      ].join("\n");
+    }).join("");
+  }
+
+  if (memoryArchiveList) {
+    const fragmentRows = data.archivedFragments ?? [];
+    const stateRows = data.archivedStates ?? [];
+    const relationRows = data.archivedRelations ?? [];
+    if (data.archives.length === 0 && fragmentRows.length === 0 && stateRows.length === 0 && relationRows.length === 0) memoryEmpty(memoryArchiveList, "暂无归档或生命周期记录");
+    else memoryArchiveList.innerHTML = [
+      ...stateRows.map((row) => [
+        '<article class="memory-v2-record">',
+        '  <div class="memory-v2-record__main">',
+        `    <strong>${escapeHtml(memoryText(row.content))}</strong>`,
+        `    <p>历史状态 · ${escapeHtml(memoryText(row.status))} · 更新于 ${formatDateTime(Number(row.updated_at ?? 0))}</p>`,
+        '  </div>',
+        '  <div class="memory-v2-record__actions">',
+        `    <button type="button" data-memory-action="detail-state" data-id="${escapeHtml(memoryText(row.id))}" title="查看证据与修订">⌕</button>`,
+        `    <button type="button" data-memory-action="restore-state" data-id="${escapeHtml(memoryText(row.id))}" title="恢复并固定">↺</button>`,
+        '  </div>',
+        '</article>',
+      ].join("\n")),
+      ...relationRows.map((row) => [
+        '<article class="memory-v2-record">',
+        '  <div class="memory-v2-record__main">',
+        `    <strong>${escapeHtml(`${memoryText(row.source_name)} ${memoryText(row.relation_type)} ${memoryText(row.target_name)}`)}</strong>`,
+        `    <p>历史关系 · ${escapeHtml(memoryText(row.status))} · 更新于 ${formatDateTime(Number(row.updated_at ?? 0))}</p>`,
+        '  </div>',
+        `  <div class="memory-v2-record__actions"><button type="button" data-memory-action="detail-relation" data-id="${escapeHtml(memoryText(row.id))}" title="查看证据与修订">⌕</button></div>`,
+        '</article>',
+      ].join("\n")),
+      ...fragmentRows.map((row) => [
+        '<article class="memory-v2-record">',
+        '  <div class="memory-v2-record__main">',
+        `    <strong>${escapeHtml(memoryText(row.content) || "内容已遗忘")}</strong>`,
+        `    <p>记忆片段 · ${escapeHtml(memoryText(row.status))} · 更新于 ${formatDateTime(Number(row.updated_at ?? 0))}</p>`,
+        '  </div>',
+        `  <div class="memory-v2-record__actions"><button type="button" data-memory-action="detail-fragment" data-id="${escapeHtml(memoryText(row.id))}" title="查看证据与修订">⌕</button></div>`,
+        '</article>',
+      ].join("\n")),
+      ...data.archives.map((row) => [
+      '<article class="memory-v2-record">',
+      '  <div class="memory-v2-record__main">',
+      `    <strong>${escapeHtml(memoryText(row.topic_summary) || "已删除的分支会话")}</strong>`,
+      `    <p>${Number(row.message_count ?? 0)} 条消息 · ${escapeHtml(memoryText(row.archive_status))} · 删除于 ${formatDateTime(Number(row.deleted_at ?? 0))}</p>`,
+      '  </div>',
+      '</article>',
+      ].join("\n")),
+    ].join("");
+  }
+
+  if (memorySystemView) {
+    const jobs = data.system.jobs;
+    const meta = data.system.meta;
+    const vector = data.system.vector;
+    const vectorCounts = vector?.counts ?? {};
+    const vectorReconcile = vector?.reconcile ?? {};
+    const shadow = data.system.shadowRecall;
+    const diagnostics = data.system.diagnostics;
+    const background = data.system.backgroundModel;
+    const statusRows = [
+      ["数据库", bridge?.health?.integrity === "ok" ? "完整" : bridge?.health?.integrity || "未知"],
+      ["数据库占用", formatBytes(Number(data.system.databaseBytes ?? 0))],
+      ["外键检查", `${bridge?.health?.foreignKeyViolations ?? 0} 个异常`],
+      ["待处理消息", String(counts.pendingScribe ?? 0)],
+      ["Scribe", formatDateTime(Number(meta["scribe.lastAt"]?.value ?? 0))],
+      ["轻量归档", formatDateTime(Number(meta["archivist.lastLightAt"]?.value ?? 0))],
+      ["深度归档", formatDateTime(Number(meta["archivist.lastDeepAt"]?.value ?? 0))],
+      ["向量已同步", String(vectorCounts.synced ?? 0)],
+      ["向量待处理", String((vectorCounts.pending ?? 0) + (vectorCounts.stale ?? 0) + (vectorCounts.error ?? 0))],
+      ["孤立 / 陈旧索引", `${Number(vectorReconcile.orphanEntries ?? 0)} / ${Number(vectorReconcile.staleEntries ?? 0)}`],
+      ["最近向量对账", formatDateTime(Number(meta["archivist.lastVectorReconcileAt"]?.value ?? 0))],
+      ["影子召回样本", String(shadow?.count ?? 0)],
+      ["影子召回重合率", shadow?.count ? `${Math.round(Number(shadow.averageOverlapRatio) * 100)}%` : "暂无"],
+      ["旧版 / v2 平均延迟", shadow?.count ? `${Math.round(Number(shadow.averageLegacyDurationMs))} / ${Math.round(Number(shadow.averageV2DurationMs))} ms` : "暂无"],
+      ["后台模型调用", String(background?.calls ?? 0)],
+      ["后台模型 Token", `${Number(background?.inputTokens ?? 0)} / ${Number(background?.outputTokens ?? 0)}`],
+      ["后台模型失败率", background?.calls ? `${Math.round(Number(background.failureRate) * 100)}%` : "暂无"],
+      ["后台模型平均耗时", background?.calls ? `${Math.round(Number(background.averageDurationMs))} ms` : "暂无"],
+      ["无证据记忆", String(diagnostics?.noEvidence ?? 0)],
+      ["断裂来源", String(diagnostics?.brokenSources ?? 0)],
+      ["循环合并", String(diagnostics?.mergeCycles ?? 0)],
+      ["待处理过期状态", String(diagnostics?.expiredStates ?? 0)],
+    ];
+    memorySystemView.innerHTML = [
+      '<section class="memory-system-block"><h2>运行状态</h2>',
+      ...statusRows.map(([label, value]) => `<div><span>${escapeHtml(String(label))}</span><strong>${escapeHtml(String(value))}</strong></div>`),
+      '</section>',
+      '<section class="memory-system-block"><h2>后台队列</h2>',
+      jobs.length ? jobs.map((job) => `<div><span>${escapeHtml(memoryText(job.job_type))}</span><strong class="${job.status === "failed" ? "is-error" : ""}">${escapeHtml(memoryText(job.status))}${job.last_error ? ` · ${escapeHtml(memoryText(job.last_error))}` : ""}</strong></div>`).join("") : '<div><span>队列</span><strong>空闲</strong></div>',
+      '</section>',
+    ].join("");
+  }
+}
+
+function renderMemoryFragments(): void {
+  if (!memoryFragmentList) return;
+  const rows = memoryPanelCache?.memoryV2?.fragments ?? [];
+  const query = memoryV2Search?.value.trim().toLowerCase() ?? "";
+  const filtered = query ? rows.filter((row) => [row.content, row.kind, row.entities].some((value) => memoryText(value).toLowerCase().includes(query))) : rows;
+  if (filtered.length === 0) {
+    memoryEmpty(memoryFragmentList, query ? "没有匹配的记忆" : "暂无记忆片段");
+    return;
+  }
+  memoryFragmentList.innerHTML = filtered.map((row) => {
+    const id = escapeHtml(memoryText(row.id));
+    return [
+      '<article class="memory-v2-record">',
+      '  <div class="memory-v2-record__main">',
+      `    <textarea data-memory-edit="fragment" data-memory-id="${id}" rows="2">${escapeHtml(memoryText(row.content))}</textarea>`,
+      `    <p>${escapeHtml(memoryText(row.kind))} · ${escapeHtml(memoryText(row.status))}${row.entities ? ` · ${escapeHtml(memoryText(row.entities))}` : ""}</p>`,
+      '  </div>',
+      '  <div class="memory-v2-record__actions">',
+      `    <button type="button" data-memory-action="pin-fragment" data-id="${id}" data-pinned="${Number(row.pinned ?? 0)}" title="置顶">${Number(row.pinned ?? 0) ? "★" : "☆"}</button>`,
+      `    <button type="button" data-memory-action="detail-fragment" data-id="${id}" title="查看来源">⌕</button>`,
+      `    <button type="button" data-memory-action="open-fragment" data-id="${id}" title="打开来源会话">↗</button>`,
+      `    <button type="button" data-memory-action="merge-fragment" data-id="${id}" title="合并到另一条同类记忆">⇉</button>`,
+      `    <button type="button" data-memory-action="forget-fragment" data-id="${id}" title="遗忘">⌫</button>`,
+      '  </div>',
+      '</article>',
+    ].join("\n");
+  }).join("");
+}
+
+document.querySelectorAll<HTMLElement>("[data-memory-tab]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const tab = button.dataset.memoryTab;
+    document.querySelectorAll<HTMLElement>("[data-memory-tab]").forEach((item) => item.classList.toggle("is-active", item === button));
+    document.querySelectorAll<HTMLElement>("[data-memory-view]").forEach((view) => view.classList.toggle("is-hidden", view.dataset.memoryView !== tab));
+  });
+});
+
+memoryV2Search?.addEventListener("input", renderMemoryFragments);
+memoryRefreshBtn?.addEventListener("click", () => void loadMemoryPanel());
+memoryPauseBtn?.addEventListener("click", async () => {
+  await window.memoryPanel?.setPaused(memoryPauseBtn.dataset.paused !== "1");
+  await loadMemoryPanel();
+});
+memoryEngineMode?.addEventListener("change", async () => {
+  const mode = memoryEngineMode.value as "legacy" | "v2-shadow" | "v2";
+  await window.memoryPanel?.setEngine(mode);
+  await loadMemoryPanel();
+});
+memoryBackupBtn?.addEventListener("click", async () => {
+  const result = await window.memoryPanel?.backup();
+  await showModal({
+    title: result?.ok ? "备份完成" : "备份失败",
+    message: result?.ok ? `已保存到：\n${result.backupPath ?? ""}` : result?.error || "Memory v2 尚未初始化",
+    confirmText: "知道了",
+  });
+});
+memoryExportBtn?.addEventListener("click", async () => {
+  const result = await window.memoryPanel?.exportMemory();
+  if (result?.canceled) return;
+  await showModal({
+    title: result?.ok ? "导出完成" : "导出失败",
+    message: result?.ok ? `结构化记忆已保存到：\n${result.filePath ?? ""}` : result?.error || "无法导出记忆。",
+    confirmText: "知道了",
+  });
+});
+memoryImportBtn?.addEventListener("click", async () => {
+  const confirmed = await showModal({
+    title: "导入并替换当前记忆",
+    message: "导入会替换当前结构化记忆，并在操作前自动创建 SQLite 备份。完整聊天记录和应用配置不会被导入文件改动。",
+    confirmText: "选择文件",
+    cancelText: "取消",
+  });
+  if (!confirmed) return;
+  const result = await window.memoryPanel?.importMemory();
+  if (result?.canceled) return;
+  await showModal({
+    title: result?.ok ? "导入完成" : "导入失败",
+    message: result?.ok
+      ? `已恢复 ${result.imported?.importedRows ?? 0} 条结构化记录，并安排 ${result.imported?.queuedVectorUpserts ?? 0} 条索引重建任务。\n操作前备份：${result.backupPath ?? "未生成"}`
+      : result?.error || "文件无效或导入未完成。",
+    confirmText: "知道了",
+  });
+  if (result?.ok) await loadMemoryPanel();
+});
+
+memoryCenterRoot?.addEventListener("change", async (event) => {
+  const target = event.target as HTMLInputElement | HTMLTextAreaElement | null;
+  const type = target?.dataset.memoryEdit as "core" | "state" | "fragment" | undefined;
+  const id = target?.dataset.memoryId;
+  if (!type || !id) return;
+  const patch = type === "core" ? { field: target.dataset.memoryField, value: target.value } : { content: target.value };
+  const result = await window.memoryPanel?.editV2(type, id, patch);
+  if (!result?.ok) await showModal({ title: "保存失败", message: "这条记忆未能更新。", confirmText: "知道了" });
+  await loadMemoryPanel();
+});
+
+memoryCenterRoot?.addEventListener("click", async (event) => {
+  const button = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-memory-action]");
+  if (!button) return;
+  const action = button.dataset.memoryAction || "";
+  const id = button.dataset.id || "";
+  if (!id) return;
+  if (action === "pin-state" || action === "pin-fragment") {
+    const type = action.endsWith("state") ? "state" : "fragment";
+    await window.memoryPanel?.editV2(type, id, { pinned: button.dataset.pinned !== "1" });
+    await loadMemoryPanel();
+    return;
+  }
+  if (action === "expire-state") {
+    await window.memoryPanel?.expireState(id);
+    await loadMemoryPanel();
+    return;
+  }
+  if (action === "restore-state") {
+    await window.memoryPanel?.restoreState(id);
+    await loadMemoryPanel();
+    return;
+  }
+  if (action === "forget-fragment") {
+    const confirmed = await showModal({ title: "遗忘这条记忆", message: "内容与原始引文会被清除，只保留不可逆校验记录。", confirmText: "遗忘", cancelText: "取消" });
+    if (confirmed) {
+      await window.memoryPanel?.forgetFragment(id);
+      await loadMemoryPanel();
+    }
+    return;
+  }
+  if (action === "confirm-pending" || action === "reject-pending") {
+    if (action === "confirm-pending") await window.memoryPanel?.confirmPending(id);
+    else await window.memoryPanel?.rejectPending(id);
+    await loadMemoryPanel();
+    return;
+  }
+  if (action === "merge-entity") {
+    const targetId = button.closest(".memory-entity")?.querySelector<HTMLSelectElement>(".memory-entity__merge select")?.value ?? "";
+    if (!targetId) {
+      await showModal({ title: "请选择规范实体", message: "选择要保留的实体后再合并。", confirmText: "知道了" });
+      return;
+    }
+    const sourceName = button.closest(".memory-entity")?.querySelector("strong")?.textContent?.trim() || "这个实体";
+    const targetName = memoryPanelCache?.memoryV2?.entities.find((row) => memoryText(row.id) === targetId)?.canonical_name;
+    const confirmed = await showModal({
+      title: "合并实体",
+      message: `会将“${sourceName}”的别名、记忆关联和关系迁移到“${memoryText(targetName)}”。此操作会保留修订记录。`,
+      confirmText: "合并",
+      cancelText: "取消",
+    });
+    if (!confirmed) return;
+    const result = await window.memoryPanel?.mergeEntity(id, targetId);
+    if (!result?.ok) await showModal({ title: "合并失败", message: "实体类型不一致、已被合并或会形成循环。", confirmText: "知道了" });
+    await loadMemoryPanel();
+    return;
+  }
+  if (action === "merge-fragment") {
+    const source = memoryPanelCache?.memoryV2?.fragments.find((row) => memoryText(row.id) === id);
+    const choices = (memoryPanelCache?.memoryV2?.fragments ?? [])
+      .filter((row) => memoryText(row.id) !== id && memoryText(row.kind) === memoryText(source?.kind))
+      .map((row) => ({ value: memoryText(row.id), label: memoryText(row.content).slice(0, 100) }));
+    if (choices.length === 0) {
+      await showModal({ title: "没有可合并项", message: "当前没有其他同类型记忆。", confirmText: "知道了" });
+      return;
+    }
+    const targetId = await showSelectModal({
+      title: "合并记忆片段",
+      message: "目标正文会保留，当前记忆的来源、实体和派生依赖会迁移过去。",
+      choices,
+    });
+    if (!targetId) return;
+    const result = await window.memoryPanel?.mergeFragment(id, targetId);
+    if (!result?.ok) await showModal({ title: "合并失败", message: "两条记忆类型不同、已经失效或目标不存在。", confirmText: "知道了" });
+    await loadMemoryPanel();
+    return;
+  }
+  if (action.startsWith("open-")) {
+    const result = await window.memoryPanel?.openSource(action.slice("open-".length), id);
+    if (!result?.ok) await showModal({ title: "来源不可直接打开", message: result?.archived ? "原会话已进入压缩归档，可在来源记录中查看保留的引文。" : "没有找到可打开的来源会话。", confirmText: "知道了" });
+    return;
+  }
+  if (action.startsWith("detail-")) {
+    const type = action.slice("detail-".length);
+    const detail = await window.memoryPanel?.getDetail(type, id);
+    const sources = detail?.sources ?? [];
+    const revisions = detail?.revisions ?? [];
+    const claim = detail?.claim;
+    const dependencies = detail?.dependencies;
+    const sourceText = sources.slice(0, 8).map((source) => {
+      const contextBefore = memoryText(source.context_before);
+      const quote = memoryText(source.quote) || "来源内容已清除";
+      const contextAfter = memoryText(source.context_after);
+      const context = [
+        contextBefore ? `前文：${contextBefore}` : "",
+        `原文：${quote}`,
+        contextAfter ? `后文：${contextAfter}` : "",
+      ].filter(Boolean).join("\n");
+      return `• ${formatDateTime(Number(source.occurred_at ?? 0))}\n${context}`;
+    }).join("\n\n");
+    const revisionText = revisions.slice(0, 8).map((item) => `• ${formatDateTime(Number(item.created_at ?? 0))}  ${memoryText(item.action)} · ${memoryText(item.reason)}`).join("\n");
+    const claimText = claim
+      ? `${memoryText(claim.canonical_text)}\n状态：${memoryText(claim.status)} · 版本 ${memoryText(claim.revision)} · 可信度 ${Math.round(Number(claim.confidence ?? 0) * 100)}%`
+      : "暂无统一命题";
+    const groups = Array.isArray(dependencies)
+      ? [["支撑 / 派生记录", dependencies] as const]
+      : Object.entries(dependencies ?? {});
+    const dependencyText = groups.flatMap(([label, rows]) => [
+      `${label}：`,
+      ...rows.slice(0, 8).map((row) => {
+        const title = memoryText(row.content) || memoryText(row.title) || memoryText(row.theme) || [row.source_name, row.relation_type, row.target_name].map(memoryText).filter(Boolean).join(" ") || memoryText(row.id);
+        const version = row.fragment_revision ? ` · 证据版本 ${memoryText(row.fragment_revision)}` : "";
+        return `• ${title}${version}`;
+      }),
+    ]).join("\n");
+    await showModal({
+      title: "记忆依据与修订",
+      message: `统一命题\n${claimText}\n\n证据与关联\n${dependencyText || "暂无派生关联"}\n\n来源摘录\n${sourceText || "暂无直接来源"}\n\n修订记录\n${revisionText || "暂无修订"}`,
+      confirmText: "关闭",
+    });
+  }
+});
+
 async function loadMemoryPanel(): Promise<void> {
   try {
     const payload = await window.memoryPanel?.getData();
     if (!payload) return;
     memoryPanelCache = payload;
+    renderMemoryV2();
 
     if (memoryL0NameInput) memoryL0NameInput.value = payload.l0.preferredName || "";
     if (memoryL0OccupationInput) memoryL0OccupationInput.value = payload.l0.occupation || "";
@@ -3822,8 +4442,8 @@ async function deleteChatSession(session: ChatSessionMetaUI): Promise<void> {
   if(session.isMain)return;
   const isActive = session.id === chatSessionsActiveId;
   const prompt = isActive
-    ? `「${session.title || "新对话"}」正在聊天窗口里打开，确定删除？\n删除后聊天窗口会跳到最新一条会话或自动新建。`
-    : `确定删除「${session.title || "新对话"}」？\n删除后无法恢复。`;
+    ? `「${session.title || "新对话"}」正在聊天窗口里打开，确定删除？\n删除后会立即从列表移除，聊天窗口将切换到其他会话；相关聊天与记忆保留 30 天后自动清理。`
+    : `确定删除「${session.title || "新对话"}」？\n会话会立即从列表移除，相关聊天与记忆保留 30 天后自动清理。`;
   if (!window.confirm(prompt)) return;
   try {
     await window.chatStore?.delete(session.id);

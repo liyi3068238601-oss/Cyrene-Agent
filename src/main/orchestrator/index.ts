@@ -4,7 +4,10 @@
 import { updateWorldbookActivation, getPermanentWorldbookEntries, getActiveWorldbookEntries, getCascadeWorldbookEntries, searchMemory, searchMemoryEntries, INJECTION_HEADER, INJECTION_PREAMBLE } from "../rag";
 import { memoryStore } from "../memory/memory-store";
 import { entityGraph } from "../memory/entity-graph";
-import { recordRecentMemorySearchEntries } from "../memory/recent-injected-memory";
+import { recordRecentMemoryInjection, recordRecentMemorySearchEntries } from "../memory/recent-injected-memory";
+import { getMemoryEngineMode, getMemoryV2Database } from "../memory-v2/bridge";
+import { recallMemoryV2 } from "../memory-v2/librarian";
+import { recordShadowRecallComparison } from "../memory-v2/shadow-recall";
 import { toolRegistry } from "./tool-registry";
 
 export { ToolCallResult } from "./types";
@@ -24,13 +27,37 @@ export async function buildMemoryInjection(
   options: { sessionId?: string; includeAllSessions?: boolean } = {},
 ): Promise<string> {
   const parts: string[] = [];
+  let v2MemoryUsed = false;
+  const memoryMode = getMemoryEngineMode();
+  const memoryV2Db = getMemoryV2Database();
 
   try {
+    if (memoryV2Db && memoryMode === "v2") {
+      const vectorHits = await searchMemoryEntries(userInput, "user_memory", 24, { recordRecall: false });
+      const recalled = await recallMemoryV2(memoryV2Db, userInput, {
+        currentConversationId: options.sessionId,
+        vectorHits,
+        maxItems: 8,
+      });
+      if (recalled.items.length > 0) {
+        parts.push(recalled.context);
+        recordRecentMemoryInjection(
+          recalled.items.filter((item) => item.layer === "fragment").map((item) => item.id),
+        );
+        v2MemoryUsed = true;
+      }
+    }
+  } catch (err) {
+    console.warn("[Orchestrator] Memory v2 hybrid search failed, falling back to legacy:", err);
+  }
+
+  if (!v2MemoryUsed) try {
     // 检索 top-3 L2 用户记忆
+    const legacyStartedAt = Date.now();
     const candidates = await searchMemoryEntries(
       userInput,
       "user_memory",
-      options.includeAllSessions ? 20 : 40,
+      40,
       { recordRecall: false },
     );
     const allL2 = await memoryStore.getAllL2();
@@ -40,11 +67,10 @@ export async function buildMemoryInjection(
         const l2Id = entry.metadata?.l2Id;
         const l2 = typeof l2Id === "string" ? l2ById.get(l2Id) : undefined;
         if (l2 && l2.status !== "active" && l2.status !== "aging") return false;
-        if (options.includeAllSessions) return true;
-        const sourceSessionId = entry.metadata?.sessionId;
-        return typeof sourceSessionId !== "string" || sourceSessionId === options.sessionId;
+        return true;
       })
       .slice(0, 5);
+    const legacyDurationMs = Math.max(0, Date.now() - legacyStartedAt);
     if (userMemoryEntries.length > 0) {
       for (const entry of userMemoryEntries) {
         const l2Id = entry.metadata?.l2Id;
@@ -61,6 +87,27 @@ export async function buildMemoryInjection(
         return `· ${m}`;
       });
       parts.push("【相关记忆】\n" + conflictAnnotated.join("\n"));
+    }
+    if (memoryV2Db && memoryMode === "v2-shadow") {
+      try {
+        const shadow = await recallMemoryV2(memoryV2Db, userInput, {
+          currentConversationId: options.sessionId,
+          vectorHits: candidates.slice(0, 24),
+          maxItems: 8,
+          recordAccess: false,
+          logMode: "shadow",
+        });
+        recordShadowRecallComparison(memoryV2Db, {
+          query: userInput,
+          legacyIds: userMemoryEntries
+            .map((entry) => entry.metadata?.l2Id)
+            .filter((id): id is string => typeof id === "string"),
+          v2: shadow,
+          legacyDurationMs,
+        });
+      } catch (error) {
+        console.warn("[Orchestrator] Memory v2 shadow recall failed without affecting legacy injection:", error);
+      }
     }
   } catch (err) {
     console.warn("[Orchestrator] user_memory search failed:", err);
@@ -132,8 +179,25 @@ export async function buildAlwaysOnContext(
 
   // ── L0/L1 画像 — 永远跑 ──────────────────────────────
   try {
-    const l0 = await memoryStore.getL0();
-    const l1 = await memoryStore.getL1();
+    const v2Db = getMemoryV2Database();
+    if (v2Db && getMemoryEngineMode() === "v2") {
+      const profile = v2Db.prepare("SELECT * FROM core_profile WHERE id = 1").get();
+      const facts = v2Db.prepare("SELECT namespace, key, value FROM core_facts WHERE status = 'active' ORDER BY pinned DESC, updated_at DESC LIMIT 6").all();
+      const states = v2Db.prepare("SELECT content FROM memory_states WHERE status = 'active' ORDER BY pinned DESC, importance DESC, updated_at DESC LIMIT 4").all();
+      const profileLines = profile ? [
+        profile.preferred_name && `称呼：${String(profile.preferred_name)}`,
+        profile.occupation && `职业：${String(profile.occupation)}`,
+        profile.long_term_interests && `长期兴趣：${String(profile.long_term_interests)}`,
+        profile.language && `常用语言：${String(profile.language)}`,
+        profile.permanent_note && `备注：${String(profile.permanent_note)}`,
+      ].filter(Boolean).map(String) : [];
+      const factLines = facts.map((fact) => `${String(fact.namespace)}.${String(fact.key)}：${String(fact.value)}`);
+      const stateLines = states.map((state) => String(state.content));
+      if (profileLines.length > 0 || factLines.length > 0) parts.push("[用户画像]\n" + [...profileLines, ...factLines].join("\n"));
+      if (stateLines.length > 0) parts.push("[当前状态]\n" + stateLines.join("\n"));
+    } else {
+      const l0 = await memoryStore.getL0();
+      const l1 = await memoryStore.getL1();
 
     const l0Lines = [
       l0.preferredName && `称呼：${l0.preferredName}`,
@@ -149,15 +213,16 @@ export async function buildAlwaysOnContext(
       l1.currentProject && `当前项目：${l1.currentProject}`,
     ].filter(Boolean);
 
-    if (l0Lines.length > 0 || l1Lines.length > 0) {
-      let memoryContext = "";
-      if (l0Lines.length > 0) {
-        memoryContext += `[用户画像]\n${l0Lines.join("\n")}\n\n`;
+      if (l0Lines.length > 0 || l1Lines.length > 0) {
+        let memoryContext = "";
+        if (l0Lines.length > 0) {
+          memoryContext += `[用户画像]\n${l0Lines.join("\n")}\n\n`;
+        }
+        if (l1Lines.length > 0) {
+          memoryContext += `[近期状态]\n${l1Lines.join("\n")}\n\n`;
+        }
+        parts.push(memoryContext.trim());
       }
-      if (l1Lines.length > 0) {
-        memoryContext += `[近期状态]\n${l1Lines.join("\n")}\n\n`;
-      }
-      parts.push(memoryContext.trim());
     }
   } catch (err) {
     console.warn("[Orchestrator] memory load failed:", err);

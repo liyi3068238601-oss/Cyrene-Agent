@@ -290,6 +290,21 @@ export function getRAGStats() {
   return store?.stats ?? { total: 0, sources: {} };
 }
 
+export async function upsertMemoryIndex(
+  indexKey: string,
+  text: string,
+  source = "user_memory",
+  metadata?: Record<string, unknown>,
+): Promise<string> {
+  if (!store || !provider) throw new Error("RAG not initialized");
+  const entry = await store.upsert(indexKey, text, source, provider, metadata);
+  return entry.id;
+}
+
+export function isRAGInitialized(): boolean {
+  return store !== null;
+}
+
 /**
  * 获取指定 source 的所有向量条目（含 embedding），用于记忆压缩 / 聚类。
  * 返回浅拷贝，调用方不应修改返回的 embedding。
@@ -304,4 +319,36 @@ export function getEntriesBySource(source: string): Array<{ id: string; text: st
 export function deleteImportedDoc(importId: string, fileName?: string): number {
   if (!store) throw new Error("RAG not initialized");
   return store.deleteImportedDoc(importId, fileName);
+}
+
+export function deleteMemoryEntries(ids: Iterable<string>): number {
+  if (!store) return 0;
+  return store.deleteByIds(ids);
+}
+
+export function deleteMemoryIndexEntries(indexKeys: Iterable<string>): number {
+  if (!store) return 0;
+  return store.deleteByIndexKeys(indexKeys);
+}
+
+export function listMemoryIndexEntries(source = "user_memory"): Array<{
+  id: string
+  text: string
+  source: string
+  createdAt: number
+  metadata?: Record<string, unknown>
+}> {
+  if (!store) return [];
+  return store.listEntries(source).map((entry) => ({
+    id: entry.id,
+    text: entry.text,
+    source: entry.source,
+    createdAt: entry.createdAt,
+    metadata: entry.metadata,
+  }));
+}
+
+export function deleteConversationHistoryEntries(sessionIds: Iterable<string>): number {
+  if (!store) return 0;
+  return store.deleteConversationHistory(sessionIds);
 }

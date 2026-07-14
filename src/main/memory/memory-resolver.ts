@@ -1,6 +1,8 @@
 import { getAdapterForConfig } from "../orchestrator/vendors"
 import type { ChatMessage, VendorConfig } from "../orchestrator/vendors"
 import { recordUsage } from "../token-usage-store"
+import { getMemoryV2Database } from "../memory-v2/bridge"
+import { isMemoryBackgroundBudgetAvailable, recordMemoryBackgroundCall } from "../memory-v2/background-metrics"
 import { addMemory } from "../rag/index"
 import { appendMemoryTrace } from "./memory-trace"
 import { memoryStore } from "./memory-store"
@@ -213,7 +215,15 @@ export async function callResolverLLM(
   messages: Array<{ role: "system" | "user"; content: string }>,
   maxTokens = 700,
 ): Promise<string> {
-  if (!settings.apiKey) throw new Error("missing api key")
+  const startedAt = Date.now()
+  let inputTokens = 0
+  let outputTokens = 0
+  const metricsDb = getMemoryV2Database()
+  if (!isMemoryBackgroundBudgetAvailable(metricsDb)) throw new Error("memory_background_daily_budget_exhausted")
+  if (!settings.apiKey) {
+    recordMemoryBackgroundCall(metricsDb, { kind: "resolver", durationMs: Date.now() - startedAt, failed: true })
+    throw new Error("missing api key")
+  }
   const cfg: VendorConfig = {
     provider: settings.provider,
     baseUrl: settings.baseUrl,
@@ -228,16 +238,26 @@ export async function callResolverLLM(
     maxTokens,
     stream: false,
   }, cfg)
-  const response = await fetch(http.url, {
-    method: "POST",
-    headers: http.headers,
-    body: http.body,
-  })
-  if (!response.ok) throw new Error(`resolver request failed: HTTP ${response.status}`)
-  const data = await response.json()
-  const parsed = adapter.parseResponse(data)
-  if (parsed.usage) recordUsage(parsed.usage.input, parsed.usage.output, 1)
-  return parsed.text ?? ""
+  try {
+    const response = await fetch(http.url, {
+      method: "POST",
+      headers: http.headers,
+      body: http.body,
+    })
+    if (!response.ok) throw new Error(`resolver request failed: HTTP ${response.status}`)
+    const data = await response.json()
+    const parsed = adapter.parseResponse(data)
+    if (parsed.usage) {
+      recordUsage(parsed.usage.input, parsed.usage.output, 1)
+      inputTokens = parsed.usage.input
+      outputTokens = parsed.usage.output
+    }
+    recordMemoryBackgroundCall(metricsDb, { kind: "resolver", durationMs: Date.now() - startedAt, inputTokens, outputTokens })
+    return parsed.text ?? ""
+  } catch (error) {
+    recordMemoryBackgroundCall(metricsDb, { kind: "resolver", durationMs: Date.now() - startedAt, inputTokens, outputTokens, failed: true })
+    throw error
+  }
 }
 
 export async function resolvePayload(

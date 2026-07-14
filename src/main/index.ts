@@ -6,7 +6,7 @@ import { createHash } from "crypto";
 import { pathToFileURL } from "url";
 import { IPC } from "../shared/ipc-channels";
 import { STATUS_KEYWORDS } from "./status-keywords";
-import { initRAG, buildMemoryContext, addMemory, importDocument, switchEmbeddingModel, deleteImportedDoc } from "./rag";
+import { initRAG, buildMemoryContext, addMemory, importDocument, switchEmbeddingModel, deleteImportedDoc, deleteMemoryEntries } from "./rag";
 import { getEmbeddingProvider, getSceneEmbeddingProvider } from "./rag/embedding";
 import { ingestPaths } from "./rag/file-ingest";
 import { buildAlwaysOnContext, buildMemoryInjection, runFunctionCallingLoop, scheduleMemoryWrite } from "./orchestrator";
@@ -44,6 +44,28 @@ import { normalizeWindowVisibilitySettings } from "./window-visibility-settings"
 import type { StickerConfigItem } from "../shared/sticker-types";
 import { initReranker, getRerankerInstallStatus } from "./rag/reranker";
 import { memoryStore } from "./memory/memory-store"
+import {
+  archiveConversationToMemoryV2,
+  backupMemoryV2,
+  closeMemoryV2,
+  confirmPendingMemoryItem,
+  enqueueMemoryScribeTurn,
+  getMemoryEngineMode,
+  getMemoryV2BridgeStatus,
+  getMemoryV2Database,
+  initializeMemoryV2,
+  rejectPendingMemoryItem,
+  setMemoryEngineMode,
+  type MemoryEngineMode,
+} from "./memory-v2/bridge"
+import { editMemoryCenterItem, expireMemoryState, forgetMemoryFragment, loadMemoryCenterData, loadMemoryItemDetail, restoreMemoryState } from "./memory-v2/memory-center"
+import { createMemoryExport, replaceMemoryFromExport } from "./memory-v2/memory-portability"
+import { mergeMemoryEntities } from "./memory-v2/entity-merge"
+import { mergeMemoryFragments } from "./memory-v2/fragment-merge"
+import { isMemoryAutomationPaused, setMemoryAutomationPaused } from "./memory-v2/memory-runtime"
+import { recallMemoryV2 } from "./memory-v2/librarian"
+import { memoryV2ArchivistScheduler } from "./memory-v2/archivist-scheduler"
+import { syncPendingCompressedMemories } from "./memory/memory-compressor";
 import type { L0Profile, L1Profile } from "./memory/memory-types";
 import { registerChatsIpc } from "./chats/chats-ipc";
 import { recordUsage, getUsage, flush as flushTokenUsage } from "./token-usage-store";
@@ -54,8 +76,8 @@ import { synthesize as mimoSynthesize } from "./tts/mimo-engine";
 import { synthesizeByEngine } from "./tts/tts-dispatcher";
 import { startOpener, stopOpener, setLive2dWindow, reloadManifest, handleBubbleClick, handleChatWindowOpened, testFire } from "./opener/opener-runner";
 import { startProactiveChat, stopProactiveChat } from "./proactive-chat";
-import { MAIN_SESSION_ID, appendMessage as appendChatMessage, getSession as getChatSession } from "./chats/chats-store";
-import { registerAgUiIpc, type AguiRunInput } from "./agui-bridge";
+import { MAIN_SESSION_ID, appendMessage as appendChatMessage, getSession as getChatSession, setDeletedSessionArchiver } from "./chats/chats-store";
+import { hasActiveAgUiRuns, registerAgUiIpc, type AguiRunInput } from "./agui-bridge";
 import { setWeatherConfig, setSearchConfig, loadTodos, onTodosChange, setDelegateSettings } from "./orchestrator/built-in-tools";
 import { setScreenObservationVisionConfigGetter } from "./orchestrator/screen-observation-register";
 import { registerRecallHistoryTool } from "./orchestrator/history-tools";
@@ -658,6 +680,24 @@ interface ImportedDocItem {
   lastImportedAt: number;
 }
 
+function getMemoryEngineSettingsPath(): string {
+  return path.join(app.getPath("userData"), "memory-engine.json");
+}
+
+function loadMemoryEngineMode(): MemoryEngineMode {
+  try {
+    const raw = JSON.parse(fs.readFileSync(getMemoryEngineSettingsPath(), "utf8")) as { mode?: unknown };
+    if (raw.mode === "legacy" || raw.mode === "v2-shadow" || raw.mode === "v2") return raw.mode;
+  } catch { /* first run or invalid settings */ }
+  return "v2";
+}
+
+function persistMemoryEngineMode(mode: MemoryEngineMode): void {
+  const filePath = getMemoryEngineSettingsPath();
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify({ mode, updatedAt: Date.now() }, null, 2), "utf8");
+}
+
 async function loadMemoryPanelData() {
   const [l0, l1, l2] = await Promise.all([
     memoryStore.getL0(),
@@ -704,12 +744,15 @@ async function loadMemoryPanelData() {
     console.warn("[settings] load imported docs failed:", error);
   }
 
+  const v2Db = getMemoryV2Database();
   return {
     l0,
     l1,
     l2: l2.sort((a, b) => b.createdAt - a.createdAt),
     importedDocs,
     reflections: [] as MemoryPanelItem[],
+    v2: getMemoryV2BridgeStatus(),
+    memoryV2: v2Db ? loadMemoryCenterData(v2Db) : null,
   };
 }
 
@@ -2583,19 +2626,41 @@ function flushPetWindowMove(): void {
   }
 }
 
-async function generateProactiveChatMessage():Promise<void>{
-  const settings=loadModelSettings();if(!settings.apiKey)return;
-  const session=getChatSession(MAIN_SESSION_ID);if(!session)return;
+async function generateProactiveChatMessage():Promise<boolean>{
+  const settings=loadModelSettings();if(!settings.apiKey||hasActiveAgUiRuns())return false;
+  const session=getChatSession(MAIN_SESSION_ID);if(!session)return false;
+  const lastMessage=session.messages[session.messages.length-1];
+  if(lastMessage?.role==="model"&&lastMessage.id?.startsWith("proactive-"))return false;
   const recent=session.messages.slice(-12).map((message)=>({role:message.role==="model"?"assistant" as const:"user" as const,content:message.content}));
   const now=new Date(),idleSec=powerMonitor.getSystemIdleTime();
   const recentScreen=loadGeneralSettings().screenObservationEnabled?buildRecentScreenObservationContext():"";
-  const stateText=`当前时间：${now.toLocaleString("zh-CN")}；系统空闲：${Math.round(idleSec/60)} 分钟；当前状态：${runtimeState.status}；当前心情：${runtimeState.feeling}；距离主会话上次更新：${Math.max(0,Math.round((Date.now()-session.updatedAt)/60_000))} 分钟。${recentScreen?`\n${recentScreen}`:""}`;
-  const system=buildSystemPrompt("talk")+"\n\n你正在决定是否主动找用户聊一句。请结合当前状态和最近对话，自然发起一条简短消息。保持昔涟人设，1到3句话，不要提及系统、空闲检测、定时器或这段指令，不要声称执行了任何任务，不调用工具。如果最近话题适合延续就轻轻接续，否则自然关心或分享一句。只输出要发送的消息。";
+  let memoryContext="";
+  const memoryDb=getMemoryV2Database();
+  if(memoryDb&&getMemoryEngineMode()==="v2"){try{memoryContext=(await recallMemoryV2(memoryDb,"现在正在进行的计划、最近共同经历和适合自然关心的话题",{currentConversationId:MAIN_SESSION_ID,maxItems:6,purpose:"proactive",logMode:"proactive"})).context}catch(error){console.warn("[ProactiveChat] Memory v2 召回失败",error)}}
+  const stateText=`当前时间：${now.toLocaleString("zh-CN")}；系统空闲：${Math.round(idleSec/60)} 分钟；当前状态：${runtimeState.status}；当前心情：${runtimeState.feeling}；距离主会话上次更新：${Math.max(0,Math.round((Date.now()-session.updatedAt)/60_000))} 分钟。${recentScreen?`\n${recentScreen}`:""}${memoryContext?`\n${memoryContext}`:""}`;
+  const system=buildSystemPrompt("talk")+"\n\n你正在决定是否主动找用户聊一句。请结合当前状态、相关记忆和最近对话，自然发起一条简短消息。保持昔涟人设，1到3句话，不要提及系统、数据库、记忆标签、空闲检测、定时器或这段指令，不要逐字复述内部状态，不要声称执行了任何任务，不调用工具。只有“可引用”记忆可以自然确认；“谨慎引用”要表达为模糊印象；“仅供联想”只能帮助选话题，不能声称为事实。如果没有足够自然的话题，输出 [SKIP]。只输出要发送的消息。";
   const reply=(await enqueueLLMTask("主会话主动消息",()=>callChatCompletions(settings,[{role:"system",content:system},...recent,{role:"user",content:`[内部状态，仅用于决定主动开场]\n${stateText}`}],0.8,90_000,"主动聊天"))).trim();
-  if(!reply)return;
+  if(!reply||reply==="[SKIP]")return false;
   const message={id:`proactive-${Date.now()}`,role:"model" as const,content:reply,at:Date.now()};appendChatMessage(MAIN_SESSION_ID,message);
+  enqueueMemoryScribeTurn("",reply,MAIN_SESSION_ID);
   if(chatWindow&&!chatWindow.isDestroyed()&&activeChatSessionId===MAIN_SESSION_ID){chatWindow.webContents.send(IPC.CHAT_PROACTIVE_MESSAGE,{sessionId:MAIN_SESSION_ID,message});chatWindow.show();}
   else createChatWindow(MAIN_SESSION_ID);
+  return true;
+}
+
+function startConfiguredProactiveChat(): void {
+  startProactiveChat(
+    () => {
+      const settings = loadGeneralSettings();
+      return {
+        enabled: settings.proactiveChatEnabled && !isMemoryAutomationPaused(),
+        idleMinutes: settings.proactiveChatIdleMinutes,
+        cooldownMinutes: settings.proactiveChatCooldownMinutes,
+      };
+    },
+    () => getChatSession(MAIN_SESSION_ID)?.updatedAt ?? Date.now(),
+    generateProactiveChatMessage,
+  );
 }
 
 function createScreenFingerprint(capture: ScreenCapture): Uint8Array {
@@ -3156,6 +3221,114 @@ ipcMain.handle(IPC.MEMORY_PANEL_SAVE_L1, async (_event, raw: Record<string, unkn
   await memoryStore.updateL1(patch);
   return { ok: true };
 });
+ipcMain.handle(IPC.MEMORY_PANEL_SET_ENGINE, (_event, rawMode: unknown) => {
+  if (rawMode !== "legacy" && rawMode !== "v2-shadow" && rawMode !== "v2") {
+    return { ok: false, error: "invalid_memory_engine_mode" };
+  }
+  persistMemoryEngineMode(rawMode);
+  return { ok: true, status: setMemoryEngineMode(rawMode) };
+});
+ipcMain.handle(IPC.MEMORY_PANEL_BACKUP, () => {
+  try {
+    const backupPath = backupMemoryV2();
+    return backupPath ? { ok: true, backupPath } : { ok: false, error: "memory_v2_not_initialized" };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+ipcMain.handle(IPC.MEMORY_PANEL_EXPORT, async () => {
+  const db = getMemoryV2Database();
+  if (!db) return { ok: false, error: "memory_v2_not_initialized" };
+  try {
+    const result = await dialog.showSaveDialog({
+      title: "导出 Cyrene 记忆",
+      defaultPath: path.join(app.getPath("documents"), `cyrene-memory-${new Date().toISOString().slice(0, 10)}.json`),
+      filters: [{ name: "Cyrene Memory v2", extensions: ["json"] }],
+    });
+    if (result.canceled || !result.filePath) return { ok: false, canceled: true };
+    const payload = createMemoryExport(db);
+    fs.writeFileSync(result.filePath, JSON.stringify(payload, null, 2), "utf8");
+    return { ok: true, filePath: result.filePath };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+ipcMain.handle(IPC.MEMORY_PANEL_IMPORT, async () => {
+  const db = getMemoryV2Database();
+  if (!db) return { ok: false, error: "memory_v2_not_initialized" };
+  try {
+    const picked = await dialog.showOpenDialog({
+      title: "导入 Cyrene 记忆",
+      properties: ["openFile"],
+      filters: [{ name: "Cyrene Memory v2", extensions: ["json"] }],
+    });
+    if (picked.canceled || picked.filePaths.length === 0) return { ok: false, canceled: true };
+    const filePath = picked.filePaths[0];
+    const stats = fs.statSync(filePath);
+    if (stats.size > 100 * 1024 * 1024) return { ok: false, error: "memory_export_too_large" };
+    const payload = JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown;
+    const backupPath = db.backup();
+    const imported = replaceMemoryFromExport(db, payload);
+    return { ok: true, filePath, backupPath, imported };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+ipcMain.handle(IPC.MEMORY_PANEL_EDIT_V2, (_event, payload: { type?: unknown; id?: unknown; patch?: unknown }) => {
+  const db = getMemoryV2Database();
+  if (!db || (payload.type !== "core" && payload.type !== "state" && payload.type !== "fragment") || typeof payload.id !== "string" || !payload.patch || typeof payload.patch !== "object") return { ok: false };
+  return { ok: editMemoryCenterItem(db, payload.type, payload.id, payload.patch as Record<string, unknown>) };
+});
+ipcMain.handle(IPC.MEMORY_PANEL_EXPIRE_STATE, (_event, id: unknown) => {
+  const db = getMemoryV2Database();
+  return { ok: Boolean(db && typeof id === "string" && expireMemoryState(db, id)) };
+});
+ipcMain.handle(IPC.MEMORY_PANEL_RESTORE_STATE, (_event, id: unknown) => {
+  const db = getMemoryV2Database();
+  return { ok: Boolean(db && typeof id === "string" && restoreMemoryState(db, id)) };
+});
+ipcMain.handle(IPC.MEMORY_PANEL_FORGET_FRAGMENT, (_event, id: unknown) => {
+  const db = getMemoryV2Database();
+  return { ok: Boolean(db && typeof id === "string" && forgetMemoryFragment(db, id)) };
+});
+ipcMain.handle(IPC.MEMORY_PANEL_GET_DETAIL, (_event, payload: { type?: unknown; id?: unknown }) => {
+  const db = getMemoryV2Database();
+  if (!db || typeof payload.type !== "string" || typeof payload.id !== "string") return { sources: [], revisions: [] };
+  return loadMemoryItemDetail(db, payload.type, payload.id);
+});
+ipcMain.handle(IPC.MEMORY_PANEL_CONFIRM_PENDING, (_event, id: unknown) => ({ ok: typeof id === "string" && confirmPendingMemoryItem(id) }));
+ipcMain.handle(IPC.MEMORY_PANEL_REJECT_PENDING, (_event, id: unknown) => ({ ok: typeof id === "string" && rejectPendingMemoryItem(id) }));
+ipcMain.handle(IPC.MEMORY_PANEL_SET_PAUSED, (_event, paused: unknown) => {
+  if (typeof paused !== "boolean") return { ok: false };
+  setMemoryAutomationPaused(paused, getMemoryV2Database());
+  if (paused) {
+    stopProactiveChat();
+    pauseScreenObservation(null);
+  } else {
+    resumeScreenObservation();
+    startConfiguredProactiveChat();
+  }
+  return { ok: true, paused };
+});
+ipcMain.handle(IPC.MEMORY_PANEL_OPEN_SOURCE, (_event, payload: { type?: unknown; id?: unknown }) => {
+  const db = getMemoryV2Database();
+  if (!db || typeof payload.type !== "string" || typeof payload.id !== "string") return { ok: false };
+  const detail = loadMemoryItemDetail(db, payload.type, payload.id);
+  const conversationId = detail.sources.map((source) => source.conversation_id).find((value): value is string => typeof value === "string" && value.length > 0);
+  if (!conversationId || !getChatSession(conversationId)) return { ok: false, archived: Boolean(conversationId) };
+  createChatWindow(conversationId);
+  return { ok: true, conversationId };
+});
+ipcMain.handle(IPC.MEMORY_PANEL_MERGE_ENTITY, (_event, payload: { sourceId?: unknown; targetId?: unknown }) => {
+  const db = getMemoryV2Database();
+  if (!db || typeof payload.sourceId !== "string" || typeof payload.targetId !== "string") return { ok: false };
+  return { ok: mergeMemoryEntities(db, payload.sourceId, payload.targetId).merged };
+});
+ipcMain.handle(IPC.MEMORY_PANEL_MERGE_FRAGMENT, (_event, payload: { sourceId?: unknown; targetId?: unknown }) => {
+  const db = getMemoryV2Database();
+  if (!db || typeof payload.sourceId !== "string" || typeof payload.targetId !== "string") return { ok: false };
+  return { ok: mergeMemoryFragments(db, payload.sourceId, payload.targetId) };
+});
 ipcMain.handle(IPC.USER_GET_PROFILE, () => loadUserProfile());
 ipcMain.handle(IPC.USER_SAVE_PROFILE, (_event, profile: Partial<UserProfile>) => saveUserProfile(profile));
 ipcMain.handle(IPC.USER_UPLOAD_AVATAR, async () => {
@@ -3241,6 +3414,16 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 app.whenReady().then(async () => {
+  try {
+    const legacyMemory = await memoryStore.load()
+    const memoryMode = loadMemoryEngineMode()
+    const migration = initializeMemoryV2(app.getPath("userData"), legacyMemory, memoryMode)
+    setDeletedSessionArchiver((session) => archiveConversationToMemoryV2(session) !== null)
+    console.log(`[Memory v2] ${memoryMode} database initialized`, migration)
+  } catch (error) {
+    console.error("[Memory v2] initialization failed; legacy memory remains active:", error)
+  }
+
   // 注册 local-sticker:// 协议处理器：将请求映射到 userData/stickers/ 下的文件
   protocol.handle("local-sticker", (request) => {
     const file = parseLocalStickerFileFromUrl(request.url);
@@ -4146,6 +4329,12 @@ app.whenReady().then(async () => {
   try {
     const modelSettings = loadModelSettings();
     await initRAG("auto", undefined, undefined, modelSettings.embeddingModel);
+      const repairedCompressedMemories = await syncPendingCompressedMemories();
+      if (repairedCompressedMemories > 0) {
+        console.log(`[Memory] 已补建 ${repairedCompressedMemories} 条压缩总结的向量索引`);
+      }
+      const retentionCleanup = await memoryStore.cleanupExpiredConversationMemories();
+      if (retentionCleanup.ragIds.length > 0) deleteMemoryEntries(retentionCleanup.ragIds);
       // 初始化 MCP Manager；scheduler 启动前等待一次，避免近即时任务早于 MCP 工具恢复。
       await initMcpManager();
       console.log("[Cyrene] RAG initialized OK");
@@ -4154,6 +4343,7 @@ app.whenReady().then(async () => {
   } catch (err) {
     console.error("[Cyrene] RAG init FAILED:", err);
   }
+  memoryV2ArchivistScheduler.start();
 
   // 初始化表情包 embedding 索引
   try {
@@ -4190,11 +4380,7 @@ app.whenReady().then(async () => {
   void memoryStore.decayInactiveL2Weights().catch((err) => {
     console.warn("[Memory] inactive decay failed:", err);
   });
-  startProactiveChat(
-    ()=>{const settings=loadGeneralSettings();return{enabled:settings.proactiveChatEnabled,idleMinutes:settings.proactiveChatIdleMinutes,cooldownMinutes:settings.proactiveChatCooldownMinutes}},
-    ()=>getChatSession(MAIN_SESSION_ID)?.updatedAt??Date.now(),
-    generateProactiveChatMessage,
-  );
+  startConfiguredProactiveChat();
   powerMonitor.on("lock-screen", () => { screenObservationPaused = true; });
   powerMonitor.on("unlock-screen", () => { screenObservationPaused = false; });
   powerMonitor.on("suspend", () => { screenObservationPaused = true; });
@@ -4203,7 +4389,7 @@ app.whenReady().then(async () => {
     () => {
       const settings = loadGeneralSettings();
       return {
-        enabled: settings.screenObservationEnabled && !screenObservationPaused,
+        enabled: settings.screenObservationEnabled && !screenObservationPaused && !isMemoryAutomationPaused(),
         intervalMinutes: settings.screenObservationIntervalMinutes,
       };
     },
@@ -4221,10 +4407,12 @@ app.on("window-all-closed", () => {});
 // 应用退出前把 token 用量缓存落盘（防抖未触发的最后一次写）
 app.on("before-quit", () => {
   schedulerEngine?.stop();
+  memoryV2ArchivistScheduler.stop();
   stopScreenObserver();
   stopProactiveChat();
   stopOpener();
   flushTokenUsage();
+  closeMemoryV2();
   void shutdownChannels();
 });
 

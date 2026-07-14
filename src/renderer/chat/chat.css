@@ -1945,8 +1945,8 @@ body {
 }
 
 .novelai-chat-card {
-  width: min(360px, calc(100% - 92px));
-  margin: 10px 0 18px 76px;
+  width: min(calc(var(--sticker-width) + 40px), 48vw, 240px);
+  margin: 8px 0 14px;
   overflow: hidden;
   border: 1px solid rgba(255, 182, 220, 0.2);
   border-radius: 8px;
