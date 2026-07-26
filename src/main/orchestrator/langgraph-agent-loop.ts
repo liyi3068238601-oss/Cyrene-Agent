@@ -1,6 +1,6 @@
 import { recordUsage } from "../token-usage-store";
 import { stripLeakedChatTimeContext } from "../chat-time-context";
-import { appendToolCallErrorLog } from "./tool-call-error-log";
+import { appendToolCallErrorLog, traceToolCall } from "./tool-call-error-log";
 import {
   runActionGate,
   type ActionCapability,
@@ -82,6 +82,7 @@ async function callAdapter(
     if (!response.ok) {
       const body = await response.text().catch(() => "");
       // 详细日志：记录失败的 HTTP 请求，便于诊断 reasoning_content / tool_call 等问题
+      traceToolCall("callAdapter", `HTTP ${response.status}: adapter=${adapter.id} body(500)=${body.slice(0, 500)}`);
       appendToolCallErrorLog({
         stage: "callAdapter",
         adapterId: adapter.id,
@@ -258,9 +259,7 @@ export async function runLangGraphAgentLoop(options: LangGraphAgentLoopOptions):
         const actionGateSettings = profile.reasoning === "disabled"
           ? { ...options.settings, reasoning: { mode: "off" as const } }
           : options.settings;
-        console.log(
-          `${LOG_PREFIX} node=action-gate provider=${options.adapter.id} transport=${options.adapter.transport} model=${options.settings.model} mode=${profile.mode} profile=${profile.id}`,
-        );
+        traceToolCall("decide", `Action Gate 开始: provider=${options.adapter.id} model=${options.settings.model} mode=${profile.mode} profile=${profile.id} reasoning=${profile.reasoning} cleanMsgCount=${options.cleanMessages?.length ?? options.messages.length}`);
         const trustedRefs = new Set(options.trustedRefs ?? []);
         const gate = await perf.track("decide_action_gate_structured", () => runActionGate({
           model: options.settings.model,
@@ -282,7 +281,10 @@ export async function runLangGraphAgentLoop(options: LangGraphAgentLoopOptions):
             undefined,
             signal,
           ),
-          onResponse: (response) => trackUsage(response.usage),
+          onResponse: (response) => {
+            trackUsage(response.usage);
+            traceToolCall("decide", `Action Gate 收到响应: finishReason=${response.finishReason} textLen=${response.text.length} refusal=${response.refusal ?? "none"} text(200)=${response.text.slice(0, 200)}`);
+          },
           validateTargetRef: (ref) => {
             if (trustedRefs.has(ref)) return true;
             try {
@@ -300,12 +302,14 @@ export async function runLangGraphAgentLoop(options: LangGraphAgentLoopOptions):
               tier: profile.tier,
               ...metric,
             })}`);
+            traceToolCall("decide", `StructuredOutput 指标: ${JSON.stringify(metric)}`);
           },
         }));
         if (gate.outcome === "failure") {
           console.warn(
             `${LOG_PREFIX} node=action-gate failure=${gate.failure.code} disposition=${gate.failure.disposition} toolExecuted=false`,
           );
+          traceToolCall("decide", `Action Gate 失败: code=${gate.failure.code} disposition=${gate.failure.disposition}`);
           return {
             decision: "failure",
             reason: "action_gate_failed",
@@ -315,6 +319,7 @@ export async function runLangGraphAgentLoop(options: LangGraphAgentLoopOptions):
           };
         }
         const decision = gate.decision;
+        traceToolCall("decide", `Action Gate 成功: decision=${decision.decision}${decision.decision === "act" ? ` capability=${decision.capability} targetRefs=${decision.targetRefs?.length ?? 0}` : ""} repairs=${gate.repairCount}`);
         console.log(
           `${LOG_PREFIX} decision=${decision.decision}${decision.decision === "act" ? ` capability=${decision.capability}` : ""} repairs=${gate.repairCount}`,
         );

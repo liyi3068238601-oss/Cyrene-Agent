@@ -1,4 +1,4 @@
-// 工具调用错误日志 —— 将 HTTP 错误请求/响应写入文件，便于诊断
+// 工具调用诊断日志 —— 将 Action Gate / 工具执行的完整流程写入文件
 // 写入位置：userData/tool-call-errors.log
 
 import * as fs from "node:fs";
@@ -9,10 +9,8 @@ let cachedLogPath: string | null = null;
 
 function getLogPath(): string {
   if (cachedLogPath) return cachedLogPath;
-  // Electron app.getPath 在 main 进程可用；非 Electron 环境用 OS tmp
   let userData: string;
   try {
-    // 动态 require 避免 renderer 侧加载报错
     const electron = require("electron");
     userData = electron.app?.getPath("userData") ?? os.tmpdir();
   } catch {
@@ -47,6 +45,25 @@ export function appendToolCallErrorLog(entry: ToolCallErrorEntry): void {
       "",
     ];
     fs.appendFileSync(getLogPath(), lines.join("\n"), "utf8");
+  } catch {
+    // silent
+  }
+}
+
+/** 通用诊断日志：记录 Action Gate / agent-graph 的关键决策步骤 */
+export function traceToolCall(stage: string, message: string, details?: unknown): void {
+  try {
+    const now = new Date().toISOString();
+    const detailStr = details !== undefined
+      ? typeof details === "string"
+        ? details
+        : JSON.stringify(details, null, 2).slice(0, 2000)
+      : "";
+    const lines = [
+      `[${now}] [${stage}] ${message}`,
+      ...(detailStr ? [detailStr] : []),
+    ];
+    fs.appendFileSync(getLogPath(), lines.join("\n") + "\n", "utf8");
   } catch {
     // silent
   }

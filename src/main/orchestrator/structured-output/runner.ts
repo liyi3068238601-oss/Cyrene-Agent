@@ -5,7 +5,7 @@ import type {
   StructuredValidationError,
 } from "./errors";
 import type { RecordStructuredOutputMetric } from "./metrics";
-import { appendToolCallErrorLog } from "../tool-call-error-log";
+import { appendToolCallErrorLog, traceToolCall } from "../tool-call-error-log";
 import type {
   StructuredOutputMode,
   StructuredOutputProfile,
@@ -149,6 +149,7 @@ export async function runStructuredOutput<T, TRequest>(
         `[StructuredOutput] MODEL_REQUEST_FAILED stage=${input.stage} attempt=${attempts} ` +
         `timeout=${isTimeout} error=${detail.slice(0, 500)}`,
       );
+      traceToolCall("runner", `MODEL_REQUEST_FAILED: stage=${input.stage} attempt=${attempts} timeout=${isTimeout} error=${detail.slice(0, 500)}`);
       appendToolCallErrorLog({
         stage: `StructuredOutput:${input.stage}`,
         adapterId: "structured-output",
@@ -200,6 +201,7 @@ export async function runStructuredOutput<T, TRequest>(
             `[StructuredOutput] NO_JSON_OBJECT stage=${input.stage} ` +
             `finishReason=${normalizedFinish} rawOutput(500)=${response.text.slice(0, 500)}`,
           );
+          traceToolCall("runner", `NO_JSON_OBJECT: stage=${input.stage} finishReason=${normalizedFinish} rawOutput(500)=${response.text.slice(0, 500)}`);
           appendToolCallErrorLog({
             stage: `StructuredOutput:${input.stage}:NO_JSON_OBJECT`,
             adapterId: "structured-output",
