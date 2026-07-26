@@ -378,7 +378,10 @@ export async function runLangGraphAgentLoop(options: LangGraphAgentLoopOptions):
               tool: selectedTool,
               ...(lastError instanceof Error ? { protocolFeedback: lastError.message } : {}),
             }, async (request) => {
-              const response = await perf.track("execute_native_tool_llm", () => invokeWithFallback(() => request));
+              // DeepSeek V4-Pro thinking 模式不支持 tool_choice，
+              // 工具执行阶段必须显式禁用 thinking（与 Action Gate 一致）
+              const toolExecSettings = { ...options.settings, reasoning: { mode: "off" as const } };
+              const response = await perf.track("execute_native_tool_llm", () => invokeWithFallback(() => request, toolExecSettings));
               trackUsage(response.usage);
               return response;
             });
