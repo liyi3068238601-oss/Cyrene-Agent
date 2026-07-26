@@ -275,16 +275,11 @@ export async function runLangGraphAgentLoop(options: LangGraphAgentLoopOptions):
           actionGateSystemPrompt: options.actionGateSystemPrompt,
           signal: options.signal,
           generate: (request, signal) => invokeWithFallback(
-            (messages) => ({
-              ...request,
-              messages: [
-                request.messages[0],
-                ...messages,
-                request.messages[request.messages.length - 1],
-              ],
-            }),
+            // buildActionGateRequest 已在 messages 中包含历史对话，
+            // 这里直接使用 request 本身，不再通过回调插入 cleanMessages（会导致重复）
+            () => request,
             actionGateSettings,
-            options.cleanMessages,
+            undefined,
             signal,
           ),
           onResponse: (response) => trackUsage(response.usage),
