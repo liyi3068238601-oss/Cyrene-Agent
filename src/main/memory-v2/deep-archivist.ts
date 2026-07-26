@@ -252,7 +252,7 @@ export async function runDeepArchivist(
       ].join("\n"),
     },
     { role: "user", content: promptForGroups(groups) },
-  ], 1800)
+  ], 50000)
   const normalized = parseJsonArray(raw).map(normalizeDraft).filter((draft): draft is EpisodeDraft => Boolean(draft))
   let created = 0
   let rejected = 0

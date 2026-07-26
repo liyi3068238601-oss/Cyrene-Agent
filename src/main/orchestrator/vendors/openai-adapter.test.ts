@@ -175,7 +175,7 @@ describe("OpenAICompatAdapter", () => {
     expect(body.messages).toHaveLength(4);
     // 第 1 条 user
     expect(body.messages[0]).toEqual({ role: "user", content: "北京天气如何" });
-    // 第 2 条 assistant 带 tool_calls（adapter: m.content || null → wire 上是 null）
+    // 第 2 条 assistant 带 tool_calls（thinkingField=null → 不携带 reasoning_content）
     expect(body.messages[1]).toEqual({
       role: "assistant",
       content: null,
@@ -194,5 +194,115 @@ describe("OpenAICompatAdapter", () => {
     });
     // 第 4 条 user 顺序在最后
     expect(body.messages[3]).toEqual({ role: "user", content: "那上海呢" });
+  });
+
+  test("思考模式多轮：assistant 带 thinking + toolCalls → wire 回传 reasoning_content", () => {
+    const deepseekCap: ProviderCapability = {
+      ...capability,
+      id: "deepseek",
+      supportsThinking: true,
+      thinkingField: "reasoning_content",
+    };
+    const adapter = new OpenAICompatAdapter("deepseek", deepseekCap);
+    const messages = [
+      { role: "user" as const, content: "查一下知识库" },
+      {
+        role: "assistant" as const,
+        content: undefined,
+        thinking: "用户要查知识库，我应该调用 imported_docs 工具",
+        toolCalls: [{ id: "tc1", name: "imported_docs", arguments: '{"query":"test"}' }],
+      },
+      { role: "tool" as const, toolCallId: "tc1", name: "imported_docs", content: "文档内容" },
+    ];
+    const req = adapter.buildRequest(
+      { model: "deepseek-v4-pro", messages, tools: [{ name: "imported_docs", description: "查文档", parameters: {} }] },
+      // 显式 on：thinking 不被禁用，reasoning_content 保留
+      { provider: "DeepSeek", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-pro", apiKey: "k", reasoning: { mode: "on" } },
+    );
+    const body = JSON.parse(req.body) as { messages: Array<Record<string, unknown>> };
+    // assistant 消息必须同时携带 tool_calls 和 reasoning_content
+    expect(body.messages[1]).toEqual({
+      role: "assistant",
+      content: null,
+      reasoning_content: "用户要查知识库，我应该调用 imported_docs 工具",
+      tool_calls: [{
+        id: "tc1",
+        type: "function",
+        function: { name: "imported_docs", arguments: '{"query":"test"}' },
+      }],
+    });
+  });
+
+  test("思考模式：历史 assistant 消息无 thinking → wire 补空 reasoning_content（DeepSeek HTTP 400 核心修复）", () => {
+    const deepseekCap: ProviderCapability = {
+      ...capability,
+      id: "deepseek",
+      supportsThinking: true,
+      thinkingField: "reasoning_content",
+    };
+    const adapter = new OpenAICompatAdapter("deepseek", deepseekCap);
+    // 模拟真实场景：历史 assistant 消息没有 thinking 字段（非 thinking 模式下生成的）
+    const messages = [
+      { role: "user" as const, content: "你好" },
+      { role: "assistant" as const, content: "你好！有什么可以帮你的？" },
+      { role: "user" as const, content: "查一下知识库" },
+    ];
+    const req = adapter.buildRequest(
+      { model: "deepseek-v4-pro", messages },
+      { provider: "DeepSeek", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-pro", apiKey: "k" },
+    );
+    const body = JSON.parse(req.body) as { messages: Array<Record<string, unknown>> };
+    // 历史 assistant 消息（无 thinking）也必须携带 reasoning_content 字段（空字符串）
+    expect(body.messages[1].reasoning_content).toBe("");
+  });
+
+  test("thinkingField=null 时不回传 reasoning_content（兼容不支持的厂商）", () => {
+    const adapter = new OpenAICompatAdapter("test-openai", capability);
+    const messages = [
+      { role: "user" as const, content: "hi" },
+      {
+        role: "assistant" as const,
+        content: "hello",
+        thinking: "some thinking",
+      },
+    ];
+    const req = adapter.buildRequest(
+      { model: "test-model", messages },
+      { provider: "Test", baseUrl: "https://e.test/v1", model: "test-model", apiKey: "k" },
+    );
+    const body = JSON.parse(req.body) as { messages: Array<Record<string, unknown>> };
+    expect(body.messages[1].reasoning_content).toBeUndefined();
+    expect(body.messages[1].thinking).toBeUndefined();
+  });
+
+  test("工具调用阶段（auto+hasTools → thinking.enabled+keep:all）→ messages 保留 reasoning_content", () => {
+    const deepseekCap: ProviderCapability = {
+      ...capability,
+      id: "deepseek",
+      supportsThinking: true,
+      thinkingField: "reasoning_content",
+    };
+    const adapter = new OpenAICompatAdapter("deepseek", deepseekCap);
+    // 历史对话中有 assistant 消息（含 thinking）
+    const messages = [
+      { role: "user" as const, content: "你好" },
+      { role: "assistant" as const, content: "你好！", thinking: "之前的思考" },
+      { role: "user" as const, content: "查知识库" },
+    ];
+    const req = adapter.buildRequest(
+      {
+        model: "deepseek-v4-pro",
+        messages,
+        // 带工具 → auto 模式下现在保留 thinking + keep:"all"
+        tools: [{ name: "imported_docs", description: "查文档", parameters: {} }],
+      },
+      // auto 模式
+      { provider: "DeepSeek", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-pro", apiKey: "k", reasoning: { mode: "auto" } },
+    );
+    const body = JSON.parse(req.body) as { messages: Array<Record<string, unknown>>; thinking?: { type?: string; keep?: string } };
+    // thinking 应被启用并附加 keep:"all"
+    expect(body.thinking).toEqual({ type: "enabled", keep: "all" });
+    // thinking 启用时，assistant 消息应携带 reasoning_content
+    expect(body.messages[1].reasoning_content).toBe("之前的思考");
   });
 });

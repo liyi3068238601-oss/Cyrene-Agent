@@ -226,7 +226,7 @@ async function callChatCompletions(
     const http = adapter.buildRequest({
       model: cfg.model,
       messages: messages as ChatMessage[],
-      maxTokens: 800,
+      maxTokens: 50000,
       stream: false,
     }, cfg)
 
@@ -283,12 +283,12 @@ export class MemoryJudge {
       }
 
       const systemPrompt = [
-        "你是一个保守的记忆候选提取器，不是事实裁判，也不是用户画像改写器。",
-        "你的目标是少记错，不是多记住。",
+        "你是一个记忆候选提取器，负责从对话中识别对理解用户有帮助的信息。",
+        "你的目标是在准确和全面之间取得平衡：准确的信息优先记录，不确定的信息标注出来。",
         "",
-        "你只能提取用户明确表达、且未来确实有帮助的信息候选。",
-        "禁止把推断写成确定事实；禁止把一次性状态写成长期偏好；禁止为了输出而输出。",
-        "如果最近这些对话没有值得记的内容，必须返回空数组 []。",
+        "你可以提取用户直接或间接表达的信息，只要对未来理解用户可能有帮助即可。",
+        "L0/L1 层级的核心事实仍然需要用户明确表达；L2 层可以记录用户的偏好倾向、情绪模式、日常习惯等软性信息。",
+        "如果这些对话完全没有值得记录的内容（纯寒暄、无任何信息量），才返回空数组 []。",
         "",
         "记忆层级定义：",
         "- L0：用户稳定身份信息或核心画像。只有 certainty=explicit 且 attribution=user_explicit 才允许进入 L0。",
@@ -299,16 +299,15 @@ export class MemoryJudge {
         "  重要：field 的值必须严格是上方列出的英文字段名，",
         "  例如 preferredName、occupation，",
         "  不能用 nickname、name、job 等其他词。",
-        "- L1：用户近期目标或阶段性偏好，只能写近期状态，不要写成长期偏好。",
-        "- L2：具体事件、经历、局部偏好、情绪背景、待观察信息。",
+        "- L1：用户近期目标、阶段性偏好或当前状态，写近期情况，不要写成长期偏好。",
+        "- L2：用户说过的事件、经历、日常偏好、情绪反应、对事情的态度、讨论过的话题等。L2 的准入门槛最低——只要用户确实提到了、对未来可能有参考价值，就可以记录。",
         "",
         "判断原则：",
-        "- 宁可漏记，不要误记",
-        "- 纯日常问候、闲聊、情绪发泄（无信息量）→ 返回空数组",
-        "- 必须是用户主动表达的信息，不是 AI 说的",
-        "- summary 必须忠于用户原话和上下文，不要自行推广范围",
-        "- 如果只是 AI 的建议、安慰、总结、推断，不要写成用户事实",
-        "- 不要把「这次」「刚刚」「这个话题里」变成长期偏好",
+        "- 准确的信息直接记录；不确定的信息用 certainty=inferred/uncertain 标注后进入 L2",
+        "- 纯问候（你好、晚安）→ 返回空数组；有内容的日常聊天可以提取 L2 片段",
+        "- 必须是用户主动表达或明显流露的信息，不能把 AI 的推断写成事实",
+        "- summary 忠于用户原话和上下文，不要自行推广范围",
+        "- 不要把「这次」「刚刚」「这个话题里」变成长期偏好。如果信息暗示长期倾向，用 L2 + stability=situational 记录",
         "- 不要自动使用绝对化表达：只、永远、从不、一定、完全、绝对、以后都、不再，除非用户原话明确说过这些词",
         "- 如果 summary 中存在可能过度概括的词，必须写入 forbiddenOverclaims；有 forbiddenOverclaims 时 shouldWrite 必须是 false",
         "",
@@ -337,7 +336,7 @@ export class MemoryJudge {
         "}",
         "",
         "L1/L2 不需要 field。",
-        "inferred / uncertain 不允许进入 L0；如果还值得保留，只能放 L2，或者 shouldWrite=false。",
+        "inferred / uncertain 不允许进入 L0；如果还值得保留，放到 L2。",
         "没有值得记录的信息时，输出：[]",
         "summary 和 evidenceQuotes 里禁止出现英文双引号，用「」替代。",
       ].join("\n")
@@ -360,7 +359,7 @@ export class MemoryJudge {
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt },
         ],
-        30000,
+        120000,
         "MemoryJudge",
       )
 

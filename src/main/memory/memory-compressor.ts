@@ -51,7 +51,7 @@ function loadModelSettings(): ModelSettings {
   } catch { return defaults; }
 }
 
-export async function callMemoryBackgroundModel(messages: Array<{ role: "system" | "user"; content: string }>, maxTokens = 500): Promise<string> {
+export async function callMemoryBackgroundModel(messages: Array<{ role: "system" | "user"; content: string }>, maxTokens = 50000): Promise<string> {
   const startedAt = Date.now();
   let inputTokens = 0;
   let outputTokens = 0;

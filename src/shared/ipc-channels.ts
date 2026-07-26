@@ -186,6 +186,9 @@ export const IPC = {
   // memory panel
   MEMORY_PANEL_GET_DATA: "memory-panel:get-data",
   MEMORY_PANEL_DELETE_IMPORTED_DOC: "memory-panel:delete-imported-doc",
+
+  // knowledge panel
+  KNOWLEDGE_UPLOAD: "knowledge:upload",
   MEMORY_PANEL_SAVE_L0: "memory-panel:save-l0",
   MEMORY_PANEL_SAVE_L1: "memory-panel:save-l1",
   MEMORY_PANEL_SET_ENGINE: "memory-panel:set-engine",

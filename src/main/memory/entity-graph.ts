@@ -55,9 +55,11 @@ const ENTITY_PATTERNS: Array<{ type: EntityNode["type"]; patterns: RegExp[] }> =
     type: "place",
     patterns: [
       /住在(.{1,10})/g,
-      /在(.{1,10})(?:工作|学习|生活|住|上班|上学)/g,
+      /在(.{1,10})(?:工作|学习|生活|上班|上学)/g,
       /去了(.{1,10})/g,
       /在(.{1,10})出差/g,
+      /在(.{1,10})城市/g,
+      /来自(.{1,10})/g,
     ],
   },
   {
@@ -95,7 +97,9 @@ export function extractEntitiesFromText(text: string): Array<{ type: EntityNode[
     }
   }
 
-  return results;
+  // 过滤垃圾实体：含标点、省略号、引号、括号等非实体名碎片
+  const PUNCTUATION_PATTERN = /[，。、！？…—\.\（\）「」『』"';；：]/
+  return results.filter((r) => !PUNCTUATION_PATTERN.test(r.name));
 }
 
 // ── 实体图谱管理器 ──

@@ -364,12 +364,12 @@ toolRegistry.register({
       referenceAssetIds:{type:"array",description:"素材库中的参考图片 ID，最多 4 个。",items:{type:"string"}},
       referenceStrength:{type:"number",description:"参考强度，0 到 1，默认 0.7。"},
       referenceInformationExtracted:{type:"number",description:"参考图信息提取量，0 到 1，默认 1。"},
-      count: { type: "number", description: "生成变体数量，1 到 4，默认 1。" },
+      count: { type: "number", description: "生成变体数量，1 到 8，默认 1。一次生成多张时所有图片会同时显示在聊天中。" },
     },
     required: ["prompt","subject"],
   },
   execute: async (args) => {
-    const count=Math.max(1,Math.min(4,Number(args.count)||1));const results:Record<string,unknown>[]=[];
+    const count=Math.max(1,Math.min(8,Number(args.count)||1));const results:Record<string,unknown>[]=[];
     for(let index=0;index<count;index++){const result=await generateNovelAiImage({...args,count:undefined,seed:args.seed===undefined?undefined:Number(args.seed)+index});results.push(result);broadcastGeneratedImage(result)}
     return [
       `[ok] 已生成 ${results.length} 张图片，并已直接显示在当前聊天中。`,
@@ -411,3 +411,156 @@ toolRegistry.register({
 });
 
 toolRegistry.register({id:"change_drawing_character",name:"切换绘图角色",description:"切换后续 AI 绘图的画面主体；不会改变 Agent 自身身份。",enabled:true,inputSchema:{type:"object",properties:{characterId:{type:"string",description:"角色档案 ID，传 __none__ 不注入角色"},characterName:{type:"string",description:"角色名称"}}},execute:async(args)=>{const config=loadNovelAiConfig();const id=String(args.characterId||"").trim(),name=String(args.characterName||"").trim().toLowerCase();if(id==="__none__"||name==="不指定角色"){saveNovelAiConfig({...config,activeCharacterId:"__none__"});return"[ok] 后续绘图不注入固定角色。"}const character=config.characters.find((item)=>item.id===id)||config.characters.find((item)=>item.name.toLowerCase().includes(name)&&name);if(!character)return`[error] 未找到绘图角色。可用角色：${config.characters.map((item)=>`${item.name}(${item.id})`).join("、")||"无"}`;saveNovelAiConfig({...config,activeCharacterId:character.id});return`[ok] 后续绘图主体已切换为“${character.name}”。`}});
+
+// ── 历史作品查阅工具 ──────────────────────────────────────
+
+/** 轻量读取全部历史作品的元数据（不读图片字节，避免列表场景无谓 IO）。 */
+function loadHistoryMeta(): Record<string, unknown>[] {
+  ensureDirs();
+  return fs.readdirSync(outputDir())
+    .filter((file) => file.endsWith(".json"))
+    .sort().reverse()
+    .flatMap((file) => {
+      try { return [JSON.parse(fs.readFileSync(path.join(outputDir(), file), "utf8")) as Record<string, unknown>]; }
+      catch { return []; }
+    });
+}
+
+/** 把完整 meta 压缩成适合塞进 LLM 上下文的摘要（长文本字段截断）。 */
+function summarizeHistoryMeta(meta: Record<string, unknown>): Record<string, unknown> {
+  const pick = (k: string, max?: number): unknown => {
+    const v = meta[k];
+    if (v == null) return undefined;
+    if (max && typeof v === "string") return v.slice(0, max);
+    return v;
+  };
+  return {
+    id: meta.id,
+    prompt: pick("prompt"),
+    compiledPrompt: pick("compiledPrompt", 280),
+    negativePrompt: pick("negativePrompt", 160),
+    subject: meta.subject,
+    characterId: meta.characterId,
+    characterName: meta.characterName,
+    outfitId: meta.outfitId,
+    outfitName: meta.outfitName,
+    mode: meta.mode,
+    model: meta.model,
+    width: meta.width,
+    height: meta.height,
+    steps: meta.steps,
+    scale: meta.scale,
+    sampler: meta.sampler,
+    seed: meta.seed,
+    favorite: meta.favorite ?? false,
+    createdAt: meta.createdAt,
+    referenceMode: meta.referenceMode && meta.referenceMode !== "none" ? meta.referenceMode : undefined,
+  };
+}
+
+toolRegistry.register({
+  id: "list_drawing_history",
+  name: "查看绘图历史",
+  description:
+    "列出已生成的绘图历史作品，支持按关键词检索提示词/编译提示词/负面词/角色名/服装名，返回每张作品的 ID、提示词、编译后提示词（节选）、负面词、角色、服装、尺寸、采样参数与创建时间。\n\n" +
+    "何时用：\n" +
+    "- 用户问「我之前画过什么」「上次那张图」「找一张某某主题的」「看看历史作品」\n" +
+    "- 需要按主题/角色/服装检索旧图\n" +
+    "- 用户想复用某张图的参数或提示词（先列出拿到 ID，再看详情）\n\n" +
+    "不要用于：\n" +
+    "- 查看单张作品的完整参数和图片本身（那是 get_drawing_detail）\n" +
+    "- 生成新图（那是 generate_novelai_image）\n\n" +
+    "参数：query (可选，关键词，不区分大小写)，offset (可选，默认0)，limit (可选，默认10，最大40)，favoriteOnly (可选，只看收藏)。",
+  enabled: true,
+  inputSchema: {
+    type: "object",
+    properties: {
+      query: { type: "string", description: "检索关键词（不区分大小写），匹配提示词/编译提示词/负面词/角色名/服装名；留空则按时间倒序列出全部" },
+      offset: { type: "number", description: "分页偏移，默认 0" },
+      limit: { type: "number", description: "返回条数，默认 10，最大 40" },
+      favoriteOnly: { type: "boolean", description: "是否只返回收藏作品，默认 false" },
+    },
+  },
+  execute: async (args) => {
+    const query = String(args.query || "").trim().toLowerCase();
+    const offset = Math.max(0, Number(args.offset) || 0);
+    const limit = Math.max(1, Math.min(40, Number(args.limit) || 10));
+    const favoriteOnly = Boolean(args.favoriteOnly);
+    const all = loadHistoryMeta();
+    const filtered = all.filter((meta) => {
+      if (favoriteOnly && !meta.favorite) return false;
+      if (!query) return true;
+      const haystack = [meta.prompt, meta.compiledPrompt, meta.negativePrompt, meta.characterName, meta.outfitName]
+        .filter((v): v is string => typeof v === "string")
+        .join(" \n ")
+        .toLowerCase();
+      return haystack.includes(query);
+    });
+    const total = filtered.length;
+    const page = filtered.slice(offset, offset + limit).map(summarizeHistoryMeta);
+    if (page.length === 0) {
+      return query
+        ? `[空] 没有匹配「${args.query}」的历史作品。共 ${total} 张作品。`
+        : `[空] 暂无绘图历史作品。`;
+    }
+    return JSON.stringify({ total, offset, limit, returned: page.length, items: page }, null, 2);
+  },
+});
+
+toolRegistry.register({
+  id: "get_drawing_detail",
+  name: "查看绘图作品详情",
+  description:
+    "按 ID 查看绘图作品的完整元数据（含完整提示词、编译后提示词、负面词、角色/服装、参考模式、全部采样参数与种子），并把图片直接显示到当前聊天里。支持一次查看多张：传 ids 数组可同时取出多张作品并全部显示在聊天中。\n\n" +
+    "何时用：\n" +
+    "- 用户想看某张历史图的完整 tag/提示词/参数\n" +
+    "- 用户说「把那张图找出来给我看看」「看看这张图的提示词」「那张图用的什么种子」\n" +
+    "- 用户想一次看多张图（传 ids 数组，最多 8 张）\n" +
+    "- 需要复用某张图的完整参数重新生成\n\n" +
+    "不要用于：\n" +
+    "- 列出多张作品的摘要（那是 list_drawing_history，先列出拿到 ID 再看详情）\n" +
+    "- 生成新图（那是 generate_novelai_image）\n\n" +
+    "参数：id (单个作品 ID) 或 ids (多个作品 ID 数组，最多 8 个)。二选一，ids 优先。",
+  enabled: true,
+  inputSchema: {
+    type: "object",
+    properties: {
+      id: { type: "string", description: "单个作品 ID（与 ids 二选一）" },
+      ids: { type: "array", items: { type: "string" }, description: "多个作品 ID 数组，最多 8 个（与 id 二选一，优先于 id）" },
+    },
+  },
+  execute: async (args) => {
+    // 收集 ID 列表：ids 优先，回退到单个 id
+    const rawIds: string[] = Array.isArray(args.ids) && args.ids.length > 0
+      ? args.ids.map(String)
+      : (args.id ? [String(args.id)] : []);
+    const ids = rawIds.map(s => s.trim()).filter(s => /^[a-zA-Z0-9-]+$/.test(s)).slice(0, 8);
+    if (ids.length === 0) return "[错误] 未提供合法的作品 ID。请先调用 list_drawing_history 查看可用作品。";
+    const found: Record<string, unknown>[] = [];
+    const missing: string[] = [];
+    for (const id of ids) {
+      const image = loadImageById(id);
+      if (image) {
+        found.push(image);
+        broadcastGeneratedImage(image);
+      } else {
+        missing.push(id);
+      }
+    }
+    if (found.length === 0) {
+      return `[错误] 未找到任何作品。请求的 ID：${ids.join("、")}。请先调用 list_drawing_history 查看可用作品。`;
+    }
+    const metas = found.map((image) => {
+      const { dataUrl: _dataUrl, ...meta } = image;
+      return meta;
+    });
+    const lines: string[] = [
+      `已找到 ${found.length} 张作品${missing.length > 0 ? `（${missing.length} 张未找到：${missing.join("、")}）` : ""}并显示在聊天中。以下是完整参数：`,
+      "```json",
+      JSON.stringify(metas.length === 1 ? metas[0] : metas, null, 2),
+      "```",
+      "如需复用这些参数重新生成，可直接调用 generate_novelai_image 并传入对应字段。",
+    ];
+    return lines.join("\n");
+  },
+});

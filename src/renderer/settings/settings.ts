@@ -479,6 +479,16 @@ interface MemoryPanelApi {
   mergeFragment: (sourceId: string, targetId: string) => Promise<{ ok: boolean }>;
 }
 
+interface KnowledgePanelApi {
+  uploadFile: () => Promise<{
+    ok: boolean;
+    canceled?: boolean;
+    results?: Array<{ fileName: string; chunkCount: number; ok: boolean; error?: string }>;
+  }>;
+  getData: () => Promise<MemoryPanelPayload>;
+  deleteDoc: (importId: string, fileName?: string) => Promise<{ ok: boolean; deleted: number }>;
+}
+
 interface SettingsApi {
   minimize: () => void;
   close: () => void;
@@ -529,6 +539,7 @@ declare global {
     cyreneScheduler?: SchedulerApi;
     user?: UserApi;
     memoryPanel?: MemoryPanelApi;
+    knowledgePanel?: KnowledgePanelApi;
   }
 }
 
@@ -824,6 +835,7 @@ const stickerThresholdVal = document.getElementById("sticker-threshold-val") as 
 
 const NAV_LABELS: Record<string, { emoji: string; title: string; hint: string }> = {
   memory: { emoji: "🧠", title: "记忆", hint: "管理长期记忆与画像" },
+  knowledge: { emoji: "📚", title: "知识库", hint: "上传与管理 RAG 知识文档" },
   chat: { emoji: "💬", title: "聊天", hint: "管理聊天窗口与会话" },
   user: { emoji: "👤", title: "用户信息", hint: "编辑你的个人资料" },
   tasks: { emoji: "⏰", title: "定时任务", hint: "管理定时提醒与日程" },
@@ -2595,6 +2607,7 @@ function switchSection(section: string): void {
   const isChannels = section === "channels";
   const isTts = section === "tts";
   const isAsr = section === "asr";
+  const isKnowledge = section === "knowledge";
   apiForm.classList.toggle("is-hidden", !isApi);
   appearanceForm.classList.toggle("is-hidden", !isAppearance);
   generalForm.classList.toggle("is-hidden", !isGeneral);
@@ -2627,9 +2640,12 @@ function switchSection(section: string): void {
   if (ttsPanel) ttsPanel.classList.toggle("is-hidden", !isTts);
   const asrPanel = document.getElementById("asr-panel");
   if (asrPanel) asrPanel.classList.toggle("is-hidden", !isAsr);
+  const knowledgePanel = document.getElementById("knowledge-panel");
+  if (knowledgePanel) knowledgePanel.classList.toggle("is-hidden", !isKnowledge);
+  if (isKnowledge) void loadKnowledgePanel();
   placeholderPanel.classList.toggle(
     "is-hidden",
-    isApi || isAppearance || isGeneral || isPreferences || isCyrene || isDisclaimer || isMemory || isUser || isChat || isTasks || isIdentity || isPlugins || isSkills || isTokens || isChannels || isTts || isAsr,
+    isApi || isAppearance || isGeneral || isPreferences || isCyrene || isDisclaimer || isMemory || isUser || isChat || isTasks || isIdentity || isPlugins || isSkills || isTokens || isChannels || isTts || isAsr || isKnowledge,
   );
 
   if (
@@ -4356,6 +4372,116 @@ memoryImportedList?.addEventListener("click", async (event) => {
 
 void loadMemoryPanel();
 void loadUserProfile();
+
+// ── 知识库面板 ──────────────────────────────────────────────
+const knowledgeFileList = document.getElementById("knowledge-file-list") as HTMLElement | null;
+const knowledgeUploadBtn = document.getElementById("knowledge-upload-btn") as HTMLElement | null;
+const knowledgeUploadStatus = document.getElementById("knowledge-upload-status") as HTMLElement | null;
+
+let knowledgeCache: MemoryPanelPayload | null = null;
+
+async function loadKnowledgePanel(): Promise<void> {
+  try {
+    const payload = await window.knowledgePanel?.getData();
+    if (!payload) return;
+    knowledgeCache = payload;
+    renderKnowledgeDocs();
+  } catch (err) {
+    console.error("[settings] load knowledge panel failed", err);
+    if (knowledgeFileList) renderEmptyState(knowledgeFileList, "知识库读取失败", "请查看终端日志");
+  }
+}
+
+function renderKnowledgeDocs(): void {
+  if (!knowledgeFileList) return;
+  const list = knowledgeCache?.importedDocs ?? [];
+
+  if (list.length === 0) {
+    renderEmptyState(knowledgeFileList, "暂无知识文档", "点击上方按钮上传文件");
+    return;
+  }
+
+  knowledgeFileList.innerHTML = list
+    .map((item) => {
+      const importId = item.importId || "";
+      const fileName = escapeHtml(item.fileName);
+      const chunkInfo = "已索引 " + item.chunkCount + " 个片段";
+      const timeInfo = "导入时间：" + formatDateTime(item.lastImportedAt);
+      return [
+        '<article class="memory-record memory-record--doc">',
+        '  <div class="memory-record__main">',
+        '    <h3 class="memory-record__title">' + fileName + '</h3>',
+        '    <p class="memory-record__body">' + escapeHtml(chunkInfo) + '</p>',
+        '    <p class="memory-record__meta">' + escapeHtml(timeInfo) + '</p>',
+        '  </div>',
+        '  <button type="button" class="memory-record__delete" data-import-id="' + escapeHtml(importId) + '" data-file-name="' + fileName + '" title="删除此知识文档">🗑️</button>',
+        '</article>',
+      ].join("\n");
+    })
+    .join("\n");
+}
+
+knowledgeUploadBtn?.addEventListener("click", async () => {
+  if (!knowledgeUploadStatus) return;
+  knowledgeUploadStatus.textContent = "正在上传...";
+  knowledgeUploadStatus.classList.remove("is-hidden");
+  try {
+    const result = await window.knowledgePanel?.uploadFile();
+    if (!result) return;
+    if (result.canceled) {
+      knowledgeUploadStatus.classList.add("is-hidden");
+      return;
+    }
+    if (result.ok && result.results) {
+      const successCount = result.results.filter(r => r.ok).length;
+      const failCount = result.results.length - successCount;
+      const totalChunks = result.results.reduce((sum, r) => sum + r.chunkCount, 0);
+      if (failCount > 0) {
+        const failedFiles = result.results.filter(r => !r.ok).map(r => r.fileName).join("、");
+        knowledgeUploadStatus.textContent = `完成：${successCount} 个文件成功（共 ${totalChunks} 片段），${failCount} 个失败：${failedFiles}`;
+      } else {
+        knowledgeUploadStatus.textContent = `完成：${successCount} 个文件，共 ${totalChunks} 个片段`;
+      }
+      await loadKnowledgePanel();
+    } else {
+      knowledgeUploadStatus.textContent = "上传失败";
+    }
+  } catch (err) {
+    console.error("[settings] upload knowledge file failed", err);
+    knowledgeUploadStatus.textContent = "上传失败：" + (err instanceof Error ? err.message : String(err));
+  }
+  setTimeout(() => knowledgeUploadStatus.classList.add("is-hidden"), 5000);
+});
+
+knowledgeFileList?.addEventListener("click", async (event) => {
+  const target = event.target as HTMLElement | null;
+  const deleteBtn = target?.closest(".memory-record__delete") as HTMLElement | null;
+  if (!deleteBtn) return;
+
+  const importId = deleteBtn.dataset.importId || "";
+  const fileName = deleteBtn.dataset.fileName || "未命名文档";
+
+  const confirmed = await showModal({
+    title: "删除知识文档",
+    message: "确定删除知识文档？\n\n文件：\n《" + fileName + "》\n\n删除后不可恢复，如需使用请重新上传。",
+    icon: "⚠️",
+    confirmText: "删除",
+    cancelText: "取消",
+  });
+
+  if (!confirmed) return;
+
+  try {
+    const result = await window.knowledgePanel?.deleteDoc(importId, fileName);
+    if (result?.ok) {
+      await loadKnowledgePanel();
+    }
+  } catch (err) {
+    console.error("[settings] delete knowledge doc failed", err);
+  }
+});
+
+void loadKnowledgePanel();
 
 // ── 权限档位 UI ───────────────────────────────────────────
 type PermissionLevel = "read-only" | "scoped" | "per-action" | "full";

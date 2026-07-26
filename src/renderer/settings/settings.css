@@ -3553,3 +3553,68 @@ body {
   font: var(--rb-text-micro);
   line-height: 1.4;
 }
+
+/* ── 知识库面板 ── */
+.knowledge-panel {
+  display: grid;
+  gap: 14px;
+  max-width: 1180px;
+}
+
+.knowledge-section {
+  display: grid;
+  gap: 12px;
+}
+
+.knowledge-upload-area {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: var(--rb-bg-2);
+  border: 1px solid var(--rb-border-soft);
+}
+
+.knowledge-upload-area h2 {
+  margin: 0;
+  color: var(--rb-text-strong);
+  font: var(--rb-text-base);
+  font-weight: 600;
+}
+
+.knowledge-upload-btn {
+  align-self: flex-start;
+  transition: background 150ms ease, box-shadow 150ms ease, transform 120ms ease;
+}
+
+.knowledge-upload-btn:hover {
+  transform: translateY(-1px);
+}
+
+.knowledge-upload-btn:active {
+  transform: translateY(0);
+  box-shadow: 0 4px 10px rgba(236, 72, 153, 0.20);
+}
+
+.knowledge-upload-hint {
+  margin: 0;
+  color: var(--rb-text-muted);
+  font: var(--rb-text-small);
+}
+
+.knowledge-upload-status {
+  margin: 0;
+  color: var(--rb-text-default);
+  font: var(--rb-text-small);
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(236, 72, 153, 0.10);
+  border: 1px solid var(--rb-border-soft);
+  word-break: break-word;
+}
+
+.knowledge-upload-status.is-hidden {
+  display: none;
+}

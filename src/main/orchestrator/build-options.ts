@@ -32,6 +32,8 @@ import {
   resolveChatContextTimezone,
   type ChatContextMessage,
 } from "../chat-time-context";
+import { applyCachedSummary, scheduleSummaryUpdate } from "./conversation-summarizer";
+import type { VendorConfig } from "./vendors";
 
 /** index.ts 模块级符号的最小可注入子集。
  *  类型故意用宽签名（unknown / 任意 shape）—— 因为 build-options 是纯消费者，
@@ -414,6 +416,19 @@ export async function buildAgentRunOptions(
   const fcMessages: ChatMessage[] = withDirectImageAttachments(llmMessages as unknown as ChatMessage[], input);
   const imageCaptionFallback = buildImageCaptionFallbackMessages(toolSystemContent + "\n\n---\n\n" + soulSystemBaseContent, llmMessages as unknown as ChatMessage[], input, deps);
 
+  // 对话摘要：当历史消息过长时，用缓存的摘要替换旧消息（同步读缓存，零延迟）
+  const summarySessionId = input.sessionId || "default";
+  const summarizerCfg: VendorConfig = {
+    provider: settings.provider,
+    baseUrl: settings.baseUrl,
+    model: settings.model,
+    apiKey: settings.apiKey,
+    explicitTransport: settings.explicitTransport,
+  };
+  const summarizedMessages = applyCachedSummary(fcMessages, summarySessionId);
+  // 异步调度摘要更新（fire-and-forget，不阻塞当前对话，生成后供下次使用）
+  scheduleSummaryUpdate(fcMessages, summarizerCfg, summarySessionId);
+
   return {
     options: {
       settings: {
@@ -423,7 +438,7 @@ export async function buildAgentRunOptions(
         apiKey: settings.apiKey,
         explicitTransport: settings.explicitTransport,
       },
-      messages: fcMessages,
+      messages: summarizedMessages,
       timeoutMs: deps.chatRequestTimeoutMs,
       toolSystemContent,
       soulSystemBaseContent,

@@ -43,6 +43,7 @@ interface Message {
   transient?: boolean;
   ttsCacheKey?: string;
   novelAiImage?: { id:string; prompt?:string; model?:string; width?:number; height?:number };
+  novelAiImages?: { id:string; prompt?:string; model?:string; width?:number; height?:number }[];
 }
 
 type MessageAttachment = ImageMessageAttachment | DocumentMessageAttachment;
@@ -404,7 +405,7 @@ window.chat?.onProactiveMessage?.((payload)=>{if(payload.sessionId!==currentSess
 let sessionTailStart = 0;
 const sessionTailStarts = new Map<string, number>();
 let segmentedOutputMode: "all" | "chat" | "off" = "off";
-const CHAT_WINDOW_SIZE = 100;
+const CHAT_WINDOW_SIZE = 300;
 let currentModelConfig: ModelConfig | null = null;
 
 function formatModelHint(config: ModelConfig | null): string {
@@ -471,6 +472,7 @@ interface ChatStoreSession {
     sticker?: string | null;
     ttsCacheKey?: string;
     novelAiImage?: { id:string; prompt?:string; model?:string; width?:number; height?:number };
+    novelAiImages?: { id:string; prompt?:string; model?:string; width?:number; height?:number }[];
   }>;
   createdAt: number;
   updatedAt: number;
@@ -509,7 +511,7 @@ declare global {
 // - 过滤空 content / 渲染中的 thinking 占位（thinking=true 时通常 content 为空，但保险起见双重过滤）
 // - 丢弃仅用于本轮模型调用的 modelContext 与 thinking 等瞬态字段
 function toPersistableMessages(arr: Message[]): Array<{
-  id: string; role: Role; content: string; at: number; hidden?: boolean; modelContext?: string; attachments?: MessageAttachment[]; sticker?: StickerId | null; ttsCacheKey?: string; novelAiImage?: Message["novelAiImage"];
+  id: string; role: Role; content: string; at: number; hidden?: boolean; modelContext?: string; attachments?: MessageAttachment[]; sticker?: StickerId | null; ttsCacheKey?: string; novelAiImage?: Message["novelAiImage"]; novelAiImages?: Message["novelAiImages"];
 }> {
   return arr
     .filter((m) => m && (m.role === "user" || m.role === "model") && !m.thinking && !m.transient && (
@@ -517,6 +519,7 @@ function toPersistableMessages(arr: Message[]): Array<{
       || ((m.attachments?.length ?? 0) > 0)
       || Boolean(m.sticker)
       || Boolean(m.novelAiImage)
+      || ((m.novelAiImages?.length ?? 0) > 0)
     ))
     .map((m) => ({
       id: m.id,
@@ -529,6 +532,7 @@ function toPersistableMessages(arr: Message[]): Array<{
       sticker: m.sticker ?? null,
       ttsCacheKey: m.ttsCacheKey,
       novelAiImage: m.novelAiImage,
+      novelAiImages: m.novelAiImages,
     }));
 }
 
@@ -574,6 +578,7 @@ function loadSessionIntoUI(session: ChatStoreSession): void {
     sticker: m.sticker ?? null,
     ttsCacheKey: m.ttsCacheKey,
     novelAiImage: m.novelAiImage,
+    novelAiImages: m.novelAiImages ?? (m.novelAiImage ? [m.novelAiImage] : undefined),
   } satisfies Message));
   messages = sessionMessageCache.load(session.id, persisted);
   // 上报活跃 sessionId（设置面板"删除当前会话"差异化提示用）
@@ -1608,6 +1613,7 @@ function render(preserveScroll = false): void {
       || ((m.attachments?.length ?? 0) > 0)
       || Boolean(m.sticker)
       || Boolean(m.novelAiImage)
+      || ((m.novelAiImages?.length ?? 0) > 0)
     )
   );
   if (emptyEl) emptyEl.toggleAttribute("hidden", hasMessages);
@@ -1691,7 +1697,11 @@ function render(preserveScroll = false): void {
       }
     }
 
-    if (m.novelAiImage) {
+    if (m.novelAiImages && m.novelAiImages.length > 0) {
+      for (const img of m.novelAiImages) {
+        body.appendChild(buildStoredNovelAiImageCard(img));
+      }
+    } else if (m.novelAiImage) {
       body.appendChild(buildStoredNovelAiImageCard(m.novelAiImage));
     }
 
@@ -2748,7 +2758,7 @@ document.addEventListener("keydown", (e) => {
 function buildModelMessages(source: Message[] = messages): Array<{ role: "user" | "model"; content: string; at?: number }> {
   return source
     .filter((message) => !message.transient && (message.content.trim() || message.modelContext?.trim() || message.sticker))
-    .slice(-16)
+    .slice(-150)
     .map((message) => ({
       role: message.role,
       at: Number.isFinite(message.at) ? message.at : undefined,
@@ -2900,7 +2910,7 @@ async function triggerCyreneGreeting(): Promise<void> {
     let pendingTtsCachePromise: Promise<{ cacheKey: string } | null> | null = null;
     let sticker: string | null = null;
     let pendingWeatherCard: Record<string, unknown> | null = null;
-    let pendingNovelAiImage: Record<string, unknown> | null = null;
+    let pendingNovelAiImages: Record<string, unknown>[] = [];
 
     let finishRun!: () => void;
     let failRun!: (err: Error) => void;
@@ -3022,7 +3032,7 @@ async function triggerCyreneGreeting(): Promise<void> {
             } else if (event.name === "cyrene.weather") {
               pendingWeatherCard = event.value as Record<string, unknown>;
             } else if (event.name === "cyrene.novelai-image") {
-              pendingNovelAiImage = event.value as Record<string, unknown>;
+              pendingNovelAiImages.push(event.value as Record<string, unknown>);
             } else if (event.name === "cyrene.todos") {
               renderTodoPanel(event.value as TodoState | null);
             } else if (event.name === "cyrene.choice") {
@@ -3069,8 +3079,8 @@ async function triggerCyreneGreeting(): Promise<void> {
       msg.transient = false;
       msg.content = streamContent;
       msg.sticker = sticker;
-      if(pendingNovelAiImage){
-        msg.novelAiImage={id:String(pendingNovelAiImage.id||""),prompt:String(pendingNovelAiImage.prompt||""),model:String(pendingNovelAiImage.model||""),width:Number(pendingNovelAiImage.width)||undefined,height:Number(pendingNovelAiImage.height)||undefined};
+      if(pendingNovelAiImages.length > 0){
+        msg.novelAiImages = pendingNovelAiImages.map(img => ({id:String(img.id||""),prompt:String(img.prompt||""),model:String(img.model||""),width:Number(img.width)||undefined,height:Number(img.height)||undefined}));
       }
     }
     void saveSessionMessages(runSessionId, runMessages);
@@ -3091,7 +3101,7 @@ async function triggerCyreneGreeting(): Promise<void> {
       }
       pendingWeatherCard = null;
     }
-    pendingNovelAiImage = null;
+    pendingNovelAiImages = [];
   } catch (err) {
     const message = err instanceof Error ? err.message : "模型请求失败";
     const msg = runMessages.find(m => m.id === streamMsgId);
@@ -3404,7 +3414,7 @@ async function send(): Promise<void> {
     let pendingTtsCachePromise: Promise<{ cacheKey: string } | null> | null = null;
     let sticker: string | null = null;
     let pendingWeatherCard: Record<string, unknown> | null = null;
-    let pendingNovelAiImage: Record<string, unknown> | null = null;
+    let pendingNovelAiImages: Record<string, unknown>[] = [];
 
     // 终态信号：由事件流的 RUN_FINISHED/RUN_ERROR 触发 resolve，
     // 不依赖 invoke 的 resolve（invoke 只做 ack，可能与事件投递存在顺序竞争）。
@@ -3544,7 +3554,7 @@ async function send(): Promise<void> {
               console.log("[Chat] 收到天气卡片数据:", JSON.stringify(event.value)?.slice(0, 100));
               pendingWeatherCard = event.value as Record<string, unknown>;
             } else if (event.name === "cyrene.novelai-image") {
-              pendingNovelAiImage = event.value as Record<string, unknown>;
+              pendingNovelAiImages.push(event.value as Record<string, unknown>);
             } else if (event.name === "cyrene.todos") {
               renderTodoPanel(event.value as TodoState | null);
             } else if (event.name === "cyrene.choice") {
@@ -3581,7 +3591,6 @@ async function send(): Promise<void> {
       messages: modelMessages,
       style: getCurrentStyle(),
       sessionId: runSessionId,
-      attachments: turnTextAttachments,
       imageAttachments: directImageAttachments.length > 0 ? directImageAttachments : undefined,
     });
     if (!ack.success) {
@@ -3600,8 +3609,8 @@ async function send(): Promise<void> {
       msg.transient = false;
       msg.content = streamContent;
       msg.sticker = sticker;
-      if(pendingNovelAiImage){
-        msg.novelAiImage={id:String(pendingNovelAiImage.id||""),prompt:String(pendingNovelAiImage.prompt||""),model:String(pendingNovelAiImage.model||""),width:Number(pendingNovelAiImage.width)||undefined,height:Number(pendingNovelAiImage.height)||undefined};
+      if(pendingNovelAiImages.length > 0){
+        msg.novelAiImages = pendingNovelAiImages.map(img => ({id:String(img.id||""),prompt:String(img.prompt||""),model:String(img.model||""),width:Number(img.width)||undefined,height:Number(img.height)||undefined}));
       }
     }
     void saveSessionMessages(runSessionId, runMessages);
@@ -3624,7 +3633,7 @@ async function send(): Promise<void> {
       }
       pendingWeatherCard = null;
     }
-    pendingNovelAiImage = null;
+    pendingNovelAiImages = [];
     // TTS 已在 TEXT_MESSAGE_END 时触发，这里不再重复朗读
   } catch (err) {
     const message = err instanceof Error ? err.message : "模型请求失败";

@@ -107,6 +107,6 @@ export function isMemoryBackgroundBudgetAvailable(
   const metrics = loadMemoryBackgroundMetrics(db)
   const date = new Date(now).toISOString().slice(0, 10)
   if (metrics.daily.date !== date) return true
-  return metrics.daily.calls < (limits.maxCalls ?? 100) &&
-    metrics.daily.inputTokens + metrics.daily.outputTokens < (limits.maxTokens ?? 500_000)
+  return metrics.daily.calls < (limits.maxCalls ?? 300) &&
+    metrics.daily.inputTokens + metrics.daily.outputTokens < (limits.maxTokens ?? 5_000_000)
 }

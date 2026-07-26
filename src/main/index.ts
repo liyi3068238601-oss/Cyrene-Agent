@@ -1903,7 +1903,7 @@ function buildProactivePersonaPrompt(): string {
 function toProactiveHistory(messages: Array<{ role: "user" | "model"; content: string; at: number }>): ProactiveHistoryTurn[] {
   return messages
     .filter((message) => message.content.trim())
-    .slice(-16)
+    .slice(-150)
     .map((message) => ({ role: message.role, content: message.content, at: message.at }));
 }
 
@@ -3868,6 +3868,36 @@ ipcMain.handle(IPC.MEMORY_PANEL_DELETE_IMPORTED_DOC, (_event, payload: { importI
   const deleted = deleteImportedDoc(payload.importId, payload.fileName);
   return { ok: true, deleted };
 });
+
+ipcMain.handle(IPC.KNOWLEDGE_UPLOAD, async () => {
+  const picked = await dialog.showOpenDialog({
+    title: "导入知识库文件",
+    properties: ["openFile", "multiSelections"],
+    filters: [
+      { name: "文本文件", extensions: ["txt", "md", "json", "csv", "yaml", "yml", "js", "ts", "py", "html", "xml", "log", "srt", "vtt"] },
+      { name: "所有文件", extensions: ["*"] },
+    ],
+  });
+  if (picked.canceled || picked.filePaths.length === 0) return { ok: false, canceled: true };
+
+  const results: Array<{ fileName: string; chunkCount: number; ok: boolean; error?: string }> = [];
+  for (const filePath of picked.filePaths) {
+    const fileName = path.basename(filePath);
+    try {
+      const text = fs.readFileSync(filePath, "utf8");
+      if (!text.trim()) {
+        results.push({ fileName, chunkCount: 0, ok: false, error: "文件内容为空" });
+        continue;
+      }
+      const chunkCount = await importDocument(text, fileName);
+      results.push({ fileName, chunkCount, ok: true });
+    } catch (error) {
+      results.push({ fileName, chunkCount: 0, ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return { ok: true, results };
+});
+
 // L0/L1 editable fields whitelist
 const L0_EDITABLE_KEYS = ["preferredName", "occupation", "longTermInterests", "language", "permanentNote"];
 const L1_EDITABLE_KEYS = ["recentGoals", "recentPreferences", "currentProject"];

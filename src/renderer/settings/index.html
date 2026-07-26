@@ -19,6 +19,7 @@
 
       <nav class="settings-nav__list">
         <button type="button" class="nav-item" data-section="memory"><span>🧠</span>记忆</button>
+        <button type="button" class="nav-item" data-section="knowledge"><span>📚</span>知识库</button>
         <button type="button" class="nav-item" data-section="chat"><span>💬</span>聊天</button>
         <button type="button" class="nav-item" data-section="user"><span>👤</span>用户信息</button>
         <hr class="nav-divider" />
@@ -630,12 +631,33 @@
             <div class="memory-tab-panel is-hidden" data-memory-view="archive"><div class="memory-stream" id="memory-archive-list"></div></div>
             <div class="memory-tab-panel is-hidden" data-memory-view="system"><div class="memory-system" id="memory-system-view"></div></div>
 
-            <section class="memory-section">
-              <div class="memory-section__heading"><h2>导入知识</h2><span>RAG 文档</span></div>
-              <div class="memory-list" id="memory-imported-list"></div>
-            </section>
             <div class="is-hidden" id="memory-l2-list"></div>
             <div class="is-hidden" id="memory-reflection-list"></div>
+          </div>
+        </section>
+
+        <section class="settings-panel is-hidden" id="knowledge-panel" data-panel="knowledge">
+          <div class="panel-heading">
+            <div class="panel-heading__icon">📚</div>
+            <div>
+              <h1>知识库</h1>
+              <p>上传与管理 RAG 知识文档</p>
+            </div>
+          </div>
+          <div class="panel-body knowledge-panel">
+            <section class="knowledge-section">
+              <div class="knowledge-upload-area">
+                <h2>上传知识文件</h2>
+                <button type="button" class="btn-primary knowledge-upload-btn" id="knowledge-upload-btn">📤 选择文件上传</button>
+                <p class="knowledge-upload-hint">支持 txt、md、json、csv、yaml 等文本文件，上传后自动切片索引</p>
+                <p class="knowledge-upload-status is-hidden" id="knowledge-upload-status"></p>
+              </div>
+              <div class="memory-section__heading">
+                <h2>已导入文档</h2>
+                <span>RAG 文档</span>
+              </div>
+              <div class="memory-list" id="knowledge-file-list"></div>
+            </section>
           </div>
         </section>
 

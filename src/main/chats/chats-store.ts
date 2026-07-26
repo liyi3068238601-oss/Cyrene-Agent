@@ -248,7 +248,7 @@ export function getSessionPage(id: string, before: number | null, limit: number)
   const session = readSessionFile(id);
   if (!session) return null;
   const end = Math.max(0, Math.min(before ?? session.messages.length, session.messages.length));
-  const safeLimit = Math.max(1, Math.min(Math.floor(limit) || 1, 200));
+  const safeLimit = Math.max(1, Math.min(Math.floor(limit) || 1, 500));
   const start = Math.max(0, end - safeLimit);
   const { messages: _messages, ...meta } = session;
   return {

@@ -109,9 +109,9 @@ export interface TwoPhaseFcResult {
 
 const LOG_PREFIX = "[TwoPhaseFcLoop]";
 const DEFAULT_MAX_TOOL_ROUNDS = 20;
-const DEFAULT_PER_ROUND_TIMEOUT_MS = 75_000;
-const DEFAULT_MAX_CONSECUTIVE_TIMEOUTS = 2;
-const DEFAULT_FORCE_SUMMARY_TIMEOUT_MS = 90_000;
+const DEFAULT_PER_ROUND_TIMEOUT_MS = 120_000;
+const DEFAULT_MAX_CONSECUTIVE_TIMEOUTS = 3;
+const DEFAULT_FORCE_SUMMARY_TIMEOUT_MS = 150_000;
 
 
 function sliceToDeltas(text: string, chunkSize = 1): string[] {
@@ -279,12 +279,15 @@ export async function runTwoPhaseFcLoop(options: TwoPhaseFcOptions): Promise<Two
   };
 
   // ── TOOL_PHASE 主循环 ──
+  // breakReason 记录循环退出原因，避免把超时 break 误报为"达到最大轮数"。
+  let breakReason: "timeout" | "consecutive_timeouts" | "max_rounds" | null = null;
   for (let round = 0; round < maxToolRounds; round++) {
     if (signal?.aborted) {
       throw new Error("run cancelled");
     }
     if (Date.now() - startTime > timeoutMs) {
       console.warn(LOG_PREFIX, "Function Calling 超时，在第 " + (round + 1) + " 轮退出");
+      breakReason = "timeout";
       break;
     }
 
@@ -309,6 +312,7 @@ export async function runTwoPhaseFcLoop(options: TwoPhaseFcOptions): Promise<Two
         onEvent?.({ type: "step_finished", stepName: `tool-round-${round + 1}` });
         if (consecutiveTimeouts >= maxConsecutiveTimeouts) {
           console.warn(LOG_PREFIX, "连续 " + maxConsecutiveTimeouts + " 次超时，触发 SOUL_PHASE");
+          breakReason = "consecutive_timeouts";
           break;
         }
         continue;
@@ -409,11 +413,19 @@ export async function runTwoPhaseFcLoop(options: TwoPhaseFcOptions): Promise<Two
     });
   }
 
-  // 达到 maxToolRounds，触发 SOUL_PHASE 强制总结
+  // 循环退出后进入 SOUL_PHASE。根据 breakReason 选择合适的 reason 和日志。
   if (signal?.aborted) {
     throw new Error("run cancelled");
   }
-  console.warn(LOG_PREFIX, "达到最大轮数 " + maxToolRounds + "，触发 SOUL_PHASE 强制总结");
+  // breakReason === null 表示 for 循环正常跑完 maxToolRounds 轮
+  const soulReason: SoulPhaseReason = breakReason === "consecutive_timeouts" || breakReason === "timeout"
+    ? "timeout"
+    : "max_rounds";
+  if (breakReason === null) {
+    console.warn(LOG_PREFIX, "达到最大轮数 " + maxToolRounds + "，触发 SOUL_PHASE 强制总结");
+  } else {
+    console.warn(LOG_PREFIX, "TOOL_PHASE 因 " + breakReason + " 退出，进入 SOUL_PHASE（reason=" + soulReason + "）");
+  }
   return await runSoulPhase({
     adapter,
     cfg: options.settings,
@@ -423,7 +435,7 @@ export async function runTwoPhaseFcLoop(options: TwoPhaseFcOptions): Promise<Two
     allToolResults,
     accInput,
     accOutput,
-    reason: "max_rounds",
+    reason: soulReason,
     forceSummaryTimeoutMs,
     signal,
     onEvent,

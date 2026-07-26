@@ -78,7 +78,18 @@ export function applyReasoningPreference(
   }
 
   // 2. auto：不增加任何字段
+  //   例外：thinking-type 厂商（如 DeepSeek V4）在 auto 模式下默认启用 thinking。
+  //   历史问题：thinking + function calling 组合下模型曾输出 DSML 文本标记而非结构化 tool_calls。
+  //   修复进展：reasoning_content 回传已修复（openai-adapter.ts toWireMessages），
+  //   现在保留 thinking 并附加 keep:"all"，让模型在思考的同时正确返回 tool_calls。
+  //   如果 keepOnTools 显式为 false（如 K2.5），仍然禁用 thinking。
   if (effective.mode === "auto") {
+    if (context.hasTools && capability.control === "toggle-effort" && capability.requestStyle === "thinking-type" && capability.keepOnTools === false) {
+      result.thinking = { type: "disabled" };
+    } else if (context.hasTools && capability.control === "toggle-effort" && capability.requestStyle === "thinking-type" && capability.keepOnTools !== false) {
+      // 默认保留 thinking 并附加 keep:"all"（DeepSeek V4 / GLM 等都支持）
+      result.thinking = { type: "enabled", keep: "all" };
+    }
     return result;
   }
 

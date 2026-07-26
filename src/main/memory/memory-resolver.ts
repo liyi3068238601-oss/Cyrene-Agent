@@ -213,7 +213,7 @@ export function buildResolverMessages(payload: ResolverPayload): Array<{ role: "
 export async function callResolverLLM(
   settings: ResolverModelSettings,
   messages: Array<{ role: "system" | "user"; content: string }>,
-  maxTokens = 700,
+  maxTokens = 50000,
 ): Promise<string> {
   const startedAt = Date.now()
   let inputTokens = 0

@@ -419,8 +419,15 @@ const memoryPanelApi = {
   mergeFragment: (sourceId: string, targetId: string) => ipcRenderer.invoke(IPC.MEMORY_PANEL_MERGE_FRAGMENT, { sourceId, targetId }),
 };
 
+const knowledgePanelApi = {
+  uploadFile: () => ipcRenderer.invoke(IPC.KNOWLEDGE_UPLOAD),
+  getData: () => ipcRenderer.invoke(IPC.MEMORY_PANEL_GET_DATA),
+  deleteDoc: (importId: string, fileName?: string) => ipcRenderer.invoke(IPC.MEMORY_PANEL_DELETE_IMPORTED_DOC, { importId, fileName }),
+};
+
 contextBridge.exposeInMainWorld("user", userApi);
 contextBridge.exposeInMainWorld("memoryPanel", memoryPanelApi);
+contextBridge.exposeInMainWorld("knowledgePanel", knowledgePanelApi);
 contextBridge.exposeInMainWorld("runtimeState", runtimeStateApi);
 
 const live2dSpeechApi = {

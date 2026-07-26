@@ -3,7 +3,7 @@
 import {
   ChatMessage, ChatRequest, ChatResponse, ChatVendorAdapter,
   HttpRequest, ProviderCapability, StreamChunk, StreamEvent,
-  TestConnectionResult, ToolCall, ToolExecutionResult, VendorConfig,
+  TestConnectionResult, ThinkingField, ToolCall, ToolExecutionResult, VendorConfig,
 } from "./types";
 import { authHeaderFor } from "./auth";
 import { resolveReasoningCapability } from "../../../shared/reasoning";
@@ -16,7 +16,7 @@ function buildUrl(baseUrl: string): string {
 }
 
 /** 把统一消息翻译成 OpenAI wire messages。 */
-function toWireMessages(messages: ChatMessage[]): unknown[] {
+function toWireMessages(messages: ChatMessage[], thinkingField: ThinkingField): unknown[] {
   return messages.map(m => {
     if (m.role === "system") return { role: "system", content: m.content ?? "" };
     if (m.role === "user") return { role: "user", content: m.content ?? "" };
@@ -38,6 +38,14 @@ function toWireMessages(messages: ChatMessage[]): unknown[] {
         function: { name: tc.name, arguments: tc.arguments },
       }));
     }
+    // 思考模式多轮回传：DeepSeek V4 在 thinking 模式下要求所有 assistant 消息都携带
+    // reasoning_content 字段（即使内容为空也必须存在），否则 HTTP 400。
+    // 根因：历史对话中的 assistant 消息（非 thinking 模式下生成）没有 reasoning_content，
+    // 当 SOUL_PHASE 启用 thinking 后，DeepSeek 要求所有 assistant 消息都带此字段。
+    // 修复：只要厂商声明了 thinkingField，就给所有 assistant 消息补上该字段（空则补 ""）。
+    if (thinkingField) {
+      wire[thinkingField] = m.thinking ?? "";
+    }
     return wire;
   });
 }
@@ -57,7 +65,7 @@ export class OpenAICompatAdapter implements ChatVendorAdapter {
   buildRequest(req: ChatRequest, cfg: VendorConfig): HttpRequest {
     const body: Record<string, unknown> = {
       model: req.model,
-      messages: toWireMessages(req.messages),
+      messages: toWireMessages(req.messages, this.capability.thinkingField),
       stream: req.stream ?? false,
     };
     // temperature 只在调用方显式传时才塞进 body。
@@ -85,6 +93,24 @@ export class OpenAICompatAdapter implements ChatVendorAdapter {
         model: cfg.model,
       },
     );
+
+    // 后处理：thinking 被禁用时，从 messages 中移除 reasoning_content / thinking 字段。
+    // 原因：toWireMessages 在 applyReasoningPreference 之前执行，会预先给所有 assistant
+    // 消息补 reasoning_content。但 auto + hasTools 会主动禁用 thinking（reasoning.ts），
+    // 此时 DeepSeek 不期望消息里出现 reasoning_content 字段，否则工具调用会异常。
+    const tf = this.capability.thinkingField;
+    if (tf) {
+      const thinkingCfg = finalBody.thinking as { type?: string } | undefined;
+      if (thinkingCfg?.type === "disabled") {
+        const wireMessages = finalBody.messages as Array<Record<string, unknown>>;
+        for (const m of wireMessages) {
+          if (m.role === "assistant" && tf in m) {
+            delete m[tf];
+          }
+        }
+      }
+    }
+
     return {
       url: buildUrl(cfg.baseUrl),
       method: "POST",

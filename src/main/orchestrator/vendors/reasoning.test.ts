@@ -86,11 +86,36 @@ const toggleEffortAnthropicCap: ReasoningCapability = {
 };
 
 describe("applyReasoningPreference — auto 路径", () => {
-  test("auto + 任何 control → 不增加字段", () => {
+  test("auto + 任何 control（无工具）→ 不增加字段", () => {
     const body = { model: "x", messages: [] };
     expect(applyReasoningPreference(body, { mode: "auto" }, noneCap, ctx)).toEqual(body);
     expect(applyReasoningPreference(body, { mode: "auto" }, toggleQwenCap, ctx)).toEqual(body);
     expect(applyReasoningPreference(body, { mode: "auto" }, toggleAdaptiveCap, ctx)).toEqual(body);
+  });
+
+  test("auto + toggle-effort + thinking-type + hasTools（无 keepOnTools）→ thinking.enabled + keep:all", () => {
+    const cap: ReasoningCapability = {
+      control: "toggle-effort",
+      supportedEfforts: ["high", "max"],
+      defaultEffort: "high",
+      requestStyle: "thinking-type",
+      supportsDisable: true,
+    };
+    expect(applyReasoningPreference({}, { mode: "auto" }, cap, ctxWithTools))
+      .toEqual({ thinking: { type: "enabled", keep: "all" } });
+  });
+
+  test("auto + toggle-effort + thinking-type + keepOnTools=false + hasTools → thinking 禁用", () => {
+    const cap: ReasoningCapability = {
+      control: "toggle-effort",
+      supportedEfforts: ["high", "max"],
+      defaultEffort: "high",
+      requestStyle: "thinking-type",
+      supportsDisable: true,
+      keepOnTools: false,
+    };
+    expect(applyReasoningPreference({}, { mode: "auto" }, cap, ctxWithTools))
+      .toEqual({ thinking: { type: "disabled" } });
   });
 
   test("不修改入参（snapshot）", () => {

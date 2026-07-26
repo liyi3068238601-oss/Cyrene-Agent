@@ -4,19 +4,19 @@
 //   ① 工具结果入队前截断（truncateToolResult）—— 防单条大结果爆窗
 //   ② 窗口级压缩（compressConversation）—— 防多轮累积爆窗
 //
-// 阈值设计（基于 128K context window 的云端大模型预算）：
+// 阈值设计（基于 1M context window 的云端大模型预算）：
 //   系统提示（人格+工具schema+策略段）  ≈ 6K tokens
 //   模型输出预留（thinking+回复）        ≈ 4K tokens
 //   安全余量                             ≈ 4K tokens
 //   ────────────────────────────
-//   FC 循环 tool results 可用空间        ≈ 114K tokens
+//   FC 循环 tool results 可用空间        ≈ 986K tokens
 //
 //   单条截断 12000 字符（≈4K tokens）—— 不超过总窗口 3%，兜极端大结果
-//   窗口压缩 80000 字符（≈27K tokens）—— 约跑 6-8 轮重工具后触发，不频繁
+//   窗口压缩 360000 字符（≈120K tokens）—— 覆盖 150 条历史消息后仍有余量
 
 const TOOL_RESULT_MAX_CHARS = 12000;
-const WINDOW_COMPRESS_THRESHOLD_TOKENS = 27000;
-const WINDOW_COMPRESS_THRESHOLD_CHARS = 80000;
+const WINDOW_COMPRESS_THRESHOLD_TOKENS = 120000;
+const WINDOW_COMPRESS_THRESHOLD_CHARS = 360000;
 const KEEP_RECENT_ROUNDS = 6; // 压缩时保留最近 6 轮完整（system + 最近对话 + 工具结果）
 
 /**
