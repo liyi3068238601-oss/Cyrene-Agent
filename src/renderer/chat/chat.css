@@ -105,6 +105,21 @@ body {
   text-shadow: 0 0 16px rgba(236, 72, 153, 0.24);
 }
 
+/* 标题栏头像：默认主题显示白线稿 PNG，白调主题切换为黑色线条 SVG。 */
+.chat__name-avatar {
+  display: block;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  border-radius: var(--rb-radius-full);
+  object-fit: cover;
+}
+
+[data-ui-theme="pearl-white"] .chat__name-avatar {
+  content: url("/icons/cyrene-avatar-line.svg");
+  display: block;
+}
+
 /* 名字与状态之间的分隔点：弱化，不抢名字 */
 .chat__name-sep {
   color: var(--rb-text-faint);
@@ -288,6 +303,88 @@ body {
   -webkit-app-region: no-drag;
 }
 
+/* Work / Chat 始终可见的分段开关。外壳保持低对比，
+   当前项用抬起的玻璃片强调，避免与右侧下拉控件混淆。 */
+.mode-switch {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(72px, 1fr));
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--rb-border-faint);
+  border-radius: 10px;
+  background: rgba(8, 7, 12, 0.24);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.16);
+  flex: 0 0 auto;
+  -webkit-app-region: no-drag;
+}
+
+.mode-switch__option {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--rb-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    color 120ms ease,
+    background 120ms ease,
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    transform 120ms ease;
+}
+
+.mode-switch__option svg {
+  display: block;
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+}
+
+.mode-switch__option:hover:not(.is-active) {
+  color: var(--rb-text-default);
+  background: rgba(255, 255, 255, 0.055);
+}
+
+.mode-switch__option.is-active {
+  color: var(--rb-text-strong);
+  background: rgba(255, 255, 255, 0.15);
+  border-color: var(--rb-border-soft);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.10),
+    0 2px 6px rgba(0, 0, 0, 0.16);
+}
+
+.mode-switch__option:active {
+  transform: translateY(1px);
+}
+
+.mode-switch__option:focus-visible {
+  outline: 2px solid var(--rb-pink-glow);
+  outline-offset: 1px;
+}
+
+[data-ui-theme="pearl-white"] .mode-switch {
+  background: rgba(36, 26, 42, 0.055);
+  box-shadow: inset 0 1px 2px rgba(36, 26, 42, 0.08);
+}
+
+[data-ui-theme="pearl-white"] .mode-switch__option.is-active {
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    0 2px 7px rgba(83, 57, 88, 0.10);
+}
+
 .chat__icon-btn,
 .chat__winbtn {
   display: grid;
@@ -303,7 +400,9 @@ body {
   transition: background 120ms ease, color 120ms ease, transform 120ms ease, box-shadow 200ms ease, border-color 120ms ease;
 }
 
-.chat__winbtn svg { display: block; }
+.chat__winbtn svg,
+.chat__icon-btn svg,
+.chat__attach svg { display: block; }
 
 .chat__icon-btn:hover,
 .chat__winbtn:hover {
@@ -459,17 +558,6 @@ body {
   flex: 0 0 auto;
 }
 
-.chat__rail-identity {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: var(--rb-border-faint);
-  color: var(--rb-text-muted);
-  font-size: 10px;
-}
 
 .chat__rail-empty {
   display: flex;
@@ -943,6 +1031,16 @@ body {
   transition: all 0.2s;
   padding: 0;
   line-height: 1;
+  overflow: hidden;
+}
+
+.chat__sticker-btn-icon {
+  width: 26px;
+  height: 26px;
+  object-fit: contain;
+  display: block;
+  pointer-events: none;
+  -webkit-user-drag: none;
 }
 
 .chat__sticker-btn:hover {
@@ -1028,6 +1126,14 @@ body {
   color: var(--rb-pink-100);
   white-space: nowrap;
   vertical-align: middle;
+}
+
+.chat__file-tag-preview {
+  width: 64px;
+  height: 48px;
+  border-radius: 6px;
+  object-fit: cover;
+  background: rgba(0, 0, 0, 0.2);
 }
 
 .chat__file-tag button {
@@ -1275,17 +1381,6 @@ body {
 @keyframes thinking-fade {
   0%, 60%, 100% { opacity: 0.3; }
   30% { opacity: 1; }
-}
-
-/* 流式逐字渐显：每个字 span 从透明淡入，营造打字机渐显感 */
-.msg__char {
-  display: inline;
-  animation: char-fade-in 200ms ease-out;
-}
-
-@keyframes char-fade-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
 }
 
 /* 工具调用提示：FC 循环里模型调工具时，气泡显示"🔧 调用中：xxx" */
@@ -2087,6 +2182,72 @@ body {
   border-color: rgba(220,40,80,0.36);
 }
 
+/* ── 网易云推荐 AG-UI 卡片 ── */
+.music-agui-card {
+  width: min(420px, calc(100vw - 112px));
+  margin-top: 8px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 16px;
+  background: linear-gradient(145deg, rgba(40, 30, 50, 0.96), rgba(25, 21, 34, 0.96));
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
+}
+
+.music-agui-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.music-agui-card__header strong { font-size: 14px; color: #fff; }
+.music-agui-card__header span { font-size: 10px; color: rgba(255,255,255,.55); }
+
+.music-agui-card__track {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.music-agui-card__track:last-child { border-bottom: 0; }
+.music-agui-card__order { color: rgba(255,255,255,.38); font-size: 12px; text-align: center; }
+.music-agui-card__meta { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.music-agui-card__meta strong,
+.music-agui-card__meta span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.music-agui-card__meta strong { color: rgba(255,255,255,.94); font-size: 13px; }
+.music-agui-card__meta span { color: rgba(255,255,255,.48); font-size: 11px; }
+
+.music-agui-card__play {
+  border: 1px solid rgba(255, 95, 125, 0.42);
+  border-radius: 999px;
+  padding: 5px 10px;
+  color: #ff9eb4;
+  background: rgba(255, 60, 95, 0.12);
+  cursor: pointer;
+}
+
+.music-agui-card__play:hover:not(:disabled) { background: rgba(255, 60, 95, 0.22); }
+.music-agui-card__play:disabled { cursor: default; opacity: .68; }
+
+[data-ui-theme="pearl-white"] .music-agui-card {
+  border-color: rgba(255, 143, 184, 0.3);
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 8px 24px rgba(255, 120, 170, 0.14);
+}
+
+[data-ui-theme="pearl-white"] .music-agui-card__header,
+[data-ui-theme="pearl-white"] .music-agui-card__track { border-color: rgba(80, 45, 65, 0.1); }
+[data-ui-theme="pearl-white"] .music-agui-card__header strong,
+[data-ui-theme="pearl-white"] .music-agui-card__meta strong { color: #2d2030; }
+[data-ui-theme="pearl-white"] .music-agui-card__header span,
+[data-ui-theme="pearl-white"] .music-agui-card__order,
+[data-ui-theme="pearl-white"] .music-agui-card__meta span { color: #8b7180; }
+
+/* ── NovelAI drawing studio chat cards (local) ──
 .novelai-chat-card {
   width: min(calc(var(--sticker-width) + 40px), 48vw, 240px);
   margin: 8px 0 14px;
@@ -3156,27 +3317,4 @@ body {
   line-height: 1.65;
 }
 
-@media (max-width: 1299px) {
-  .chat__body { grid-template-columns: minmax(0, 1fr); }
-  .chat__inspector { display: none; }
-}
 
-@media (max-width: 1099px) {
-  .chat__shell { grid-template-columns: 72px minmax(0, 1fr); }
-  .chat__rail { padding-inline: 8px; }
-  .chat__brand { justify-content: center; padding: 0; }
-  .chat__brand-copy,
-  .chat__nav-item > span:last-child,
-  .chat__rail-section-head > span,
-  .chat__rail-list,
-  .chat__rail-empty,
-  .chat__rail-footer div,
-  #session-count { display: none; }
-  .chat__primary-nav { align-items: center; }
-  .chat__nav-item { justify-content: center; width: 44px; padding: 0; }
-  .chat__nav-item::before { left: -14px; }
-  .chat__rail-section-head { justify-content: center; padding: 10px 0; }
-  .chat__rail-footer { display: flex; justify-content: center; min-height: 38px; padding: 0; }
-  .dropdown-trigger .dt-label { display: none; }
-  .chat__messages { padding-inline: 24px; }
-}

@@ -5,7 +5,8 @@
 // - ChatSessionMeta 是「索引项」，不含 messages，存到 index.json；
 //   列表渲染只读 index.json，避免一次性把所有会话消息加载到内存。
 // - identityId 当前为预留字段——职位面板还未做，新会话默认 null，
-//   显示侧 fallback 到 "聊天陪伴"。后续职位面板做好后接入。
+import type { MusicCardData } from "./music-card";
+
 // - schemaVersion 用于以后改 schema 时的迁移判断；当前固定 1。
 
 export type ChatRole = "user" | "model";
@@ -47,6 +48,8 @@ export interface ChatMessage {
     width?: number;
     height?: number;
   };
+  /** 已实际展示的音乐候选卡片；持久化展示不延长 Skill 候选状态 TTL。 */
+  musicCard?: MusicCardData;
 }
 
 export type MessageAttachment = ImageMessageAttachment | DocumentMessageAttachment;
@@ -105,4 +108,3 @@ export interface ChatSessionMeta {
 export const CHAT_SCHEMA_VERSION = 1 as const;
 
 // 默认 identity 显示名（职位面板未做，所有会话先用这个）。
-export const DEFAULT_IDENTITY_LABEL = "聊天陪伴";

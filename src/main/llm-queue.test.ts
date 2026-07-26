@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { enqueueLLMTask, getLLMQueueStatus } from "./llm-queue"
 
 describe("LLM background queue status", () => {
@@ -26,3 +26,31 @@ describe("LLM background queue status", () => {
     expect(getLLMQueueStatus()).toEqual({ queued: 0, active: 0, idle: true })
   })
 })
+
+describe("enqueueLLMTask options", () => {
+  it("can run a background observer without adding terminal noise", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await enqueueLLMTask("心情观察器", async () => "ok", { log: false });
+      expect(log).not.toHaveBeenCalled();
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("can disable the automatic rate-limit retry for one-shot extractors", async () => {
+    vi.useFakeTimers();
+    const task = vi.fn().mockRejectedValue(new Error("HTTP 429 rate limit"));
+    try {
+      const result = enqueueLLMTask("one-shot", task, {
+        log: false,
+        retryRateLimit: false,
+      });
+      await vi.runAllTimersAsync();
+      await expect(result).rejects.toThrow("429");
+      expect(task).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

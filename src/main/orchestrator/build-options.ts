@@ -20,7 +20,11 @@
 //   IPC.AGUI_EVENT / chatWindow（用于推 sticker）
 //
 // 这些全部塞到 BuildOptionsDeps 里。dispatcher 在 Phase 1 注入同样的 deps 即可。
-import type { CyreneRunOptions, CyreneRunResult } from "./cyrene-agent";
+import {
+  resolveExecutionMode,
+  type CyreneRunOptions,
+  type CyreneRunResult,
+} from "./cyrene-agent";
 import type { ToolDefinition } from "./tool-registry";
 import type { ChatMessage, OpenAIContentBlock } from "./vendors/types";
 import type { AguiRunInput } from "../agui-bridge";
@@ -34,15 +38,31 @@ import {
 } from "../chat-time-context";
 import { applyCachedSummary, scheduleSummaryUpdate } from "./conversation-summarizer";
 import type { VendorConfig } from "./vendors";
+import { perf } from "../perf-trace";
+import { buildResponseContext } from "../cita/context-package";
+import {
+  STYLE_IDS,
+  normalizeStyleId,
+  type CustomStyleConfig,
+  type StyleId,
+} from "../../shared/style-sampling";
+import type { ApprovedStyleSampling } from "./vendors/style-sampling";
+import type {
+  SocialAtom,
+  SocialExtractionInput,
+} from "../social-context/types";
 
 /** index.ts 模块级符号的最小可注入子集。
  *  类型故意用宽签名（unknown / 任意 shape）—— 因为 build-options 是纯消费者，
  *  实际调用时由 index.ts 注入真实的强类型函数。这避免循环类型依赖。 */
 export interface BuildOptionsDeps {
   loadModelSettings: () => ModelSettingsLite;
+  loadGeneralSettings: () => StyleSettingsLite;
   loadUserProfile: () => UserProfileLite;
   buildEnvironmentContext: (model: { provider: string; model: string }, profile: unknown) => string;
   buildSkillCatalog: (skills: ReadonlyArray<unknown>) => string;
+  buildAutoInjectedSkillContext: (skills: ReadonlyArray<unknown>) => string;
+  buildAutoInjectedSoulContext?: (skills: ReadonlyArray<unknown>) => string;
   skillRegistry: { getEnabled(): ReadonlyArray<unknown> };
   resolveSlashActivation: (messages: ReadonlyArray<{ role: string; content?: string }>) => string;
   buildToneInjection: (
@@ -69,18 +89,51 @@ export interface BuildOptionsDeps {
   buildToolSystemPrompt: (enabledTools: ReadonlyArray<unknown>) => string;
   /** 第一期：Soul 阶段使用的基础 system prompt。工具结果在 FC 循环 Soul 阶段执行前动态追加。 */
   buildSoulSystemBasePrompt: (styleFile: string) => string;
+  /** 已由 main 侧解析好的 style Markdown；build-options 只负责注入边界。 */
+  readStylePrompt: (styleId: StyleId) => string;
+  /** 按 provider/model/reasoning/customStyle 解析后的 Soul 采样参数。 */
+  resolveSoulSampling: (input: {
+    styleId: StyleId;
+    settings: ModelSettingsLite;
+    customStyle: CustomStyleConfig;
+  }) => ApprovedStyleSampling;
   /** 第一期：注入 toolRegistry（用于 buildToolSystemPrompt 自动生成目录）。 */
   toolRegistry: { getEnabled(): ReadonlyArray<unknown> };
   logWorldbookInjection: (alwaysOnContext: string, systemContent: string) => void;
   normalizeChatMessages: (raw: ReadonlyArray<unknown>) => ChatMessage[];
   chatRequestTimeoutMs: number;
   captionImageForFallback?: (filePath: string) => Promise<{ ok: boolean; caption?: string; error?: string }>;
+  loadActionGateSystemPrompt: () => string;
+  loadNativeFcSystemPrompt: () => string;
+  prepareCitaTurn?: (input: {
+    conversationId: string;
+    turnId: string;
+    originalQuery: string;
+    recentDialogue: Array<{ role: "user" | "assistant"; text: string }>;
+  }) => Promise<{
+    contextBlock: string;
+    contextPackage?: {
+      originalQuery: string;
+      contextualizedQuery: string;
+      resolvedReferences: Array<{ surface: string; targetRef: string }>;
+      focusedContexts?: Array<{ contextRef: string }>;
+      supportingContexts?: Array<{ contextRef: string }>;
+    };
+  }>;
+  buildChatSocialContext?: (input: {
+    conversationId: string;
+    query: string;
+  }) => Promise<{
+    contextBlock: string;
+    retrievedAtoms: SocialAtom[];
+  }>;
 }
 
 /** onRunFinished 副作用所需的 deps（与 BuildOptionsDeps 部分重叠） */
 export interface OnRunFinishedDeps {
   loadModelSettings: () => ModelSettingsLite;
   scheduleMemoryWrite: (userText: string, reply: string, sessionId?: string) => void;
+  scheduleSocialAtomExtraction?: (input: SocialExtractionInput) => void;
   inferRuntimeState: (userText: string, reply: string, flag: boolean) => { status: string };
   runtimeState: {
     status: string;
@@ -124,12 +177,19 @@ export interface ModelSettingsLite {
   stickerSimilarityThreshold?: number;
 }
 
+export interface StyleSettingsLite {
+  currentStyleId?: unknown;
+  customStyle?: unknown;
+  chatSocialContextEnabled?: unknown;
+}
+
 export interface UserProfileLite {
   nickname?: string;
   callPreference?: string;
   birthday?: string;
   defaultCity?: string;
   timezone?: string;
+  gender?: string;
 }
 
 export function buildChannelSystem(channel?: RelationshipChannel): string {
@@ -271,6 +331,42 @@ function buildImageCaptionFallbackMessages(
   };
 }
 
+function isStyleId(value: unknown): value is StyleId {
+  return typeof value === "string" && (STYLE_IDS as readonly string[]).includes(value);
+}
+
+function styleIdFromLegacyFile(value: unknown): StyleId | undefined {
+  if (typeof value !== "string") return undefined;
+  const legacy: Record<string, StyleId> = {
+    "01_default.md": "default",
+    "02_lively.md": "lively",
+    "03_healing.md": "healing",
+    "04_focused.md": "focused",
+    "05_sweet.md": "sweet",
+  };
+  return legacy[value];
+}
+
+function resolveRunStyleId(input: AguiRunInput, saved: StyleSettingsLite): StyleId {
+  if (isStyleId(input.styleId)) return input.styleId;
+  const legacyStyleId = styleIdFromLegacyFile(input.style);
+  if (legacyStyleId) return legacyStyleId;
+  if (isStyleId(saved.currentStyleId)) return saved.currentStyleId;
+  return normalizeStyleId(undefined);
+}
+
+function buildStylePromptBlock(markdown: string): string {
+  const trimmed = markdown.trim();
+  if (!trimmed) return "";
+  return [
+    "[表达风格]",
+    "以下内容仅用于控制措辞、句式、语气和信息密度。",
+    "不得修改角色身份、事实记忆、工具规则、安全约束及硬性行为规则。",
+    "",
+    trimmed,
+  ].join("\n");
+}
+
 /**
  * 构造 CyreneAgent.runWithEvents 所需的 options + 提取 latestUserText。
  * 与 index.ts 原 AG-UI bridge 的 buildOptions 行为完全一致。
@@ -280,6 +376,7 @@ export async function buildAgentRunOptions(
   deps: BuildOptionsDeps,
 ): Promise<{ options: CyreneRunOptions; latestUserText: string }> {
   const settings = deps.loadModelSettings();
+  const styleSettings = deps.loadGeneralSettings();
   if (!settings.apiKey) {
     throw new Error("还没有填写 API Key，请先在设置里保存 API 配置。");
   }
@@ -290,17 +387,26 @@ export async function buildAgentRunOptions(
   // slim view for downstream helpers that only need { role, content }
   const slimMessages = messages as unknown as Array<{ role: string; content?: string }>;
   const latestUserText = contentToText(messages.filter((m) => m.role === "user").at(-1)?.content) ?? "";
+  const executionMode = resolveExecutionMode(
+    input.executionMode ?? ((input.style || "").startsWith("talk") ? "chat" : "work"),
+  );
+  const isChatMode = executionMode === "chat";
+  const conversationId = input.sessionId || "default";
+  const socialContextEnabled = isChatMode
+    && styleSettings.chatSocialContextEnabled === true
+    && Boolean(deps.buildChatSocialContext);
+  const messagesForSoul = socialContextEnabled ? messages.slice(-12) : messages;
   const skillActivation = deps.resolveSlashActivation(slimMessages);
   const profile = deps.loadUserProfile();
-  const { messages: llmMessages, timeContext: conversationTimeContext } = buildConversationTimeContext(
-    messages as unknown as ChatContextMessage[],
+  const { cleanMessages: cleanLlm, timestampedMessages: llmMessages, timeContext: conversationTimeContext } = buildConversationTimeContext(
+    messagesForSoul as unknown as ChatContextMessage[],
     resolveChatContextTimezone(profile.timezone),
   );
   const slimLlmMessages = llmMessages as Array<{ role: string; content?: string }>;
 
   let alwaysOnContext = "";
   try {
-    alwaysOnContext = await deps.buildAlwaysOnContext(latestUserText, slimMessages);
+    alwaysOnContext = await perf.track("build_always_on_context", () => deps.buildAlwaysOnContext(latestUserText, slimMessages));
   } catch (err) {
     console.warn("[Cyrene] always-on context build failed:", err);
   }
@@ -318,12 +424,13 @@ export async function buildAgentRunOptions(
 
   let relationshipContext = "";
   try {
-    relationshipContext = await deps.buildRelationshipContext();
+    relationshipContext = await perf.track("build_relationship_context", () => deps.buildRelationshipContext());
   } catch (err) {
     console.warn("[Cyrene] relationship context build failed:", err);
   }
 
   let environmentContext = "";
+  const envTimer = perf.begin("build_environment_context");
   try {
     environmentContext = deps.buildEnvironmentContext(
       { provider: settings.provider, model: settings.model },
@@ -333,28 +440,89 @@ export async function buildAgentRunOptions(
         birthday: profile.birthday,
         defaultCity: profile.defaultCity,
         timezone: profile.timezone,
+        gender: profile.gender,
       },
     );
   } catch (err) {
     console.warn("[Cyrene] environment context build failed:", err);
   }
+  envTimer.end();
 
-  const skillCatalog = deps.buildSkillCatalog(deps.skillRegistry.getEnabled());
+  const enabledSkills = deps.skillRegistry.getEnabled();
+  const skillCatalog = deps.buildSkillCatalog(enabledSkills);
+  const autoInjectedSkillContext = deps.buildAutoInjectedSkillContext(enabledSkills);
+  const autoInjectedSoulContext = deps.buildAutoInjectedSoulContext?.(enabledSkills) ?? "";
   const channelSystem = buildChannelSystem(input.channel);
   const messageRhythmSystem = buildMessageRhythmSystem();
   const externalChannelContext = deps.buildExternalChannelContext?.() ?? "";
   // Screen state is local desktop context and must never leak into QQ/other channels.
   const screenObservationContext = input.channel ? "" : (deps.buildScreenObservationContext?.() ?? "");
 
+  let chatSocialContextBlock = "";
+  let retrievedSocialAtoms: SocialAtom[] = [];
+  if (socialContextEnabled) {
+    try {
+      const built = await perf.track("build_chat_social_context", () => (
+        deps.buildChatSocialContext!({
+          conversationId,
+          query: latestUserText,
+        })
+      ));
+      chatSocialContextBlock = built.contextBlock;
+      retrievedSocialAtoms = built.retrievedAtoms.slice(0, 5);
+    } catch (err) {
+      console.warn("[Cyrene] chat social context build failed:", err);
+    }
+  }
+
+  let citaContextBlock = "";
+  let contextualizedQuery = latestUserText;
+  let responseContext = "";
+  let trustedRefs: string[] = [];
+  if (!isChatMode && deps.prepareCitaTurn) {
+    try {
+      const recentDialogue = messages
+        .filter((message): message is ChatMessage & { role: "user" | "assistant" } => (
+          message.role === "user" || message.role === "assistant"
+        ))
+        .slice(-12)
+        .map((message) => ({ role: message.role, text: contentToText(message.content) }));
+      const prepared = await perf.track("cita_prepare_turn", () => deps.prepareCitaTurn!({
+        conversationId,
+        turnId: `${conversationId}:${messages.length}`,
+        originalQuery: latestUserText,
+        recentDialogue,
+      }));
+      citaContextBlock = prepared.contextBlock;
+      contextualizedQuery = prepared.contextPackage?.contextualizedQuery ?? latestUserText;
+      if (prepared.contextPackage) {
+        trustedRefs = [...new Set([
+          ...prepared.contextPackage.resolvedReferences.map((reference) => reference.targetRef),
+          ...(prepared.contextPackage.focusedContexts ?? []).map((context) => context.contextRef),
+          ...(prepared.contextPackage.supportingContexts ?? []).map((context) => context.contextRef),
+        ])];
+        responseContext = buildResponseContext(
+          prepared.contextPackage.contextualizedQuery,
+          prepared.contextPackage.resolvedReferences,
+        );
+      }
+      console.log(
+        `[CITA/Trace] injection conversation=${conversationId} tool=${citaContextBlock.length > 0} soul=${citaContextBlock.length > 0} blockChars=${citaContextBlock.length}`,
+      );
+    } catch {
+      console.warn(`[CITA/Trace] injection conversation=${conversationId} tool=false soul=false reason=prepare_failed`);
+    }
+  }
+
   let toneInjection = "";
   if (deps.sceneEmbeddingIndex) {
     try {
-      toneInjection = await deps.buildToneInjection(
+      toneInjection = await perf.track("build_tone_injection", () => deps.buildToneInjection(
         latestUserText,
         slimLlmMessages,
         deps.getSceneEmbeddingProvider(),
         deps.sceneEmbeddingIndex,
-      );
+      ));
     } catch (err) {
       console.warn("[Cyrene] tone injection failed:", err);
     }
@@ -367,9 +535,17 @@ export async function buildAgentRunOptions(
     attachmentContext = `\n\n【本轮附件内容】\n${parts.join("\n\n")}`;
   }
 
-  const isTalkMode = (input.style || "").startsWith("talk");
-  const styleFile = input.style || "01_default.md";
-
+  const styleId = resolveRunStyleId(input, styleSettings);
+  const stylePromptBlock = buildStylePromptBlock(deps.readStylePrompt(styleId));
+  const soulSampling = deps.resolveSoulSampling({
+    styleId,
+    settings,
+    customStyle: styleSettings.customStyle as CustomStyleConfig,
+  });
+  // 运行模式只决定基础 system；表达 style 始终单独注入 Soul。
+  const basePromptMode = isChatMode ? "chat" : "work";
+  const enabledTools = deps.toolRegistry.getEnabled();
+  const runTools = isChatMode ? [] : enabledTools;
   // 第一期：保留旧 systemContent 兼容（已不再使用，保留字段是为了 logger 诊断）。
   // 同时新增 toolSystemContent / soulSystemBaseContent 两套。
   const systemContent =
@@ -379,8 +555,9 @@ export async function buildAgentRunOptions(
     (screenObservationContext ? screenObservationContext + "\n\n" : "") +
     (channelSystem ? channelSystem + "\n\n" : "") +
     messageRhythmSystem + "\n\n" +
-    deps.buildSystemPrompt(styleFile) +
+    deps.buildSystemPrompt(basePromptMode) +
     (skillCatalog ? "\n\n---\n\n" + skillCatalog : "") +
+    (autoInjectedSkillContext ? "\n\n---\n\n" + autoInjectedSkillContext : "") +
     skillActivation +
     toneInjection +
     (memoryInjection ? "\n\n" + memoryInjection + "\n\n" : "") +
@@ -388,33 +565,50 @@ export async function buildAgentRunOptions(
     (relationshipContext ? "\n\n" + relationshipContext + "\n\n" : "") +
     attachmentContext;
 
-  // 工具阶段：只含 tools_system 规则 + 运行时生成的工具目录。
-  const toolSystemContent = deps.buildToolSystemPrompt(deps.toolRegistry.getEnabled());
+  // 工具阶段：工具规则 + 运行时工具目录 + 可用 Skill 路由清单。
+  const toolSystemContent = deps.buildToolSystemPrompt(runTools)
+    + (skillCatalog ? "\n\n---\n\n" + skillCatalog : "")
+    + (autoInjectedSkillContext ? "\n\n---\n\n" + autoInjectedSkillContext : "")
+    + (citaContextBlock ? "\n\n" + citaContextBlock : "");
 
   // Soul 阶段基础 system：人设 + 环境/记忆/关系/附件/渠道（这些是"表达"所需）。
-  // 工具结果（role: tool 消息）已在 conversation 中携带，本字段不重复注入；
-  // FC 循环 Soul 阶段执行前会按需动态追加 soulToolResultsSummary。
-  const soulSystemBaseContent =
+  // FC 循环在 Soul 阶段追加通用 ToolExecutionContext，并保留 role:tool 协议消息。
+  const soulSystemWithoutCita =
     (environmentContext ? environmentContext + "\n\n" : "") +
     (conversationTimeContext ? conversationTimeContext + "\n\n---\n\n" : "") +
     (externalChannelContext ? externalChannelContext + "\n\n" : "") +
     (screenObservationContext ? screenObservationContext + "\n\n" : "") +
     (channelSystem ? channelSystem + "\n\n" : "") +
     messageRhythmSystem + "\n\n" +
-    deps.buildSoulSystemBasePrompt(styleFile) +
+    deps.buildSoulSystemBasePrompt(basePromptMode) +
     (skillCatalog ? "\n\n---\n\n" + skillCatalog : "") +
+    (chatSocialContextBlock ? "\n\n---\n\n" + chatSocialContextBlock : "") +
+    (stylePromptBlock ? "\n\n---\n\n" + stylePromptBlock : "") +
+    (autoInjectedSoulContext ? "\n\n---\n\n" + autoInjectedSoulContext : "") +
     skillActivation +
     toneInjection +
     (memoryInjection ? "\n\n" + memoryInjection + "\n\n" : "") +
     (alwaysOnContext ? "\n\n" + alwaysOnContext + "\n\n" : "") +
     (relationshipContext ? "\n\n" + relationshipContext + "\n\n" : "") +
     attachmentContext;
+  const soulSystemBaseContent = soulSystemWithoutCita;
+
+  const nativeFcSystemContent = deps.loadNativeFcSystemPrompt();
+  const actionGateSystemPrompt = deps.loadActionGateSystemPrompt();
 
   deps.logWorldbookInjection(alwaysOnContext, systemContent);
 
   // 第一期：原始 messages 不再携带 system。FC 循环按阶段动态注入。
   const fcMessages: ChatMessage[] = withDirectImageAttachments(llmMessages as unknown as ChatMessage[], input);
-  const imageCaptionFallback = buildImageCaptionFallbackMessages(toolSystemContent + "\n\n---\n\n" + soulSystemBaseContent, llmMessages as unknown as ChatMessage[], input, deps);
+  const cleanFcMessages: ChatMessage[] = withDirectImageAttachments(cleanLlm as unknown as ChatMessage[], input);
+  const imageCaptionFallback = buildImageCaptionFallbackMessages(
+    isChatMode
+      ? soulSystemWithoutCita
+      : toolSystemContent + "\n\n---\n\n" + soulSystemWithoutCita,
+    llmMessages as unknown as ChatMessage[],
+    input,
+    deps,
+  );
 
   // 对话摘要：当历史消息过长时，用缓存的摘要替换旧消息（同步读缓存，零延迟）
   const summarySessionId = input.sessionId || "default";
@@ -437,13 +631,35 @@ export async function buildAgentRunOptions(
         model: settings.model,
         apiKey: settings.apiKey,
         explicitTransport: settings.explicitTransport,
+        reasoning: settings.reasoning,
       },
       messages: summarizedMessages,
+      cleanMessages: cleanFcMessages,
+      conversationId,
+      executionMode,
+      originalQuery: latestUserText,
+      contextualizedQuery,
+      citaContextBlock,
+      trustedRefs,
+      responseContext,
+      nativeFcSystemContent,
+      actionGateSystemPrompt,
       timeoutMs: deps.chatRequestTimeoutMs,
       toolSystemContent,
       soulSystemBaseContent,
+      soulSampling,
+      ...(socialContextEnabled && input.userTurnId && input.assistantTurnId ? {
+        socialContext: {
+          enabled: true as const,
+          conversationId,
+          userTurnId: input.userTurnId,
+          assistantTurnId: input.assistantTurnId,
+          retrievedAtoms: retrievedSocialAtoms,
+          now: Date.now(),
+        },
+      } : {}),
       ...(imageCaptionFallback ? { imageCaptionFallback } : {}),
-      ...(isTalkMode ? { tools: [] as ToolDefinition[] } : {}),
+      ...(isChatMode ? { tools: runTools as ToolDefinition[] } : {}),
     },
     latestUserText,
   };
@@ -468,7 +684,29 @@ export async function onAgentRunFinished(
 ): Promise<{ sticker: string | null }> {
   const chatContent = result.reply;
   const sideEffectUserText = stripTurnModelContextForSideEffects(latestUserText);
-  deps.scheduleMemoryWrite(sideEffectUserText, chatContent, sessionId);
+  const socialContext = result.executionMode === "chat" && result.socialContext?.enabled === true
+    ? result.socialContext
+    : undefined;
+  const usesSocialExtractor = Boolean(socialContext);
+  if (socialContext) {
+    deps.scheduleSocialAtomExtraction?.({
+      conversationId: socialContext.conversationId,
+      userTurn: {
+        id: socialContext.userTurnId,
+        role: "user",
+        text: sideEffectUserText,
+      },
+      assistantTurn: {
+        id: socialContext.assistantTurnId,
+        role: "assistant",
+        text: chatContent,
+      },
+      retrievedAtoms: socialContext.retrievedAtoms,
+      now: socialContext.now,
+    });
+  } else {
+    deps.scheduleMemoryWrite(sideEffectUserText, chatContent, sessionId);
+  }
 
   const settings = deps.loadModelSettings();
   const inferredStatus = deps.inferRuntimeState(sideEffectUserText, chatContent, false);
@@ -478,26 +716,29 @@ export async function onAgentRunFinished(
     updatedAt: Date.now(),
   });
 
-  await deps.recordRelationshipTurn({
-    userText: sideEffectUserText,
-    assistantText: chatContent,
-    cyreneFeeling: deps.runtimeState.feeling ?? "平静",
-    channel: channel ?? "desktop",
+  await perf.track("record_relationship_turn", async () => {
+    await deps.recordRelationshipTurn({
+      userText: sideEffectUserText,
+      assistantText: chatContent,
+      cyreneFeeling: deps.runtimeState.feeling ?? "平静",
+      channel: channel ?? "desktop",
+    });
   });
 
   const stickerIndex = deps.getStickerEmbeddingIndex?.() ?? deps.stickerEmbeddingIndex;
   const stickerQuery = (chatContent + "\n" + sideEffectUserText).slice(0, 1000);
-  const stickerCandidate =
-    settings.stickerEnabled && stickerIndex
-      ? (
-          await deps.matchSticker(
-            stickerQuery,
-            deps.getEmbeddingProvider(),
-            stickerIndex,
-            settings.stickerSimilarityThreshold ?? 0.55,
-          )
-        )?.id ?? null
-      : null;
+  let stickerCandidate: string | null = null;
+  if (settings.stickerEnabled && stickerIndex) {
+    const matched = await perf.track("match_sticker", () =>
+      deps.matchSticker(
+        stickerQuery,
+        deps.getEmbeddingProvider(),
+        stickerIndex,
+        settings.stickerSimilarityThreshold ?? 0.55,
+      ),
+    );
+    stickerCandidate = matched?.id ?? null;
+  }
   const stickerSettings = deps.loadStickerSettings();
   const sticker = stickerCandidate && stickerSettings[stickerCandidate] !== false ? stickerCandidate : null;
 
@@ -515,7 +756,7 @@ export async function onAgentRunFinished(
     deps.broadcastRuntimeStateChanged();
     // 心情观察器在 channels bot (wechat/feishu) 上跳过：节省一次 LLM 调用、加快首条回复
     // 桌面聊天（channel === undefined）照常跑，保持 Live2D 表情/心情跟随对话变化
-    if (channel !== "wechat" && channel !== "feishu" && channel !== "qq") {
+    if (!usesSocialExtractor && channel !== "wechat" && channel !== "feishu" && channel !== "qq") {
       void deps.observeRuntimeState(settings, [], sideEffectUserText, chatContent);
     }
   }

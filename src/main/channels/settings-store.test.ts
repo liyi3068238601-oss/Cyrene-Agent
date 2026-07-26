@@ -117,4 +117,9 @@ describe("channels/settings-store", () => {
     expect(loaded.segmentContentThreshold).toBe(240);
     expect(loaded.segmentIntervalMode).toBe("length");
   });
+
+  it("saveChannelsSettings: persists the off tool sandbox", () => {
+    saveChannelsSettings({ toolSandbox: "off" });
+    expect(loadChannelsSettings().toolSandbox).toBe("off");
+  });
 });

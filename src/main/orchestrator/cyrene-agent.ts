@@ -1,7 +1,7 @@
 // CyreneAgent —— 把两阶段 FC 循环包进 AG-UI 的 AbstractAgent。
 //
 // 第一期重构：
-// - 不再持有 FC 状态机，调用 runTwoPhaseFcLoop（src/main/orchestrator/two-phase-fc-loop.ts）。
+// - 持有 runWithEvents 入口，按 agentRuntime 选择 runLangGraphAgentLoop 或 runTwoPhaseFcLoop。
 // - 工具阶段只携带 tool_system + tools schema；Soul 阶段只携带 soul_systemBase + 工具结果摘要，不携带 tools。
 // - runWithEvents 把 TwoPhaseEvent 包装成 AG-UI BaseEvent 转发给渲染端。
 //
@@ -15,15 +15,23 @@ import { AbstractAgent, type RunAgentInput } from "@ag-ui/client";
 import { EventType, type BaseEvent } from "@ag-ui/core";
 import { Observable } from "rxjs";
 import { toolRegistry, type ToolDefinition } from "./tool-registry";
-import { type ToolCallResult } from "./types";
+import type { ToolCallResult, ToolExecutionOutcome } from "./types";
 import { checkPermission, type ToolRiskLevel } from "../permission";
 import { getAdapterForConfig, type ChatMessage } from "./vendors";
-import { extractLastUserQuery, type ToolContext } from "./tool-context";
+import { contextRefRegistry, extractLastUserQuery, type ToolContext } from "./tool-context";
 import {
   runTwoPhaseFcLoop,
   type TwoPhaseEvent,
   type TwoPhaseFcResult,
 } from "./two-phase-fc-loop";
+import { runLangGraphAgentLoop } from "./langgraph-agent-loop";
+import { runChatLoop } from "./chat-loop";
+import type { SocialAtom } from "../social-context/types";
+import { ExecutionLedgerStore } from "./execution-ledger";
+import { perf } from "../perf-trace";
+import type { ApprovedStyleSampling } from "./vendors/style-sampling";
+
+const executionLedgers = new ExecutionLedgerStore();
 
 export interface AgentLoopSettings {
   provider: string;
@@ -31,13 +39,29 @@ export interface AgentLoopSettings {
   model: string;
   apiKey: string;
   explicitTransport?: "openai" | "anthropic" | "auto";
+  reasoning?: import("../../shared/reasoning").ReasoningPreference;
 }
+
+export type AgentExecutionMode = "work" | "chat";
 
 /** CyreneAgent.run() 需要的输入——桥层构造好后塞进 input.state 或 forwardedProps。 */
 export interface CyreneRunOptions {
   settings: AgentLoopSettings;
   /** 原始消息（不含 system）。FC 循环按阶段动态注入。 */
   messages: ChatMessage[];
+  conversationId?: string;
+  /** CITA 保留的用户原始 Query；旧调用方未传时从最后一条 user 消息读取。 */
+  originalQuery?: string;
+  /** CITA 生成的上下文化理解，供 Action Gate 显式使用。 */
+  contextualizedQuery?: string;
+  /** 独立 CITA 证据块；原始 user 消息不会被替换。 */
+  citaContextBlock?: string;
+  /** CITA 本地校验后允许 Action Gate 引用的不透明引用集合。 */
+  trustedRefs?: string[];
+  /** 临时回退开关；默认使用 LangGraph Runtime。 */
+  agentRuntime?: "langgraph" | "legacy";
+  /** Chat 跳过 CITA/Action Gate/Native FC；默认 Work。 */
+  executionMode?: AgentExecutionMode;
   timeoutMs: number;
   /** 可选：本次 run 的工具集合。未传时使用当前所有已启用工具。 */
   tools?: ToolDefinition[];
@@ -47,6 +71,25 @@ export interface CyreneRunOptions {
   toolSystemContent: string;
   /** Soul 阶段使用的基础 system prompt（人设 + 环境/记忆/关系/附件）。 */
   soulSystemBaseContent: string;
+  /** 只应用到 Soul 最终自然语言回复，禁止影响 CITA、Action Gate 与 Native FC。 */
+  soulSampling?: ApprovedStyleSampling;
+  /** 不带时间戳前缀的 messages，给 Action Gate 用。未传时回退到 messages。 */
+  cleanMessages?: ChatMessage[];
+  /** Native FC 专用 system prompt（从 native_fc_system.md 读取）。 */
+  nativeFcSystemContent?: string;
+  /** Action Gate 专用 system prompt（从 action_gate_system.md 读取）。 */
+  actionGateSystemPrompt?: string;
+  /** [RESPONSE_CONTEXT] 文本，从 CITA 结果生成，给 Soul 动态追加。 */
+  responseContext?: string;
+  /** 仅 Chat：异步社交原子抽取所需的已校验证据元数据。 */
+  socialContext?: {
+    enabled: true;
+    conversationId: string;
+    userTurnId: string;
+    assistantTurnId: string;
+    retrievedAtoms: SocialAtom[];
+    now: number;
+  };
 }
 
 /** FC 循环最终结果（供桥层做副作用用）。 */
@@ -55,9 +98,20 @@ export interface CyreneRunResult {
   toolResults: ToolCallResult[];
   totalUsage?: { input: number; output: number };
   soulPhaseReason?: "no_tool" | "max_rounds" | "timeout" | "tool_error";
+  executionMode?: AgentExecutionMode;
+  socialContext?: CyreneRunOptions["socialContext"];
 }
 
 const LOG_PREFIX = "[CyreneAgent]";
+
+export function resolveAgentRuntime(runtime: CyreneRunOptions["agentRuntime"]): "langgraph" | "legacy" {
+  return runtime === "legacy" ? "legacy" : "langgraph";
+}
+
+export function resolveExecutionMode(mode: unknown): AgentExecutionMode {
+  // 兼容尚未重启的旧 renderer 与历史内部调用。
+  return mode === "chat" || mode === "soul-only" ? "chat" : "work";
+}
 
 /**
  * 把 TwoPhaseEvent 包装成 AG-UI BaseEvent。
@@ -107,21 +161,27 @@ function toAguiEvent(event: TwoPhaseEvent): BaseEvent {
 async function executeToolCall(
   tc: { id: string; name: string; arguments: string },
   runnableToolIds: Set<string>,
-): Promise<string> {
+  ctx?: ToolContext,
+): Promise<ToolExecutionOutcome> {
+  const failed = (errorCode: string, output: string): ToolExecutionOutcome => ({
+    status: "failed",
+    errorCode,
+    output,
+  });
   const displayTool = toolRegistry.getById(tc.name);
   let args: Record<string, unknown> = {};
   try {
     args = JSON.parse(tc.arguments || "{}");
   } catch {
-    return "[错误] 工具参数解析失败";
+    return failed("E_TOOL_ARGS_INVALID", "工具参数解析失败");
   }
 
   if (!runnableToolIds.has(tc.name)) {
-    return "[错误] 工具不可用: " + tc.name;
+    return failed("E_TOOL_UNAVAILABLE", "工具不可用: " + tc.name);
   }
   const tool = displayTool;
   if (!tool || !tool.enabled) {
-    return "[错误] 工具不可用: " + tc.name;
+    return failed("E_TOOL_UNAVAILABLE", "工具不可用: " + tc.name);
   }
 
   const risk: ToolRiskLevel = (tool as ToolDefinition & { risk?: ToolRiskLevel }).risk || "safe";
@@ -133,18 +193,23 @@ async function executeToolCall(
     risk,
   });
   if (!perm.allowed) {
-    return "[已拒绝] " + (perm.reason || "权限不足");
+    return failed("E_PERMISSION_DENIED", perm.reason || "权限不足");
   }
 
-  const ctx: ToolContext | undefined = tool.needsContext
-    ? { userQuery: extractLastUserQuery([]) } // conversation 由调用方注入时再调整
-    : undefined;
-
   try {
-    return await tool.execute(args, ctx);
+    return {
+      status: "succeeded",
+      output: await tool.execute(args, tool.needsContext ? ctx : undefined),
+    };
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
-    return "[工具执行失败] " + errMsg;
+    const explicitCode = typeof err === "object" && err !== null && "code" in err
+      && typeof (err as { code?: unknown }).code === "string"
+      ? String((err as { code: string }).code)
+      : undefined;
+    const messageToken = errMsg.split(" ", 1)[0].split(":", 1)[0];
+    const errorCode = explicitCode ?? (messageToken.startsWith("E_") ? messageToken : "E_TOOL_EXECUTION_FAILED");
+    return failed(errorCode, errMsg);
   }
 }
 
@@ -175,30 +240,83 @@ export class CyreneAgent extends AbstractAgent {
         try {
           subscriber.next({ type: EventType.RUN_STARTED, threadId, runId });
 
+          const adapterTimer = perf.begin("get_adapter");
           const adapter = getAdapterForConfig(options.settings);
+          adapterTimer.end();
 
-          const result: TwoPhaseFcResult = await runTwoPhaseFcLoop({
-            settings: options.settings,
-            adapter,
-            messages: options.messages,
-            tools: options.tools ?? toolRegistry.getEnabledTools(),
-            toolSystemContent: options.toolSystemContent,
-            soulSystemBaseContent: options.soulSystemBaseContent,
-            timeoutMs: options.timeoutMs,
-            imageCaptionFallback: options.imageCaptionFallback,
-            executeTool: (tc, runnableToolIds) => executeToolCall(tc, runnableToolIds),
-            onEvent: (event) => {
-              if (cancelled) return;
-              subscriber.next(toAguiEvent(event));
-            },
-            signal: abortController.signal,
-          });
+          const onEvent = (event: TwoPhaseEvent) => {
+            if (cancelled) return;
+            subscriber.next(toAguiEvent(event));
+          };
+          const executionMode = resolveExecutionMode(options.executionMode);
+          const runtime = resolveAgentRuntime(options.agentRuntime);
+          console.log(
+            `${LOG_PREFIX} executionMode=${executionMode} agentRuntime=${runtime} provider=${options.settings.provider} model=${options.settings.model}`,
+          );
+
+          let result: TwoPhaseFcResult;
+          if (executionMode === "chat") {
+            result = await perf.track("chat_loop", () => runChatLoop({
+              settings: options.settings,
+              adapter,
+              messages: options.messages,
+              soulSystemBaseContent: options.soulSystemBaseContent,
+              soulSampling: options.soulSampling,
+              timeoutMs: options.timeoutMs,
+              imageCaptionFallback: options.imageCaptionFallback,
+              onEvent,
+              signal: abortController.signal,
+            }));
+          } else {
+            const executeTool = (tc: Parameters<typeof executeToolCall>[0], runnableToolIds: Set<string>) => executeToolCall(tc, runnableToolIds, {
+              userQuery: extractLastUserQuery(options.messages),
+              conversationId: options.conversationId ?? "default",
+              runId,
+              contextRefs: contextRefRegistry,
+            });
+            const commonOptions = {
+              settings: options.settings,
+              adapter,
+              messages: options.messages,
+              tools: options.tools ?? toolRegistry.getEnabledTools(),
+              toolSystemContent: options.toolSystemContent,
+              soulSystemBaseContent: options.soulSystemBaseContent,
+              soulSampling: options.soulSampling,
+              cleanMessages: options.cleanMessages,
+              nativeFcSystemContent: options.nativeFcSystemContent,
+              actionGateSystemPrompt: options.actionGateSystemPrompt,
+              responseContext: options.responseContext,
+              conversationId: options.conversationId ?? "default",
+              timeoutMs: options.timeoutMs,
+              executeTool,
+              onEvent,
+              signal: abortController.signal,
+            };
+            const conversationId = options.conversationId ?? "default";
+            const executionLedger = executionLedgers.forScope(`${conversationId}:messages-${options.messages.length}`);
+            result = runtime === "langgraph"
+              ? await perf.track("langgraph_agent_loop", () => runLangGraphAgentLoop({
+                ...commonOptions,
+                originalQuery: options.originalQuery ?? extractLastUserQuery(options.messages),
+                contextualizedQuery: options.contextualizedQuery ?? options.originalQuery ?? extractLastUserQuery(options.messages),
+                citaContextBlock: options.citaContextBlock ?? "",
+                trustedRefs: options.trustedRefs ?? [],
+                imageCaptionFallback: options.imageCaptionFallback,
+                executionLedger,
+              }))
+              : await perf.track("legacy_agent_loop", () => runTwoPhaseFcLoop({
+                ...commonOptions,
+                imageCaptionFallback: options.imageCaptionFallback,
+              }));
+          }
 
           this.lastResult = {
             reply: result.reply,
             toolResults: result.toolResults,
             totalUsage: result.totalUsage,
             soulPhaseReason: result.soulPhaseReason,
+            executionMode,
+            socialContext: options.socialContext,
           };
 
           if (cancelled) return;

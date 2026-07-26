@@ -3,11 +3,61 @@ import * as fs from "fs";
 import * as path from "path";
 import { IPC } from "../../shared/ipc-channels";
 import { toolRegistry } from "../orchestrator/tool-registry";
+import { getAdapterForConfig } from "../orchestrator/vendors";
+import type { VendorConfig } from "../orchestrator/vendors/types";
 import { getImageProvider, getProviderCapabilities, upscaleWithGateway } from "./providers";
 import { compileVisualPrompt, getAgentCharacter, normalizeCharacters, normalizeOutfits, resolveDrawingCharacterId } from "./prompt-profile";
 import { ImageTaskQueue, type ImageTask } from "./task-queue";
 import type { CharacterComposition, DrawingSubject, ImageProviderKind, NovelAiConfig, VisualMode } from "./types";
 export type { NovelAiConfig } from "./types";
+
+/** 读取用户在设置页保存的 LLM 模型配置（与 memory-judge/resolver 共用同一份 model-settings.json） */
+function loadChatModelSettings(): { provider: string; baseUrl: string; model: string; apiKey: string; explicitTransport?: "openai" | "anthropic" | "auto" } {
+  const defaults = { provider: "DeepSeek（深度求索）", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-pro", apiKey: "" };
+  try {
+    const filePath = path.join(app.getPath("userData"), "model-settings.json");
+    if (!fs.existsSync(filePath)) return defaults;
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as Record<string, unknown>;
+    return {
+      provider: typeof parsed.provider === "string" && parsed.provider.trim() ? parsed.provider.trim() : defaults.provider,
+      baseUrl: typeof parsed.baseUrl === "string" && parsed.baseUrl.trim() ? parsed.baseUrl.trim() : defaults.baseUrl,
+      model: typeof parsed.model === "string" && parsed.model.trim() ? parsed.model.trim() : defaults.model,
+      apiKey: typeof parsed.apiKey === "string" ? parsed.apiKey.trim() : "",
+      explicitTransport: parsed.explicitTransport === "openai" || parsed.explicitTransport === "anthropic" || parsed.explicitTransport === "auto" ? parsed.explicitTransport : undefined,
+    };
+  } catch {
+    return defaults;
+  }
+}
+
+/** 用主聊天模型做一次简单翻译调用（非流式），返回纯文本 */
+async function translatePromptWithLLM(messages: Array<{ role: "system" | "user"; content: string }>): Promise<string> {
+  const settings = loadChatModelSettings();
+  if (!settings.apiKey) throw new Error("未配置 API Key，请先在设置页配置模型");
+  const cfg: VendorConfig = {
+    provider: settings.provider,
+    baseUrl: settings.baseUrl,
+    model: settings.model,
+    apiKey: settings.apiKey,
+    explicitTransport: settings.explicitTransport,
+  };
+  const adapter = getAdapterForConfig(cfg);
+  const http = adapter.buildRequest({
+    model: cfg.model,
+    messages: messages as Array<{ role: "system" | "user" | "assistant"; content: string }>,
+    maxTokens: 1024,
+    stream: false,
+  }, cfg);
+  const response = await fetch(http.url, {
+    method: "POST",
+    headers: http.headers,
+    body: http.body,
+  });
+  if (!response.ok) throw new Error(`翻译请求失败: HTTP ${response.status}`);
+  const data = await response.json();
+  const parsed = adapter.parseResponse(data);
+  return parsed.text ?? "";
+}
 
 interface StoredConfig extends Omit<NovelAiConfig, "apiKey"> { encryptedApiKey?: string; apiKeyPlain?: string }
 
@@ -309,6 +359,9 @@ export function registerNovelAiIpc(openWindow: () => void, minimizeWindow: () =>
   ipcMain.handle(IPC.NOVELAI_ASSET_UPDATE, (_event,id,patch) => updateAsset(id,patch));
   ipcMain.handle(IPC.NOVELAI_HISTORY_UPDATE, (_event,id,patch) => updateHistoryMeta(id,patch));
   ipcMain.handle(IPC.NOVELAI_HISTORY_DELETE, (_event,id) => deleteHistoryItem(id));
+  ipcMain.handle(IPC.NOVELAI_TRANSLATE_PROMPT, async (_event, messages: Array<{ role: "system" | "user"; content: string }>) => {
+    return translatePromptWithLLM(messages);
+  });
 }
 
 toolRegistry.register({

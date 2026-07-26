@@ -1,12 +1,16 @@
 import "../ui/base.css";
 import "./chat.css";
 import "../ui/theme";
+import { initMarkdownRenderer, initCodeBlockController, renderMarkdown, createStreamingMarkdownSession, getMd } from "./markdown/init";
+import type { StreamingMarkdownSession } from "./markdown/init";
 import {
-  CHAT_DEFAULT_IDENTITY_LABEL,
   formatChatRelativeTime,
   type ChatSessionMetaUI,
 } from "../../shared/chat-ui";
 import { normalizeDefaultChatMode, type DefaultChatMode } from "../../shared/preferences";
+import { normalizeStyleId, type StyleId } from "../../shared/style-sampling";
+import type { ScreenshotInsertPayload } from "../../shared/ipc-channels";
+import { userAnnotationNotice } from "../../shared/chat-context";
 import { canUseMinimaxStreamingEarly, extractEarlyTtsSegment } from "../../shared/tts-early-playback";
 import { getStickerSrcForId } from "./sticker-src";
 import { hideVisibleMessages, SessionMessageCache } from "./session-runtime";
@@ -17,16 +21,18 @@ import {
   getAssistantReplyBubbleTexts,
   MAX_ASSISTANT_REPLY_BUBBLES,
   shouldBreakStreamingBubbleAfterChar,
-  shouldSkipStreamingBubbleLeadingChar,
   shouldSegmentAssistantReply,
 } from "./message-segmentation";
 import { buildDocumentContextLines, processDocumentsWithWait, type RetrievedDocumentChunk } from "./document-processing";
+import { decideReloadCurrentSession } from "./session-reload-policy";
 import {
   canCancelDocumentIndexStatus,
   getDocumentIndexStatusLabel,
   type DocumentIndexCardStatus,
   type DocumentIndexProgress,
 } from "./types";
+import { normalizeMusicCardData, type MusicCardData } from "../../shared/music-card";
+import { requestTrackPlayback } from "../settings/music-playback";
 
 type Role = "user" | "model";
 
@@ -44,6 +50,7 @@ interface Message {
   ttsCacheKey?: string;
   novelAiImage?: { id:string; prompt?:string; model?:string; width?:number; height?:number };
   novelAiImages?: { id:string; prompt?:string; model?:string; width?:number; height?:number }[];
+  musicCard?: MusicCardData;
 }
 
 type MessageAttachment = ImageMessageAttachment | DocumentMessageAttachment;
@@ -55,6 +62,7 @@ interface ImageMessageAttachment {
   mime: string;
   previewUrl?: string;
   caption?: string;
+  hasAnnotations?: boolean;
   status: "pending" | "done" | "error";
 }
 
@@ -68,27 +76,6 @@ interface DocumentMessageAttachment {
   chunks?: number;
   importId?: string;
   reason?: string;
-}
-
-interface ChatReplyPayload {
-  reply: string;
-  sticker: string | null;
-}
-
-function normalizeChatReplyPayload(payload: unknown): ChatReplyPayload {
-  if (typeof payload === "string") {
-    return { reply: payload.trim(), sticker: null };
-  }
-
-  if (payload && typeof payload === "object") {
-    const record = payload as Partial<ChatReplyPayload>;
-    return {
-      reply: typeof record.reply === "string" ? record.reply.trim() : "",
-      sticker: record.sticker ?? null,
-    };
-  }
-
-  return { reply: "", sticker: null };
 }
 
 interface ModelConfig {
@@ -134,20 +121,26 @@ interface ChatApi {
     close: () => void;
     toggleMaximize: () => void;
     isMaximized: () => Promise<boolean>;
-    sendMessage: (messages: Array<{ role: "user" | "model"; content: string }>, style: string) => Promise<ChatReplyPayload>;
     ingestDroppedFiles: (files: File[]) => Promise<Attachment[]>;
     processDocuments: (filePaths: string[], query: string) => Promise<Attachment[]>;
     onDocumentIndexProgress?: (callback: (progress: DocumentIndexProgress) => void) => () => void;
     cancelDocumentIndex: (jobId: string) => Promise<boolean>;
-    captionImage: (filePath: string) => Promise<{ ok: boolean; caption?: string; error?: string }>;
+    captionImage: (filePath: string, hasAnnotations?: boolean) => Promise<{ ok: boolean; caption?: string; error?: string }>;
     getImageSendStrategy: () => Promise<{ mode: "direct" | "caption" }>;
-    getGeneralSettings?: () => Promise<{ defaultChatMode?: DefaultChatMode; segmentedOutputMode?: "all" | "chat" | "off" }>;
+    getGeneralSettings?: () => Promise<{ defaultChatMode?: DefaultChatMode; segmentedOutputMode?: "all" | "chat" | "off"; currentStyleId?: StyleId }>;
     getEnabledStickers?: () => Promise<Array<{ id: string; src: string; description?: string }>>;
     onProactiveMessage?: (callback:(payload:{sessionId:string;message:Message})=>void)=>()=>void;
     getScreenObservationStatus?: () => Promise<ScreenObservationStatus>;
     pauseScreenObservation?: (mode: "10m" | "1h" | "restart") => Promise<ScreenObservationStatus>;
     resumeScreenObservation?: () => Promise<ScreenObservationStatus>;
+    startScreenshot: () => Promise<{ ok: boolean; reason?: string }>;
+    onScreenshotInsert: (callback: (data: ScreenshotInsertPayload) => void) => () => void;
+    saveScreenshotTemp: (base64: string, mime: string) => Promise<{ filePath: string }>;
   }
+
+interface ChatSettingsApi {
+  saveGeneral?: (config: { currentStyleId?: StyleId }) => Promise<unknown>;
+}
 
 /** AG-UI 事件流 API（window.agui）。 */
 const BUDGET_CHARS = 60000;
@@ -179,7 +172,10 @@ const COPY_ICON_DONE = `<svg class="msg__copy-icon msg__copy-icon--done" viewBox
 interface AguiApi {
   run: (input: {
     messages: unknown[];
-    style: string;
+    userTurnId?: string;
+    assistantTurnId?: string;
+    styleId: StyleId;
+    executionMode: "work" | "chat";
     sessionId?: string;
     attachments?: { name: string; text: string }[];
     imageAttachments?: { name: string; filePath: string; mime?: string }[];
@@ -197,6 +193,14 @@ interface ChoiceApi {
   resolve: (id: string, value: string) => Promise<unknown>;
 }
 
+interface ChatMusicApi {
+  playTrack: (trackId: string) => Promise<{
+    ok: boolean;
+    data?: { state: "dispatched" | "web_fallback" | "client_unavailable" | "launch_failed" };
+    errorCode?: string;
+  }>;
+}
+
 /** AG-UI BaseEvent 的最小本地类型（只取我们关心的字段）。 */
 interface AguiBaseEvent {
   type: string;
@@ -207,6 +211,8 @@ interface AguiBaseEvent {
   toolCallName?: string;
   content?: string;
   error?: string;
+  message?: string;  // RUN_ERROR 的规范字段（upstream RunErrorEvent.message）
+  code?: string;     // 结构化错误码（AgentRuntimeError.code）
   stepName?: string;
   runId?: string;
   threadId?: string;
@@ -214,6 +220,29 @@ interface AguiBaseEvent {
   schedulerTaskId?: string;
   name?: string;   // CUSTOM 事件的 name
   value?: unknown; // CUSTOM 事件的 value
+}
+
+/**
+ * 渲染端 Agent 错误。携带结构化 code，用于在 failRun reject 和 catch 之间传递。
+ * 与主进程的 AgentRuntimeError 对应，但这里是纯 renderer 类。
+ */
+class AgentRenderError extends Error {
+  constructor(
+    public readonly code: string | undefined,
+    message: string,
+  ) {
+    super(message);
+    this.name = "AgentRenderError";
+  }
+}
+
+/** 根据结构化错误码把 Agent 运行时错误翻译成面向用户的文案。 */
+function classifyAgentError(code: string | undefined, message: string): string {
+  if (code === "E_AGENT_NO_PROGRESS") return "任务执行未能继续，请重试";
+  if (code === "E_AGENT_GRAPH_ITERATION_LIMIT") return "Agent 执行达到循环上限";
+  if (code === "E_MODEL_REQUEST_FAILED") return "连接模型失败：" + message;
+  if (code === "E_ACTION_GATE_PROTOCOL") return "决策协议解析失败，请重试";
+  return message; // 兜底：原样显示
 }
 
 /** 文件摄入结果（与 main 侧 file-ingest.ts 的 Attachment 对齐）。 */
@@ -226,6 +255,7 @@ interface Attachment {
   mime?: string;
   previewUrl?: string;
   caption?: string;
+  hasAnnotations?: boolean;
   status?: DocumentIndexCardStatus;
   text?: string;
   chunks?: number;
@@ -246,6 +276,11 @@ interface TodoState {
   updatedAt: number;
 }
 
+interface UserApi {
+  getAvatar: () => Promise<string | null>;
+  onAvatarChanged: (callback: () => void) => () => void;
+}
+
 declare global {
   interface Window {
     chat?: ChatApi;
@@ -253,10 +288,124 @@ declare global {
     schedulerEvents?: SchedulerEventsApi;
     modelConfig?: ModelConfigApi;
     choice?: ChoiceApi;
+    music?: ChatMusicApi;
+    user?: UserApi;
+    settings?: ChatSettingsApi;
   }
 }
 
 const messagesEl = document.getElementById("messages") as HTMLElement;
+
+// 初始化 Markdown 渲染系统（Shiki 异步启动 + 复制按钮事件委托）
+initMarkdownRenderer();
+initCodeBlockController(messagesEl);
+
+// ── 历史消息渐进渲染队列 ────────────────────────────────────
+// render() 先同步创建纯文本占位，标记 data-md-pending，
+// 队列用 requestIdleCallback 渐进升级为 Markdown HTML。
+
+/** 存储所有助手 bubble 的原始 markdown 文本（WeakMap 防 DOM 回收后泄漏） */
+const bubbleRawText = new WeakMap<HTMLElement, string>();
+/** 向后兼容：pendingMarkdownText 指向同一个 WeakMap */
+const pendingMarkdownText = bubbleRawText;
+
+/** 队列状态 */
+let renderGeneration = 0;
+let historyIdleId: number | null = null;
+
+const HISTORY_MAX_BATCH = 3;
+const HISTORY_MIN_REMAINING_MS = 4;
+
+/** 取消当前队列，递增 generation */
+function cancelHistoryRender(): void {
+  renderGeneration++;
+  if (historyIdleId !== null) {
+    cancelIdleCallback(historyIdleId);
+    historyIdleId = null;
+  }
+}
+
+/** 调度历史消息渐进渲染（在 render() 后调用） */
+function scheduleHistoryRender(): void {
+  cancelHistoryRender();
+  const gen = renderGeneration;
+
+  const processBatch = (deadline?: IdleDeadline): void => {
+    historyIdleId = null;
+    if (gen !== renderGeneration) return; // 已被取消
+
+    const pendingBubbles = messagesEl.querySelectorAll<HTMLElement>("[data-md-pending='true']");
+    if (pendingBubbles.length === 0) return;
+
+    let processed = 0;
+    const hasDeadline = !!deadline;
+
+    for (const bubble of pendingBubbles) {
+      if (gen !== renderGeneration) return; // 已被取消
+      if (!bubble.isConnected) continue;
+
+      const text = pendingMarkdownText.get(bubble);
+      if (text === undefined) {
+        bubble.removeAttribute("data-md-pending");
+        continue;
+      }
+
+      const result = renderMarkdown(text);
+      if (result.mode === "html") {
+        bubble.innerHTML = result.content;
+      } else {
+        bubble.textContent = result.content;
+      }
+      bubble.removeAttribute("data-md-pending");
+      pendingMarkdownText.delete(bubble);
+      processed++;
+
+      // 时间预算：有 deadline 时检查剩余时间，无 deadline 时按数量限制
+      if (processed >= HISTORY_MAX_BATCH) break;
+      if (hasDeadline && deadline!.timeRemaining() < HISTORY_MIN_REMAINING_MS) break;
+    }
+
+    // 还有 pending，继续调度
+    if (gen === renderGeneration && messagesEl.querySelector("[data-md-pending='true']")) {
+      historyIdleId = requestIdleCallback(processBatch, { timeout: 200 });
+    }
+  };
+
+  // requestIdleCallback fallback
+  if (typeof requestIdleCallback === "function") {
+    historyIdleId = requestIdleCallback(processBatch, { timeout: 200 });
+  } else {
+    historyIdleId = null;
+    setTimeout(() => processBatch(undefined), 0);
+  }
+}
+
+/**
+ * 主题切换时刷新已完成助手消息的 Markdown 渲染（Shiki 主题更新）。
+ * 不调用全局 render()，避免销毁流式 session DOM。
+ * 流式 session 中的已稳定代码块暂保留旧主题（方案 B），终态自动切换。
+ */
+function refreshMarkdownTheme(): void {
+  // 取消旧队列
+  cancelHistoryRender();
+
+  // 找到所有助手消息气泡，标记为 pending 重新渲染
+  const assistantBubbles = messagesEl.querySelectorAll<HTMLElement>(".msg--model .msg__bubble");
+  for (const bubble of assistantBubbles) {
+    const text = bubbleRawText.get(bubble);
+    if (text !== undefined && text.trim()) {
+      bubble.dataset.mdPending = "true";
+    }
+  }
+
+  scheduleHistoryRender();
+}
+
+// 监听主题切换
+window.cyreneTheme?.onChanged(() => {
+  refreshMarkdownTheme();
+});
+
 const formEl = document.getElementById("composer") as HTMLFormElement;
 const inputEl = document.getElementById("input") as HTMLTextAreaElement;
 const sendBtn = document.getElementById("send") as HTMLButtonElement;
@@ -303,8 +452,6 @@ const inspectorObservationResumeBtn = document.getElementById("inspector-observa
 
 // 旧版 localStorage key——首次启动时检测到老数据会迁移到主进程 chats 存储再清掉。
 const LEGACY_STORAGE_KEY = "cyrene.chat.history.v1";
-const FRONTEND_REPLY_TIMEOUT_MS = 35000;
-
 /**
  * Avatar source per role. Empty string = use the gradient placeholder
  * baked into the CSS background of `.msg--user .msg__avatar`.
@@ -317,16 +464,31 @@ const AVATAR_SRC: Record<Role, string> = {
   user: "",
 };
 
-// Load user avatar from profile
-(async () => {
+// Load user avatar from profile and keep it in sync when changed in settings.
+async function loadUserAvatar(): Promise<boolean> {
   try {
-    const dataUrl = await (window as any).user?.getAvatar();
+    const dataUrl = await window.user?.getAvatar();
     if (dataUrl) {
       AVATAR_SRC.user = dataUrl;
-      render();
+      return true;
     }
   } catch { /* ignore */ }
+  return false;
+}
+
+(async () => {
+  if (await loadUserAvatar()) {
+    render();
+  }
 })();
+
+window.user?.onAvatarChanged(() => {
+  void (async () => {
+    if (await loadUserAvatar()) {
+      render();
+    }
+  })();
+});
 
 const BUILT_IN_STICKER_SRC: Record<string, string> = {
   playful: "/stickers/playful.png",
@@ -473,6 +635,7 @@ interface ChatStoreSession {
     ttsCacheKey?: string;
     novelAiImage?: { id:string; prompt?:string; model?:string; width?:number; height?:number };
     novelAiImages?: { id:string; prompt?:string; model?:string; width?:number; height?:number }[];
+    musicCard?: MusicCardData;
   }>;
   createdAt: number;
   updatedAt: number;
@@ -511,7 +674,7 @@ declare global {
 // - 过滤空 content / 渲染中的 thinking 占位（thinking=true 时通常 content 为空，但保险起见双重过滤）
 // - 丢弃仅用于本轮模型调用的 modelContext 与 thinking 等瞬态字段
 function toPersistableMessages(arr: Message[]): Array<{
-  id: string; role: Role; content: string; at: number; hidden?: boolean; modelContext?: string; attachments?: MessageAttachment[]; sticker?: StickerId | null; ttsCacheKey?: string; novelAiImage?: Message["novelAiImage"]; novelAiImages?: Message["novelAiImages"];
+  id: string; role: Role; content: string; at: number; hidden?: boolean; modelContext?: string; attachments?: MessageAttachment[]; sticker?: StickerId | null; ttsCacheKey?: string; novelAiImage?: Message["novelAiImage"]; novelAiImages?: Message["novelAiImages"]; musicCard?: MusicCardData;
 }> {
   return arr
     .filter((m) => m && (m.role === "user" || m.role === "model") && !m.thinking && !m.transient && (
@@ -520,6 +683,7 @@ function toPersistableMessages(arr: Message[]): Array<{
       || Boolean(m.sticker)
       || Boolean(m.novelAiImage)
       || ((m.novelAiImages?.length ?? 0) > 0)
+      || Boolean(m.musicCard)
     ))
     .map((m) => ({
       id: m.id,
@@ -533,6 +697,7 @@ function toPersistableMessages(arr: Message[]): Array<{
       ttsCacheKey: m.ttsCacheKey,
       novelAiImage: m.novelAiImage,
       novelAiImages: m.novelAiImages,
+      musicCard: m.musicCard,
     }));
 }
 
@@ -579,6 +744,7 @@ function loadSessionIntoUI(session: ChatStoreSession): void {
     ttsCacheKey: m.ttsCacheKey,
     novelAiImage: m.novelAiImage,
     novelAiImages: m.novelAiImages ?? (m.novelAiImage ? [m.novelAiImage] : undefined),
+    musicCard: m.musicCard,
   } satisfies Message));
   messages = sessionMessageCache.load(session.id, persisted);
   // 上报活跃 sessionId（设置面板"删除当前会话"差异化提示用）
@@ -878,12 +1044,8 @@ function buildRailItem(session: ChatSessionMetaUI): HTMLLIElement {
   timeEl.className = "chat__rail-time";
   timeEl.textContent = formatChatRelativeTime(session.updatedAt);
 
-  const identityEl = document.createElement("span");
-  identityEl.className = "chat__rail-identity";
-  identityEl.textContent = "💼 " + (session.identityId ? session.identityId : CHAT_DEFAULT_IDENTITY_LABEL);
 
   metaEl.appendChild(timeEl);
-  metaEl.appendChild(identityEl);
 
   // 点击列表项 = 本地切换会话（不走跨窗口 IPC，比设置面板还快）
   li.addEventListener("click", async () => {
@@ -1284,22 +1446,26 @@ function buildWeatherCardEl(data: Record<string, unknown>): HTMLElement {
   const humidity = Number(data.humidity ?? 0);
   const precip = Number(data.precip ?? 0);
   const pressure = Number(data.pressure ?? 0);
-  const icon = String(data.icon ?? "🌤️");
-  const windDir = String(data.windDir ?? "");
-  const windScale = String(data.windScale ?? "");
-  const visibility = data.visibility != null ? `${data.visibility}km` : "—";
-  const uv = String(data.uv ?? "—");
+  const icon = escapeHtml(String(data.icon ?? "🌤️"));
+  const windDir = escapeHtml(String(data.windDir ?? ""));
+  const windScale = escapeHtml(String(data.windScale ?? ""));
+  const visibility = data.visibility != null ? `${data.visibility}km` : "-";
+  const uv = escapeHtml(String(data.uv ?? "-"));
   const aqi = data.aqi != null ? Number(data.aqi) : null;
-  const aqiText = String(data.aqiText ?? "");
-  const kaomoji = aqi != null ? aqiKaomojiText(Number(aqi)) : "";
+  const aqiText = escapeHtml(String(data.aqiText ?? ""));
+  const kaomoji = aqi != null ? escapeHtml(aqiKaomojiText(Number(aqi))) : "";
+  const city = escapeHtml(String(data.city ?? ""));
+  const adm = escapeHtml(String(data.adm ?? ""));
+  const desc = escapeHtml(String(data.text ?? ""));
+  const source = escapeHtml(String(data.source ?? ""));
 
   card.innerHTML = `
     <div class="w-header">
       <div class="w-datetime"><span class="w-date">${dateStr}</span><span class="w-time">${timeStr} 更新</span></div>
-      <div class="w-loc"><span class="w-city">${String(data.city ?? "")}</span><span class="w-adm">${String(data.adm ?? "")}</span></div>
+      <div class="w-loc"><span class="w-city">${city}</span><span class="w-adm">${adm}</span></div>
     </div>
     <div class="w-main">
-      <div class="w-icon-box"><span class="w-icon">${icon}</span><span class="w-desc">${String(data.text ?? "")}</span></div>
+      <div class="w-icon-box"><span class="w-icon">${icon}</span><span class="w-desc">${desc}</span></div>
       <div class="w-temp-box">
         <div class="w-temp">${temp}<span class="w-deg">°</span></div>
         ${data.hi != null ? `<div class="w-hilo"><span class="w-hi">↑${data.hi}°</span><span class="w-sep">|</span><span class="w-lo">↓${data.lo}°</span></div>` : ""}
@@ -1310,7 +1476,7 @@ function buildWeatherCardEl(data: Record<string, unknown>): HTMLElement {
       <div class="w-qitem"><div class="w-qicon">💧</div><div class="w-qlabel">湿度</div><div class="w-qvalue">${humidity}%</div></div>
       <div class="w-qitem"><div class="w-qicon">💨</div><div class="w-qlabel">风力</div><div class="w-qvalue">${windScale}</div></div>
       <div class="w-qitem"><div class="w-qicon">🌧️</div><div class="w-qlabel">降水</div><div class="w-qvalue">${precip}mm</div></div>
-      <div class="w-qitem"><div class="w-qicon">📊</div><div class="w-qlabel">气压</div><div class="w-qvalue">${pressure || "—"}</div></div>
+      <div class="w-qitem"><div class="w-qicon"><svg width="24" height="24" viewBox="0 0 48 48" fill="none" aria-hidden="true"><title>气压</title><path d="M4 42H44" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/><rect x="8" y="28" width="6" height="14" fill="none" stroke="currentColor" stroke-width="4" stroke-linejoin="round"/><rect x="21" y="18" width="6" height="24" fill="none" stroke="currentColor" stroke-width="4" stroke-linejoin="round"/><rect x="34" y="6" width="6" height="36" fill="none" stroke="currentColor" stroke-width="4" stroke-linejoin="round"/></svg></div><div class="w-qlabel">气压</div><div class="w-qvalue">${pressure || "-"}</div></div>
     </div>
     <button class="w-expand" type="button">查看更多 <span class="w-arrow">▼</span></button>
     <div class="w-details">
@@ -1322,7 +1488,7 @@ function buildWeatherCardEl(data: Record<string, unknown>): HTMLElement {
         ${aqi != null ? `<div class="w-ditem"><span class="w-dicon">🌿</span><div><div class="w-dlabel">空气质量</div><div class="w-dvalue">${aqi} ${aqiText} <span class="w-kaomoji">${kaomoji}</span></div></div></div>` : ""}
       </div>
     </div>
-    <div class="w-source"><span>${icon} ${String(data.source ?? "")}</span><span>${timeStr} 更新</span></div>
+    <div class="w-source"><span>${icon} ${source}</span><span>${timeStr} 更新</span></div>
   `;
 
   // 展开按钮点击切换
@@ -1413,6 +1579,64 @@ function buildStoredNovelAiImageCard(meta: NonNullable<Message["novelAiImage"]>)
   return host;
 }
 
+function buildMusicCardEl(data: MusicCardData): HTMLElement {
+  const card = document.createElement("div");
+  card.className = "music-agui-card";
+
+  const header = document.createElement("div");
+  header.className = "music-agui-card__header";
+  const title = document.createElement("strong");
+  title.textContent = data.source === "daily_recommendation" ? "今日推荐" : "歌曲候选";
+  const badge = document.createElement("span");
+  badge.textContent = "网易云音乐";
+  header.append(title, badge);
+  card.appendChild(header);
+
+  data.tracks.forEach((track, index) => {
+    const row = document.createElement("div");
+    row.className = "music-agui-card__track";
+
+    const order = document.createElement("span");
+    order.className = "music-agui-card__order";
+    order.textContent = String(index + 1);
+    const meta = document.createElement("div");
+    meta.className = "music-agui-card__meta";
+    const name = document.createElement("strong");
+    name.textContent = track.name;
+    const detail = document.createElement("span");
+    detail.textContent = [track.artists.join(" / "), track.album].filter(Boolean).join(" · ");
+    meta.append(name, detail);
+
+    const play = document.createElement("button");
+    play.type = "button";
+    play.className = "music-agui-card__play";
+    play.textContent = "播放";
+    play.setAttribute("aria-label", `播放 ${track.name}`);
+    play.addEventListener("click", async () => {
+      if (!window.music) return;
+      play.disabled = true;
+      const original = play.textContent;
+      try {
+        const feedback = await requestTrackPlayback(window.music, track);
+        play.textContent = feedback.kind === "ok" ? "已发送" : "不可用";
+        play.title = feedback.message;
+      } catch (err) {
+        play.textContent = "失败";
+        play.title = err instanceof Error ? err.message : String(err);
+      } finally {
+        window.setTimeout(() => {
+          play.disabled = false;
+          play.textContent = original;
+        }, 1800);
+      }
+    });
+
+    row.append(order, meta, play);
+    card.appendChild(row);
+  });
+  return card;
+}
+
 /** AQI → 颜文字。 */
 function aqiKaomojiText(aqi: number): string {
   if (aqi <= 50) return "(◕‿◕)";
@@ -1464,19 +1688,6 @@ function appendBubbleForMessage(messageId: string): HTMLElement | null {
   bubble.hidden = true;
   body.appendChild(bubble);
   return bubble;
-}
-
-function appendStreamingCharToBubble(bubble: HTMLElement, char: string): void {
-  if (shouldSkipStreamingBubbleLeadingChar(char, bubble.childNodes.length === 0)) return;
-  bubble.hidden = false;
-  if (bubble.childNodes.length === 0) {
-    bubble.appendChild(document.createTextNode(char));
-    return;
-  }
-  const span = document.createElement("span");
-  span.className = "msg__char";
-  span.textContent = char;
-  bubble.appendChild(span);
 }
 
 function renderMessageAttachments(body: HTMLElement, attachments: MessageAttachment[] | undefined): void {
@@ -1614,6 +1825,7 @@ function render(preserveScroll = false): void {
       || Boolean(m.sticker)
       || Boolean(m.novelAiImage)
       || ((m.novelAiImages?.length ?? 0) > 0)
+      || Boolean(m.musicCard)
     )
   );
   if (emptyEl) emptyEl.toggleAttribute("hidden", hasMessages);
@@ -1663,13 +1875,25 @@ function render(preserveScroll = false): void {
       else bubble.hidden = true; // 纯表情包消息不显示气泡
       if (!bubble.hidden) bubbles.push(bubble);
     } else {
-      const currentMode = isTalkMode() ? "talk" : "collab";
+      const currentMode = isChatMode() ? "chat" : "work";
       const segments = getAssistantReplyBubbleTexts(m.content, currentMode, segmentedOutputMode, {
         preserveEmpty: !!m.transient,
       });
       for (const segment of segments) {
         const text = segment.trim();
-        if (text || m.transient) bubbles.push(createMessageBubble(text));
+        if (text || m.transient) {
+          const bubble = createMessageBubble();
+          if (m.transient) {
+            // 流式期：纯文本，由 StreamingMarkdownSession 管理后续 DOM
+            bubble.textContent = text;
+          } else {
+            // 终态：先放纯文本占位，标记为 pending，由历史渐进队列升级为 Markdown
+            bubble.textContent = text;
+            bubble.dataset.mdPending = "true";
+          }
+          bubbleRawText.set(bubble, text);
+          bubbles.push(bubble);
+        }
       }
     }
 
@@ -1704,6 +1928,7 @@ function render(preserveScroll = false): void {
     } else if (m.novelAiImage) {
       body.appendChild(buildStoredNovelAiImageCard(m.novelAiImage));
     }
+    if (m.musicCard) body.appendChild(buildMusicCardEl(m.musicCard));
 
     // actions 行：喇叭 / 复制 / 时间三个控件水平排在气泡下方。
     // 流式中的 transient 消息会继续追加新气泡；此时先隐藏 actions，
@@ -1784,6 +2009,9 @@ function render(preserveScroll = false): void {
     messagesEl.appendChild(row);
   }
   if (!preserveScroll) messagesEl.scrollTop = messagesEl.scrollHeight;
+
+  // 历史消息渐进渲染：纯文本占位 -> Markdown HTML
+  scheduleHistoryRender();
 }
 
 let schedulerEventsOff: (() => void) | null = null;
@@ -1874,7 +2102,9 @@ function installSchedulerEventListener(): void {
       streams.delete(runKey);
     } else if (event.type === "RUN_ERROR") {
       msg.thinking = false;
-      msg.content = "定时任务执行失败：" + (event.error ?? event.content ?? "未知错误");
+      // 优先读 upstream 规范的 `message` 字段，兜底兼容旧的 `error`/`content`
+      const rawMessage = event.message ?? event.error ?? event.content ?? "未知错误";
+      msg.content = "定时任务执行失败：" + classifyAgentError(event.code, rawMessage);
       render();
       void saveSession();
       streams.delete(runKey);
@@ -1913,6 +2143,10 @@ interface TtsSettings {
   ttsMimoKey: string;
   ttsMimoVoiceAudioPath: string;
   ttsMimoStylePrompt: string;
+  // Mossland（api.mosi.cn）
+  ttsMosslandKey: string;
+  ttsMosslandVoiceId: string;
+  ttsMosslandModel: string;
   // MiniMax 流式播放
   ttsStreaming: boolean;
 }
@@ -2092,6 +2326,9 @@ async function loadTtsSettings(): Promise<TtsSettings | null> {
       ttsMimoKey: String(raw.ttsMimoKey ?? ""),
       ttsMimoVoiceAudioPath: String(raw.ttsMimoVoiceAudioPath ?? ""),
       ttsMimoStylePrompt: String(raw.ttsMimoStylePrompt ?? ""),
+      ttsMosslandKey: String(raw.ttsMosslandKey ?? ""),
+      ttsMosslandVoiceId: String(raw.ttsMosslandVoiceId ?? ""),
+      ttsMosslandModel: String(raw.ttsMosslandModel ?? "moss-tts"),
       ttsStreaming: raw.ttsStreaming !== false,
     };
   } catch {
@@ -2393,6 +2630,7 @@ async function synthesizeAndPlayCached(
     const isGptsovitsCache = existing.ttsCacheKey.startsWith("gptsovits-");
     const isCustomCloudCache = existing.ttsCacheKey.startsWith("custom-cloud-");
     const isMimoCache = existing.ttsCacheKey.startsWith("mimo-");
+    const isMosslandCache = existing.ttsCacheKey.startsWith("mossland-");
     try {
       if (isGptsovitsCache) {
         const result = await window.tts.synthesizeCachedGptsovits({
@@ -2436,6 +2674,20 @@ async function synthesizeAndPlayCached(
         });
         if (result.cached) {
           console.log("[TTS] mimo 缓存命中，直接播放");
+          playTtsBase64(result.base64, result.format, msgId);
+          return { cacheKey: result.cacheKey };
+        }
+      } else if (isMosslandCache) {
+        const result = await window.tts.synthesizeCachedMossland({
+          apiKey: "cache-only",
+          voiceId: "cache-only",
+          text,
+          model: "moss-tts",
+          format: "mp3",
+          expectedCacheKey: existing.ttsCacheKey,
+        });
+        if (result.cached) {
+          console.log("[TTS] mossland 缓存命中，直接播放");
           playTtsBase64(result.base64, result.format, msgId);
           return { cacheKey: result.cacheKey };
         }
@@ -2556,6 +2808,30 @@ async function synthesizeAndPlayCached(
       return { cacheKey: result.cacheKey };
     } catch (err) {
       console.warn("[TTS] 小米 MiMo 合成失败:", err);
+      return null;
+    }
+  }
+
+  if (settings.ttsEngine === "mossland") {
+    if (!settings.ttsMosslandKey || !settings.ttsMosslandVoiceId) {
+      console.warn("[TTS] 缺少 Mossland API Key 或 voice_id");
+      return null;
+    }
+    try {
+      const result = await window.tts.synthesizeCachedMossland({
+        apiKey: settings.ttsMosslandKey,
+        voiceId: settings.ttsMosslandVoiceId,
+        text,
+        speed: settings.ttsSpeed,
+        volume: settings.ttsVolume,
+        model: settings.ttsMosslandModel || "moss-tts",
+        format: "mp3",
+        expectedCacheKey: existing?.ttsCacheKey,
+      });
+      playTtsBase64(result.base64, result.format, msgId);
+      return { cacheKey: result.cacheKey };
+    } catch (err) {
+      console.warn("[TTS] Mossland 合成失败:", err);
       return null;
     }
   }
@@ -2781,42 +3057,44 @@ function clearModelContexts(source: Message[] = messages): boolean {
   return changed;
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const timer = window.setTimeout(() => reject(new Error(message)), timeoutMs);
-    promise
-      .then(resolve, reject)
-      .finally(() => window.clearTimeout(timer));
-  });
+function isChatMode(): boolean {
+  const active = document.querySelector(".mode-switch__option.is-active") as HTMLElement | null;
+  return active?.dataset?.modeValue === "chat";
 }
 
-
-function isTalkMode(): boolean {
-  const active = document.querySelector("#mode-dropdown .dm-opt.is-active") as HTMLElement | null;
-  return active?.dataset?.value === "talk";
-}
-
-function getCurrentStyle(): string {
+function getCurrentStyleId(): StyleId {
   const active = document.querySelector("#style-dropdown .dm-opt.is-active") as HTMLElement | null;
-  const style = (active && active.dataset && active.dataset.value) || "01_default.md";
-  // 日常聊天模式：前缀 "talk" 触发后端走 talk_system.md + tools:[]
-  return isTalkMode() ? "talk" : style;
-}
-async function getModelReply(): Promise<ChatReplyPayload> {
-  if (!window.chat?.sendMessage) {
-    throw new Error("聊天 IPC 尚未就绪，请重启应用后再试。");
-  }
-  const modelMessages = buildModelMessages();
-  const payload = await withTimeout(
-    window.chat.sendMessage(modelMessages, getCurrentStyle()),
-    FRONTEND_REPLY_TIMEOUT_MS,
-    "模型响应超时，请稍后重试。",
-  );
-  if (clearModelContexts()) void saveSession();
-  return normalizeChatReplyPayload(payload);
+  return normalizeStyleId(active?.dataset?.value);
 }
 
 let sending = false;
+
+// 发送期间到达的 proactive-chat 外部变更（如昔涟又发了一条主动消息）不立刻重载，
+// 否则会清掉 transient 思考消息 / 冲掉刚落库的回复。记下 sessionId，等发送结束、
+// 最终 saveSession 落盘后再 flush 重载。
+let pendingProactiveReloadId: string | null = null;
+
+/**
+ * 发送结束后调用：若有排队的外部变更，重载当前会话。
+ *
+ * 依赖 IPC 有序处理：发送的最终 saveSession（replaceTail）在 finally 之前已同步
+ * 发出 IPC，flush 这里的 getPage IPC 一定排在它之后被主进程处理，所以重载读到的
+ * 是已落库的回复，不会把它冲掉。
+ *
+ * 已知限制：若外部主动消息在用户 saveSession 之前 append，replaceMessagesTail
+ * 会用本地视图覆盖它（写冲突）。当前无调度器触发 evaluateCandidate，外部主动消息
+ * 不会在发送期间产生，此限制暂不构成实际问题；未来接入调度器时需把 saveSession
+ * 改成 merge-aware。
+ */
+async function flushPendingProactiveReload(): Promise<void> {
+  const pendingId = pendingProactiveReloadId;
+  if (!pendingId) return;
+  pendingProactiveReloadId = null;
+  // 重载前再确认仍是当前会话；用户可能已手动切走。
+  if (pendingId === currentSessionId) {
+    await loadSessionTailIntoUI(pendingId);
+  }
+}
 
 // ── 快捷预设胶囊 ──────────────────────────────────────────
 // 空对话时在 empty-state 下方显示的半透明胶囊，点击后：
@@ -2832,11 +3110,11 @@ interface QuickPreset {
 }
 
 const QUICK_PRESETS: QuickPreset[] = [
-  { id: "chat",     label: "和昔涟聊天", icon: "💬",  mode: "chat" },
-  { id: "schedule", label: "设置定时任务", icon: "⏰", mode: "fill", prompt: "帮我设置一个定时任务：" },
-  { id: "weather",  label: "查看天气",   icon: "🌤️", mode: "fill", prompt: "帮我查一下今天的天气" },
-  { id: "document", label: "生成文档",   icon: "📄", mode: "fill", prompt: "帮我生成一份文档：" },
-  { id: "email",    label: "发送邮件",   icon: "✉️", mode: "fill", prompt: "帮我发一封邮件：" },
+  { id: "chat",     label: "和昔涟聊天", icon: `<svg width="18" height="18" viewBox="0 0 48 48" fill="none" aria-hidden="true"><path d="M33 38H22V30H36V22H44V38H39L36 41L33 38Z" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 6H36V30H17L13 34L9 30H4V6Z" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/><path d="M19 18H20" stroke="currentColor" stroke-width="4" stroke-linecap="round"/><path d="M26 18H27" stroke="currentColor" stroke-width="4" stroke-linecap="round"/><path d="M12 18H13" stroke="currentColor" stroke-width="4" stroke-linecap="round"/></svg>`,  mode: "chat" },
+  { id: "schedule", label: "设置定时任务", icon: `<svg width="18" height="18" viewBox="0 0 48 48" fill="none" aria-hidden="true"><path d="M23.9998 44.3332C34.1251 44.3332 42.3332 36.1251 42.3332 25.9999C42.3332 15.8747 34.1251 7.66656 23.9998 7.66656C13.8746 7.66656 5.6665 15.8747 5.6665 25.9999C5.6665 36.1251 13.8746 44.3332 23.9998 44.3332Z" fill="none" stroke="currentColor" stroke-width="4" stroke-linejoin="round"/><path d="M23.7594 15.3536L23.7582 26.3624L31.5305 34.1347" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 9.00001L11 4.00001" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/><path d="M44 9.00001L37 4.00001" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></svg>`, mode: "fill", prompt: "帮我设置一个定时任务：" },
+  { id: "weather",  label: "查看天气",   icon: `<svg width="18" height="18" viewBox="0 0 48 48" fill="none" aria-hidden="true"><path d="M30.7826 24.5652C34.5285 24.5652 37.5652 21.5285 37.5652 17.7826C37.5652 14.0367 34.5285 11 30.7826 11C27.4338 11 24.6518 13.427 24.0996 16.618" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/><path d="M33 7C34.1046 7 35 6.10457 35 5C35 3.89543 34.1046 3 33 3C31.8954 3 31 3.89543 31 5C31 6.10457 31.8954 7 33 7Z" fill="currentColor"/><path d="M42 12C43.1046 12 44 11.1046 44 10C44 8.89543 43.1046 8 42 8C40.8954 8 40 8.89543 40 10C40 11.1046 40.8954 12 42 12Z" fill="currentColor"/><path d="M44 21C45.1046 21 46 20.1046 46 19C46 17.8954 45.1046 17 44 17C42.8954 17 42 17.8954 42 19C42 20.1046 42.8954 21 44 21Z" fill="currentColor"/><path d="M22 10C23.1046 10 24 9.10457 24 8C24 6.89543 23.1046 6 22 6C20.8954 6 20 6.89543 20 8C20 9.10457 20.8954 10 22 10Z" fill="currentColor"/><path d="M9.45455 39.9942C6.14242 37.461 4 33.4278 4 28.8851C4 21.2166 10.1052 15 17.6364 15C23.9334 15 29.2336 19.3462 30.8015 25.2533C32.0353 24.6159 33.431 24.2567 34.9091 24.2567C39.9299 24.2567 44 28.4011 44 33.5135C44 37.3094 41.7562 40.5716 38.5455 42" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/><path d="M22.2426 24.7574C21.1569 23.6716 19.6569 23 18 23C14.6863 23 12 25.6863 12 29C12 30.6569 12.6716 32.1569 13.7574 33.2426" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></svg>`, mode: "fill", prompt: "帮我查一下今天的天气" },
+  { id: "document", label: "生成文档",   icon: `<svg width="18" height="18" viewBox="0 0 48 48" fill="none" aria-hidden="true"><rect x="6" y="6" width="36" height="36" rx="3" fill="none" stroke="currentColor" stroke-width="4"/><path d="M14 16L18 32L24 19L30 32L34 16" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></svg>`, mode: "fill", prompt: "帮我生成一份文档：" },
+  { id: "email",    label: "发送邮件",   icon: `<svg width="18" height="18" viewBox="0 0 48 48" fill="none" aria-hidden="true"><path d="M36 15H44V28V41H4V28V15H12" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/><path d="M24 19V5" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/><path d="M30 11L24 5L18 11" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 15L24 30L44 15" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></svg>`, mode: "fill", prompt: "帮我发一封邮件：" },
 ];
 
 /** 动态生成胶囊 DOM 并绑定点击。bootstrap 末尾调一次。 */
@@ -2851,7 +3129,7 @@ function buildQuickPresets(): void {
     btn.dataset.presetId = preset.id;
     const icon = document.createElement("span");
     icon.className = "chat__preset-icon";
-    icon.textContent = preset.icon;
+    icon.innerHTML = preset.icon;
     const label = document.createElement("span");
     label.className = "chat__preset-label";
     label.textContent = preset.label;
@@ -2911,6 +3189,7 @@ async function triggerCyreneGreeting(): Promise<void> {
     let sticker: string | null = null;
     let pendingWeatherCard: Record<string, unknown> | null = null;
     let pendingNovelAiImages: Record<string, unknown>[] = [];
+    let pendingMusicCard: MusicCardData | null = null;
 
     let finishRun!: () => void;
     let failRun!: (err: Error) => void;
@@ -2920,11 +3199,12 @@ async function triggerCyreneGreeting(): Promise<void> {
     });
 
     const deltaQueue: string[] = [];
+    let streamSession: StreamingMarkdownSession | null = null;
     let playbackTimer: number | null = null;
     let runFinishedArrived = false;
     let startNextStreamingBubble = false;
     let streamingBubbleCount = 1;
-    const allowStreamingBubbleSplit = shouldSegmentAssistantReply(isTalkMode() ? "talk" : "collab", segmentedOutputMode);
+    const allowStreamingBubbleSplit = shouldSegmentAssistantReply(isChatMode() ? "chat" : "work", segmentedOutputMode);
     const getStreamingBubble = (): HTMLElement | null => {
       if (!isSessionVisible(runSessionId, runMessages)) return null;
       return getLastBubbleForMessage(streamMsgId);
@@ -2947,7 +3227,10 @@ async function triggerCyreneGreeting(): Promise<void> {
             : getStreamingBubble();
           startNextStreamingBubble = false;
           if (bubble) {
-            appendStreamingCharToBubble(bubble, next);
+            if (!streamSession) {
+              streamSession = createStreamingMarkdownSession(getMd(), bubble, streamMsgId, messagesEl);
+            }
+            streamSession.append(next);
           }
           if (
             allowStreamingBubbleSplit
@@ -3033,6 +3316,8 @@ async function triggerCyreneGreeting(): Promise<void> {
               pendingWeatherCard = event.value as Record<string, unknown>;
             } else if (event.name === "cyrene.novelai-image") {
               pendingNovelAiImages.push(event.value as Record<string, unknown>);
+            } else if (event.name === "cyrene.music") {
+              pendingMusicCard = normalizeMusicCardData(event.value);
             } else if (event.name === "cyrene.todos") {
               renderTodoPanel(event.value as TodoState | null);
             } else if (event.name === "cyrene.choice") {
@@ -3049,7 +3334,7 @@ async function triggerCyreneGreeting(): Promise<void> {
             tryFinish();
             break;
           case "RUN_ERROR":
-            failRun(new Error(event.content || "模型请求失败"));
+            failRun(new AgentRenderError(event.code, event.message ?? "模型请求失败"));
             break;
           default:
             break;
@@ -3062,7 +3347,8 @@ async function triggerCyreneGreeting(): Promise<void> {
     // 种子消息：不推入 messages 数组、不渲染，只作为 agent 输入触发昔涟主动开口
     const ack = await window.agui!.run({
       messages: [{ role: "user", content: "[internal] 用户点击了「和昔涟聊天」，请你主动开口聊几句，像朋友打招呼一样自然开场。" }],
-      style: getCurrentStyle(),
+      styleId: getCurrentStyleId(),
+      executionMode: isChatMode() ? "chat" : "work",
       sessionId: runSessionId,
     });
     if (!ack.success) {
@@ -3073,6 +3359,13 @@ async function triggerCyreneGreeting(): Promise<void> {
     await runDone;
     offEvent();
 
+    // flush + dispose 流式 Markdown session（终态 render 会全量重建）
+    if (streamSession) {
+      streamSession.flush();
+      streamSession.dispose();
+      streamSession = null;
+    }
+
     const msg = runMessages.find(m => m.id === streamMsgId);
     if (msg) {
       msg.thinking = false;
@@ -3082,6 +3375,7 @@ async function triggerCyreneGreeting(): Promise<void> {
       if(pendingNovelAiImages.length > 0){
         msg.novelAiImages = pendingNovelAiImages.map(img => ({id:String(img.id||""),prompt:String(img.prompt||""),model:String(img.model||""),width:Number(img.width)||undefined,height:Number(img.height)||undefined}));
       }
+      msg.musicCard = pendingMusicCard ?? undefined;
     }
     void saveSessionMessages(runSessionId, runMessages);
     const finishedMsgId = streamMsgId;
@@ -3104,16 +3398,18 @@ async function triggerCyreneGreeting(): Promise<void> {
     pendingNovelAiImages = [];
   } catch (err) {
     const message = err instanceof Error ? err.message : "模型请求失败";
+    const code = err instanceof AgentRenderError ? err.code : undefined;
+    const userMessage = classifyAgentError(code, message);
     const msg = runMessages.find(m => m.id === streamMsgId);
     if (msg) {
       msg.thinking = false;
       msg.transient = false;
-      msg.content = "连接模型失败：" + message;
+      msg.content = userMessage;
     } else {
       runMessages.push({
         id: String(Date.now() + 2),
         role: "model",
-        content: "连接模型失败：" + message,
+        content: userMessage,
         at: Date.now(),
       });
     }
@@ -3124,6 +3420,7 @@ async function triggerCyreneGreeting(): Promise<void> {
     sendBtn.disabled = false;
     chatHintEl.textContent = formatModelHint(currentModelConfig);
     inputEl.focus();
+    void flushPendingProactiveReload();
   }
 }
 
@@ -3158,6 +3455,7 @@ async function send(): Promise<void> {
           mime: f.mime || "application/octet-stream",
           previewUrl: f.previewUrl,
           caption: f.caption,
+          hasAnnotations: f.hasAnnotations,
           status: f.status || "pending",
         };
       }
@@ -3193,6 +3491,7 @@ async function send(): Promise<void> {
   let hasDocumentContext = false;
   let hasImageCaptionContext = false;
   let hasDirectImageContext = false;
+  let hasUserAnnotationContext = false;
   const appendDocumentContext = (lines: string[]) => {
     if (lines.length === 0) return;
     if (!hasDocumentContext) {
@@ -3217,6 +3516,12 @@ async function send(): Promise<void> {
       return;
     }
     modelContextParts.push(line);
+  };
+  const appendUserAnnotationContext = () => {
+    if (hasUserAnnotationContext) return;
+    const notice = userAnnotationNotice(true);
+    if (notice) modelContextParts.push(`【用户截图标注】\n${notice}`);
+    hasUserAnnotationContext = true;
   };
   const directImageAttachments: { name: string; filePath: string; mime?: string }[] = [];
   let budgetUsed = 0;
@@ -3350,6 +3655,7 @@ async function send(): Promise<void> {
           break;
         case "image": {
           const msgAtt = userMsg.attachments?.find((att) => att.filePath === f.filePath);
+          if (f.hasAnnotations) appendUserAnnotationContext();
           if (!f.filePath) {
             f.status = "error";
             f.reason = "缺少图片路径";
@@ -3364,7 +3670,7 @@ async function send(): Promise<void> {
             appendDirectImageContext(`- ${f.name}：图片已随本轮消息直接发送给主模型。`);
             break;
           }
-          const result = await window.chat?.captionImage(f.filePath);
+          const result = await window.chat?.captionImage(f.filePath, f.hasAnnotations === true);
           if (result?.ok && result.caption) {
             f.status = "done";
             f.caption = result.caption;
@@ -3415,6 +3721,7 @@ async function send(): Promise<void> {
     let sticker: string | null = null;
     let pendingWeatherCard: Record<string, unknown> | null = null;
     let pendingNovelAiImages: Record<string, unknown>[] = [];
+    let pendingMusicCard: MusicCardData | null = null;
 
     // 终态信号：由事件流的 RUN_FINISHED/RUN_ERROR 触发 resolve，
     // 不依赖 invoke 的 resolve（invoke 只做 ack，可能与事件投递存在顺序竞争）。
@@ -3429,11 +3736,12 @@ async function send(): Promise<void> {
     // 主进程在 FC 完成后瞬间把所有 delta 发完，渲染端用"回放队列"按固定节奏逐字显示，
     // 营造真流式感。流式中的气泡用增量 span 追加 + CSS 渐显，不调 render() 全量重建。
     const deltaQueue: string[] = [];
+    let streamSession: StreamingMarkdownSession | null = null;
     let playbackTimer: number | null = null;
     let runFinishedArrived = false;
     let startNextStreamingBubble = false;
     let streamingBubbleCount = 1;
-    const allowStreamingBubbleSplit = shouldSegmentAssistantReply(isTalkMode() ? "talk" : "collab", segmentedOutputMode);
+    const allowStreamingBubbleSplit = shouldSegmentAssistantReply(isChatMode() ? "chat" : "work", segmentedOutputMode);
     /** 找到当前流式消息的气泡 DOM（TEXT_MESSAGE_START 时 render 过一次，带 data-msg-id）。 */
     const getStreamingBubble = (): HTMLElement | null => {
       if (!isSessionVisible(runSessionId, runMessages)) return null;
@@ -3459,7 +3767,10 @@ async function send(): Promise<void> {
             : getStreamingBubble();
           startNextStreamingBubble = false;
           if (bubble) {
-            appendStreamingCharToBubble(bubble, next);
+            if (!streamSession) {
+              streamSession = createStreamingMarkdownSession(getMd(), bubble, streamMsgId, messagesEl);
+            }
+            streamSession.append(next);
           }
           if (
             allowStreamingBubbleSplit
@@ -3555,6 +3866,8 @@ async function send(): Promise<void> {
               pendingWeatherCard = event.value as Record<string, unknown>;
             } else if (event.name === "cyrene.novelai-image") {
               pendingNovelAiImages.push(event.value as Record<string, unknown>);
+            } else if (event.name === "cyrene.music") {
+              pendingMusicCard = normalizeMusicCardData(event.value);
             } else if (event.name === "cyrene.todos") {
               renderTodoPanel(event.value as TodoState | null);
             } else if (event.name === "cyrene.choice") {
@@ -3573,7 +3886,7 @@ async function send(): Promise<void> {
             tryFinish();
             break;
           case "RUN_ERROR":
-            failRun(new Error(event.content || "模型请求失败"));
+            failRun(new AgentRenderError(event.code, event.message ?? "模型请求失败"));
             break;
           default:
             // TOOL_CALL_* / STEP_* 暂不在 UI 处理（骨架阶段）
@@ -3589,7 +3902,10 @@ async function send(): Promise<void> {
     const modelMessages = buildModelMessages(runMessages);
     const ack = await window.agui!.run({
       messages: modelMessages,
-      style: getCurrentStyle(),
+      userTurnId: userMsg.id,
+      assistantTurnId: streamMsgId,
+      styleId: getCurrentStyleId(),
+      executionMode: isChatMode() ? "chat" : "work",
       sessionId: runSessionId,
       imageAttachments: directImageAttachments.length > 0 ? directImageAttachments : undefined,
     });
@@ -3603,6 +3919,13 @@ async function send(): Promise<void> {
     await runDone;
     offEvent();
 
+    // flush + dispose 流式 Markdown session（终态 render 会全量重建）
+    if (streamSession) {
+      streamSession.flush();
+      streamSession.dispose();
+      streamSession = null;
+    }
+
     const msg = runMessages.find(m => m.id === streamMsgId);
     if (msg) {
       msg.thinking = false;
@@ -3612,6 +3935,7 @@ async function send(): Promise<void> {
       if(pendingNovelAiImages.length > 0){
         msg.novelAiImages = pendingNovelAiImages.map(img => ({id:String(img.id||""),prompt:String(img.prompt||""),model:String(img.model||""),width:Number(img.width)||undefined,height:Number(img.height)||undefined}));
       }
+      msg.musicCard = pendingMusicCard ?? undefined;
     }
     void saveSessionMessages(runSessionId, runMessages);
     const finishedMsgId = streamMsgId;
@@ -3637,16 +3961,18 @@ async function send(): Promise<void> {
     // TTS 已在 TEXT_MESSAGE_END 时触发，这里不再重复朗读
   } catch (err) {
     const message = err instanceof Error ? err.message : "模型请求失败";
+    const code = err instanceof AgentRenderError ? err.code : undefined;
+    const userMessage = classifyAgentError(code, message);
     const msg = runMessages.find(m => m.id === streamMsgId);
     if (msg) {
       msg.thinking = false;
       msg.transient = false;
-      msg.content = "连接模型失败：" + message;
+      msg.content = userMessage;
     } else {
       runMessages.push({
         id: String(Date.now() + 2),
         role: "model",
-        content: "连接模型失败：" + message,
+        content: userMessage,
         at: Date.now(),
       });
     }
@@ -3656,6 +3982,7 @@ async function send(): Promise<void> {
     sendBtn.disabled = false;
     chatHintEl.textContent = formatModelHint(currentModelConfig);
     inputEl.focus();
+    void flushPendingProactiveReload();
   }
 }
 function clearChat(): void {
@@ -3702,6 +4029,7 @@ inputEl.addEventListener("keydown", (e) => {
 /* ===== File upload ===== */
 const fileInput = document.getElementById("file-input") as HTMLInputElement | null;
 const attachBtn = document.getElementById("attach-btn") as HTMLButtonElement | null;
+const screenshotBtn = document.getElementById("screenshot-btn") as HTMLButtonElement | null;
 let attachedFiles: Attachment[] = [];
 	
 // ── path-based 文件摄入 ──
@@ -3733,6 +4061,13 @@ async function ingestDroppedFiles(files: File[]): Promise<void> {
 	  attachedFiles.forEach((f, i) => {
 	    const tag = document.createElement("div");
 	    tag.className = "chat__file-tag";
+	    if (f.kind === "image" && f.previewUrl) {
+	      const preview = document.createElement("img");
+	      preview.className = "chat__file-tag-preview";
+	      preview.src = f.previewUrl;
+	      preview.alt = f.name;
+	      tag.appendChild(preview);
+	    }
 	    const label = document.createElement("span");
 	    const icon = getAttachmentIcon(f.kind);
 	    const detail = formatAttachmentTagDetail(f);
@@ -3760,6 +4095,79 @@ async function ingestDroppedFiles(files: File[]): Promise<void> {
 	    void ingestDroppedFiles(Array.from(fileInput.files));
 	  }
 	});
+
+/* ===== Screenshot ===== */
+
+/** 统一插入图片附件（粘贴和截图按钮共用） */
+async function insertImageAttachment(input: {
+  base64?: string;
+  mime: string;
+  filePath?: string;
+  previewUrl?: string;
+  name?: string;
+  hasAnnotations?: boolean;
+}): Promise<void> {
+  const filePath = input.filePath
+    ?? (input.base64
+      ? (await window.chat?.saveScreenshotTemp(input.base64, input.mime))?.filePath
+      : undefined);
+  if (!filePath) throw new Error("SCREENSHOT_FILE_PATH_REQUIRED");
+
+  attachedFiles.push({
+    kind: "image",
+    name: input.name ?? `截图_${Date.now()}.png`,
+    filePath,
+    mime: input.mime,
+    previewUrl: input.base64
+      ? `data:${input.mime};base64,${input.base64}`
+      : input.previewUrl,
+    hasAnnotations: input.hasAnnotations,
+    status: "pending",
+  });
+  updateFileTags();
+}
+
+// 截图按钮 -> 触发主进程截图流程（按钮模式：选区后直接插入，不需要粘贴）
+screenshotBtn?.addEventListener("click", () => {
+  void window.chat?.startScreenshot();
+});
+
+// 按钮模式回调：主进程裁剪完直接发图片过来
+window.chat?.onScreenshotInsert?.((data) => {
+  void insertImageAttachment({
+    mime: data.mime,
+    filePath: data.filePath,
+    previewUrl: data.previewUrl,
+    hasAnnotations: data.hasAnnotations,
+    name: `截图_${Date.now()}.png`,
+  });
+});
+
+// 粘贴监听：检测剪贴板图片 -> 插入附件（热键模式：Alt+Shift+S 截图后 Ctrl+V）
+document.addEventListener("paste", async (e) => {
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  for (const item of items) {
+    if (item.type.startsWith("image/")) {
+      e.preventDefault();
+      const blob = item.getAsFile();
+      if (!blob) continue;
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const dataUrl = reader.result as string;
+        const base64 = dataUrl.split(",")[1] ?? "";
+        if (!base64) return;
+        try {
+          await insertImageAttachment({ base64, mime: blob.type || "image/png" });
+        } catch (err) {
+          console.error("[Chat] 粘贴图片失败:", err);
+        }
+      };
+      reader.readAsDataURL(blob);
+      break; // 只处理第一张图片
+    }
+  }
+});
 	
 	function removeAttachedFiles(): void {
 	  attachedFiles = [];
@@ -3808,19 +4216,33 @@ clearBtn.addEventListener("click", clearChat);
 
 
 
-/* ===== Dropdown: mode + style + reasoning (body-level menus) ===== */
+/* ===== Work / Chat switch + style / reasoning dropdowns ===== */
 (function() {
   var triggers = document.querySelectorAll(".dropdown-trigger");
+  var modeOptions = document.querySelectorAll(".mode-switch__option");
   var menus = {
-    "mode-dropdown": document.getElementById("mode-dropdown"),
     "style-dropdown": document.getElementById("style-dropdown"),
     "reasoning-dropdown": document.getElementById("reasoning-dropdown")
   };
   var values = {
-    "mode-dropdown": document.getElementById("mode-val"),
     "style-dropdown": document.getElementById("style-val"),
     "reasoning-dropdown": document.getElementById("reasoning-val")
   };
+
+  function selectModeOption(value) {
+    const normalized = normalizeDefaultChatMode(value);
+    modeOptions.forEach(function(option) {
+      const active = (option as HTMLElement).dataset.modeValue === normalized;
+      option.classList.toggle("is-active", active);
+      option.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+  }
+
+  modeOptions.forEach(function(option) {
+    option.addEventListener("click", function() {
+      selectModeOption((option as HTMLElement).dataset.modeValue);
+    });
+  });
 
   // Close all dropdowns
   function closeAll() {
@@ -3870,6 +4292,10 @@ clearBtn.addEventListener("click", clearChat);
     menu.querySelectorAll(".dm-opt").forEach(function(opt) {
       opt.addEventListener("click", function() {
         selectDropdownOption(id, opt.getAttribute("data-value"));
+        if (id === "style-dropdown") {
+          const styleId = normalizeStyleId(opt.getAttribute("data-value"));
+          void window.settings?.saveGeneral?.({ currentStyleId: styleId });
+        }
         closeAll();
       });
     });
@@ -3988,14 +4414,15 @@ clearBtn.addEventListener("click", clearChat);
 
   void window.chat?.getGeneralSettings?.()
     .then(function(settings) {
-      selectDropdownOption("mode-dropdown", normalizeDefaultChatMode(settings?.defaultChatMode));
+      selectModeOption(settings?.defaultChatMode);
+      selectDropdownOption("style-dropdown", normalizeStyleId(settings?.currentStyleId));
       segmentedOutputMode = settings?.segmentedOutputMode === "chat" || settings?.segmentedOutputMode === "off"
         ? settings.segmentedOutputMode
         : settings?.segmentedOutputMode === "all" ? "all" : "off";
       render(true);
     })
     .catch(function() {
-      selectDropdownOption("mode-dropdown", "collab");
+      selectModeOption("work");
       segmentedOutputMode = "off";
       render(true);
     });
@@ -4158,11 +4585,17 @@ window.chatStore?.onChanged(async () => {
   if (chatRail && !chatRail.hidden) void renderRailList();
   const stillExists = await window.chatStore.get(currentSessionId);
   if (stillExists) {
-    if (
-      stillExists.purpose === "proactive-chat" &&
-      stillExists.updatedAt > (seenSessionUpdatedAt.get(stillExists.id) ?? 0)
-    ) {
+    const decision = decideReloadCurrentSession({
+      purpose: stillExists.purpose,
+      updatedAt: stillExists.updatedAt,
+      seenAt: seenSessionUpdatedAt.get(stillExists.id) ?? 0,
+      sending,
+    });
+    if (decision === "reload") {
       await loadSessionTailIntoUI(stillExists.id);
+    } else if (decision === "defer") {
+      // 发送期间到达的外部变更：排队，等发送结束 flush（见 send/triggerCyreneGreeting 的 finally）。
+      pendingProactiveReloadId = stillExists.id;
     }
     return;
   }
