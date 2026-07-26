@@ -136,6 +136,14 @@
   margin: 6px 0;
   line-height: 1.6;
 }
+/* 消除首尾子元素的 margin，使 Markdown 渲染前后气泡高度一致，
+   避免 render() 重建纯文本 → scheduleHistoryRender 升级 Markdown 时的高度抖动。 */
+.msg__bubble > *:first-child {
+  margin-top: 0;
+}
+.msg__bubble > *:last-child {
+  margin-bottom: 0;
+}
 
 .msg__bubble h1,
 .msg__bubble h2,

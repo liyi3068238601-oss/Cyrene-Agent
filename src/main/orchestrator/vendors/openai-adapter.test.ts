@@ -419,4 +419,40 @@ describe("OpenAICompatAdapter", () => {
     // thinking 启用时，assistant 消息应携带 reasoning_content
     expect(body.messages[1].reasoning_content).toBe("之前的思考");
   });
+
+  test("结构化输出场景（reasoning=off → thinking.disabled）→ messages 仍保留 reasoning_content（HTTP 400 回归测试）", () => {
+    const deepseekCap: ProviderCapability = {
+      ...capability,
+      id: "deepseek",
+      supportsThinking: true,
+      thinkingField: "reasoning_content",
+    };
+    const adapter = new OpenAICompatAdapter("deepseek", deepseekCap);
+    // 模拟 Action Gate / CITA 场景：结构化输出 profile 强制 reasoning: "off"
+    // 历史对话中有 assistant 消息（部分有 thinking，部分没有）
+    const messages = [
+      { role: "user" as const, content: "你好" },
+      { role: "assistant" as const, content: "你好！", thinking: "之前的思考" },
+      { role: "user" as const, content: "执行工具" },
+      { role: "assistant" as const, content: "好的", toolCalls: [{ id: "tc1", name: "write_file", arguments: "{}" }] },
+      { role: "user" as const, content: "继续" },
+    ];
+    const req = adapter.buildRequest(
+      {
+        model: "deepseek-v4-pro",
+        messages,
+        tools: [{ name: "write_file", description: "写文件", parameters: {} }],
+      },
+      // 显式 off：模拟结构化输出 profile 的 reasoning: "disabled"
+      { provider: "DeepSeek", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-pro", apiKey: "k", reasoning: { mode: "off" } },
+    );
+    const body = JSON.parse(req.body) as { messages: Array<Record<string, unknown>>; thinking?: { type?: string } };
+    // thinking 应被禁用
+    expect(body.thinking).toEqual({ type: "disabled" });
+    // 关键断言：即使 thinking 被禁用，assistant 消息仍必须携带 reasoning_content 字段
+    // DeepSeek V4-Pro 要求所有 assistant 消息都带此字段，否则返回 HTTP 400:
+    //   "The `reasoning_content` in the thinking mode must be passed back to the API."
+    expect(body.messages[1].reasoning_content).toBe("之前的思考");
+    expect(body.messages[3].reasoning_content).toBe("");
+  });
 });

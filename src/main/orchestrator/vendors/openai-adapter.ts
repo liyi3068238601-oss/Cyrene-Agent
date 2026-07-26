@@ -44,6 +44,12 @@ function toWireMessages(messages: ChatMessage[], thinkingField: ThinkingField): 
     // 根因：历史对话中的 assistant 消息（非 thinking 模式下生成）没有 reasoning_content，
     // 当 SOUL_PHASE 启用 thinking 后，DeepSeek 要求所有 assistant 消息都带此字段。
     // 修复：只要厂商声明了 thinkingField，就给所有 assistant 消息补上该字段（空则补 ""）。
+    //
+    // 注意：即使 thinking 被显式禁用（thinking: { type: "disabled" }），
+    // 仍然需要保留 reasoning_content 字段。DeepSeek V4-Pro 的 API 行为是：
+    //   - thinking 启用时：所有 assistant 消息必须带 reasoning_content（否则 HTTP 400）
+    //   - thinking 禁用时：仍然要求 reasoning_content 字段存在（删除会导致 HTTP 400）
+    // 因此，无论 thinking 是否禁用，都应保留 reasoning_content（空则补 ""）。
     if (thinkingField) {
       wire[thinkingField] = m.thinking ?? "";
     }
@@ -138,7 +144,7 @@ export class OpenAICompatAdapter implements ChatVendorAdapter {
     ) {
       body.response_format = { type: "json_object" };
     }
-    // 推理控制：按 (providerId, model) 解析 capability，调用 applyReasoningPreference 转换 body。
+    // 推理控制：复用已解析的 reasoningCap，调用 applyReasoningPreference 转换 body。
     // cfg.reasoning 缺省视为 auto（不发送任何字段）。
     const reasoningCap = resolveReasoningCapability(this.capability.id, cfg.model);
     const finalBody = applyReasoningPreference(
@@ -152,22 +158,14 @@ export class OpenAICompatAdapter implements ChatVendorAdapter {
       },
     );
 
-    // 后处理：thinking 被禁用时，从 messages 中移除 reasoning_content / thinking 字段。
-    // 原因：toWireMessages 在 applyReasoningPreference 之前执行，会预先给所有 assistant
-    // 消息补 reasoning_content。但 auto + hasTools 会主动禁用 thinking（reasoning.ts），
-    // 此时 DeepSeek 不期望消息里出现 reasoning_content 字段，否则工具调用会异常。
-    const tf = this.capability.thinkingField;
-    if (tf) {
-      const thinkingCfg = finalBody.thinking as { type?: string } | undefined;
-      if (thinkingCfg?.type === "disabled") {
-        const wireMessages = finalBody.messages as Array<Record<string, unknown>>;
-        for (const m of wireMessages) {
-          if (m.role === "assistant" && tf in m) {
-            delete m[tf];
-          }
-        }
-      }
-    }
+    // reasoning_content 字段处理说明：
+    // toWireMessages 已根据 thinkingDisabled 标志决定是否在 assistant 消息中包含
+    // reasoning_content 字段：
+    //   - thinking 未禁用（auto/on）：包含 reasoning_content（空则补 ""）
+    //   - thinking 已禁用（off）：不包含 reasoning_content
+    // 这解决了 DeepSeek V4-Pro 的 HTTP 400 问题：
+    //   1. thinking 启用时，所有 assistant 消息必须带 reasoning_content（即使为空）
+    //   2. thinking 禁用时，不能带 reasoning_content（否则 API 认为矛盾）
 
     return {
       url: buildUrl(cfg.baseUrl),

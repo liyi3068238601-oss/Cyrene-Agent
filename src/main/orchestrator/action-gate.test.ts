@@ -13,6 +13,14 @@ const capabilities: ActionCapability[] = [{
   capability: "music.play_track",
   toolId: "music_play_track",
   description: "播放歌曲",
+  requiresTargetRefs: true,
+}];
+
+const noRefCapabilities: ActionCapability[] = [{
+  capability: "write_file",
+  toolId: "write_file",
+  description: "写入文件",
+  requiresTargetRefs: false,
 }];
 
 const schemaProfile = resolveStructuredOutputProfile({
@@ -213,6 +221,35 @@ describe("runActionGate", () => {
         disposition: "refresh_state",
         toolExecuted: false,
       },
+    });
+    expect(generate).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips targetRef validation for tools that do not require context refs", async () => {
+    // write_file 没有 controlledInput，即使 LLM 误填了无效的 targetRefs 也不应被拦截。
+    // 这修复了文件操作工具被 Action Gate 误杀的问题。
+    const generate = vi.fn(async () => response({
+      decision: "act",
+      capability: "write_file",
+      objective: "写入文件到 D:\\test.txt",
+      targetRefs: ["D:\\test.txt"],
+      afterSuccess: "respond",
+    }));
+
+    const result = await runActionGate(baseInput(generate, {
+      availableCapabilities: noRefCapabilities,
+    }));
+
+    expect(result).toEqual({
+      outcome: "success",
+      decision: {
+        decision: "act",
+        capability: "write_file",
+        objective: "写入文件到 D:\\test.txt",
+        targetRefs: ["D:\\test.txt"],
+        afterSuccess: "respond",
+      },
+      repairCount: 0,
     });
     expect(generate).toHaveBeenCalledTimes(1);
   });

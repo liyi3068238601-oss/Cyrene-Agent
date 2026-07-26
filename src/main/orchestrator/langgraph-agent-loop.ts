@@ -1,5 +1,6 @@
 import { recordUsage } from "../token-usage-store";
 import { stripLeakedChatTimeContext } from "../chat-time-context";
+import { appendToolCallErrorLog } from "./tool-call-error-log";
 import {
   runActionGate,
   type ActionCapability,
@@ -80,6 +81,14 @@ async function callAdapter(
     fetchTimer.end(`status=${response.status}`);
     if (!response.ok) {
       const body = await response.text().catch(() => "");
+      // 详细日志：记录失败的 HTTP 请求，便于诊断 reasoning_content / tool_call 等问题
+      appendToolCallErrorLog({
+        stage: "callAdapter",
+        adapterId: adapter.id,
+        httpStatus: response.status,
+        responseBody: body.slice(0, 1000),
+        requestBodySummary: summarizeRequestForLog(effectiveRequest),
+      });
       throw new AgentRuntimeError(
         "E_MODEL_REQUEST_FAILED",
         `模型请求失败：HTTP ${response.status}${body ? ` - ${body.slice(0, 200)}` : ""}`,
@@ -93,6 +102,25 @@ async function callAdapter(
     clearTimeout(timer);
     signal?.removeEventListener("abort", abort);
   }
+}
+
+/** 为错误日志生成请求摘要：消息角色/是否有 thinking/是否有 tool_calls */
+function summarizeRequestForLog(req: ChatRequest): string {
+  const msgs = req.messages ?? [];
+  const summary = msgs.map((m, i) => {
+    const parts: string[] = [`[${i}]role=${m.role}`];
+    if (m.role === "assistant") {
+      parts.push(`thinking=${m.thinking ? "yes" : "no"}`);
+      parts.push(`toolCalls=${m.toolCalls?.length ?? 0}`);
+    }
+    if (m.role === "tool") {
+      parts.push(`toolCallId=${m.toolCallId ?? "?"}`);
+    }
+    const contentLen = typeof m.content === "string" ? m.content.length : 0;
+    parts.push(`contentLen=${contentLen}`);
+    return parts.join(",");
+  });
+  return `model=${req.model} msgCount=${msgs.length} tools=${req.tools?.length ?? 0} | ${summary.join(" | ")}`;
 }
 
 function emitText(onEvent: LangGraphAgentLoopOptions["onEvent"], text: string): void {
@@ -132,6 +160,9 @@ export async function runLangGraphAgentLoop(options: LangGraphAgentLoopOptions):
     capability: tool.capability ?? tool.id,
     toolId: tool.id,
     description: tool.catalogHint?.trim() || tool.description.split("\n")[0]?.trim() || tool.description,
+    requiresTargetRefs: !!(tool.controlledInput && Object.values(tool.controlledInput).some(
+      (v) => v === "context_ref" || v === "context_ref_array",
+    )),
   }));
   let usageInput = 0;
   let usageOutput = 0;

@@ -300,9 +300,10 @@ const messagesEl = document.getElementById("messages") as HTMLElement;
 initMarkdownRenderer();
 initCodeBlockController(messagesEl);
 
-// ── 历史消息渐进渲染队列 ────────────────────────────────────
-// render() 先同步创建纯文本占位，标记 data-md-pending，
-// 队列用 requestIdleCallback 渐进升级为 Markdown HTML。
+// ── 历史消息 Markdown 渲染 ────────────────────────────────────
+// render() 中终态消息直接同步渲染 Markdown（不经过纯文本占位），
+// 消除 textContent → innerHTML 两步切换导致的高度抖动。
+// scheduleHistoryRender 仅用于主题切换时重新渲染 Shiki 代码高亮。
 
 /** 存储所有助手 bubble 的原始 markdown 文本（WeakMap 防 DOM 回收后泄漏） */
 const bubbleRawText = new WeakMap<HTMLElement, string>();
@@ -1887,9 +1888,13 @@ function render(preserveScroll = false): void {
             // 流式期：纯文本，由 StreamingMarkdownSession 管理后续 DOM
             bubble.textContent = text;
           } else {
-            // 终态：先放纯文本占位，标记为 pending，由历史渐进队列升级为 Markdown
-            bubble.textContent = text;
-            bubble.dataset.mdPending = "true";
+            // 终态：直接同步渲染 Markdown，避免纯文本 → Markdown 两步切换导致的高度抖动
+            const result = renderMarkdown(text);
+            if (result.mode === "html") {
+              bubble.innerHTML = result.content;
+            } else {
+              bubble.textContent = result.content;
+            }
           }
           bubbleRawText.set(bubble, text);
           bubbles.push(bubble);

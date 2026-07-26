@@ -20,6 +20,8 @@ export interface ActionCapability {
   capability: string;
   toolId: string;
   description: string;
+  /** 该工具是否需要 targetRefs 验证（由 controlledInput 中是否存在 context_ref/context_ref_array 决定）。 */
+  requiresTargetRefs?: boolean;
 }
 
 export interface TrustedFailureFact {
@@ -290,7 +292,8 @@ function validateDecisionBusiness(
   if (decision.decision !== "act") {
     return { status: "accepted", value: decision };
   }
-  if (!input.availableCapabilities.some((item) => item.capability === decision.capability)) {
+  const cap = input.availableCapabilities.find((item) => item.capability === decision.capability);
+  if (!cap) {
     return {
       status: "rejected",
       error: {
@@ -299,6 +302,12 @@ function validateDecisionBusiness(
         disposition: "repair",
       },
     };
+  }
+  // 只有声明了 controlledInput (context_ref/context_ref_array) 的工具才需要验证 targetRefs。
+  // 文件操作、记忆检索等工具的参数由 Native FC 阶段填充，不依赖 CITA 可信引用，
+  // 即使 LLM 误填了 targetRefs 也不应拦截。
+  if (!cap.requiresTargetRefs) {
+    return { status: "accepted", value: decision };
   }
   for (const ref of decision.targetRefs) {
     let valid = false;

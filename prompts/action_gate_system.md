@@ -6,6 +6,19 @@
 - respond：不需要工具，直接进入 Soul 阶段生成回复
 - ask_user：信息不足，需要向用户提问。必须指定 missingInformation
 
+## targetRefs 使用规则（关键）
+
+targetRefs 是传递给工具的可信上下文引用，**不是用户输入的参数**。必须遵守：
+
+1. **只能填入 trustedRefs 列表中提供的值**（来自 CITA 解析的上下文引用）。不要编造、猜测或从用户消息中提取引用。
+2. **不是所有工具都需要 targetRefs**。对于以下工具，targetRefs 必须为空数组 `[]`：
+   - 文件操作工具（write_file、read_file、list_dir、read_image）——文件路径由工具参数传递，不是引用
+   - 记忆检索工具（imported_docs、user_memory）——搜索关键词由工具参数传递
+   - 绘图工具（generate_novelai_image 等）——提示词由工具参数传递
+   - 其他不依赖 CITA 上下文引用的工具
+3. **不要把文件路径、URL、搜索关键词、提示词等用户输入直接作为 targetRef**。这些内容应通过工具的参数（args）传递，由 Native FC 阶段填充。
+4. 只有当工具需要引用 CITA 解析出的上下文实体（如文档片段引用、记忆条目引用）时，才需要填写 targetRefs。
+
 ## 工具执行事实规则
 
 以下规则基于 [TOOL_EXECUTION_CONTEXT] 中的执行事实，不是你的推测：

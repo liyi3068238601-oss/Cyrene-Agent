@@ -5,6 +5,7 @@ import type {
   StructuredValidationError,
 } from "./errors";
 import type { RecordStructuredOutputMetric } from "./metrics";
+import { appendToolCallErrorLog } from "../tool-call-error-log";
 import type {
   StructuredOutputMode,
   StructuredOutputProfile,
@@ -141,7 +142,20 @@ export async function runStructuredOutput<T, TRequest>(
           }, timeoutMs);
         }),
       ]);
-    } catch {
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const isTimeout = detail.includes("STRUCTURED_OUTPUT_TIMEOUT");
+      console.error(
+        `[StructuredOutput] MODEL_REQUEST_FAILED stage=${input.stage} attempt=${attempts} ` +
+        `timeout=${isTimeout} error=${detail.slice(0, 500)}`,
+      );
+      appendToolCallErrorLog({
+        stage: `StructuredOutput:${input.stage}`,
+        adapterId: "structured-output",
+        httpStatus: 0,
+        responseBody: detail.slice(0, 1000),
+        requestBodySummary: `attempt=${attempts} timeout=${isTimeout} stage=${input.stage}`,
+      });
       return fail("MODEL_REQUEST_FAILED", "fail_closed");
     } finally {
       if (timer) clearTimeout(timer);
@@ -171,12 +185,34 @@ export async function runStructuredOutput<T, TRequest>(
       for (const candidate of candidates) {
         try {
           valid.push(input.parseSchema(candidate.value));
-        } catch {
-          // Schema error details stay local; raw model output is never returned to repair.
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          console.warn(
+            `[StructuredOutput] SCHEMA_PARSE_ERROR stage=${input.stage} ` +
+            `error=${detail.slice(0, 200)}`,
+          );
         }
       }
       validCandidateCount = valid.length;
       if (valid.length === 0) {
+        if (candidates.length === 0) {
+          console.warn(
+            `[StructuredOutput] NO_JSON_OBJECT stage=${input.stage} ` +
+            `finishReason=${normalizedFinish} rawOutput(500)=${response.text.slice(0, 500)}`,
+          );
+          appendToolCallErrorLog({
+            stage: `StructuredOutput:${input.stage}:NO_JSON_OBJECT`,
+            adapterId: "structured-output",
+            httpStatus: 200,
+            responseBody: response.text.slice(0, 1000),
+            requestBodySummary: `finishReason=${normalizedFinish} finish=${response.finishReason ?? "?"}`,
+          });
+        } else {
+          console.warn(
+            `[StructuredOutput] NO_SCHEMA_VALID_OBJECT stage=${input.stage} ` +
+            `candidateCount=${candidates.length}`,
+          );
+        }
         errors = [validationError(
           candidates.length === 0 ? "format" : "schema",
           candidates.length === 0 ? "NO_JSON_OBJECT" : "NO_SCHEMA_VALID_OBJECT",
