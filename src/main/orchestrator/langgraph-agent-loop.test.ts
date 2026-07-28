@@ -1,8 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+vi.mock("./task-router", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./task-router")>();
+  return { ...actual, ENABLE_TASK_ROUTER: false };
+});
 import { runLangGraphAgentLoop } from "./langgraph-agent-loop";
+import { AgentExecutionError } from "./run-execution-status";
 import { ExecutionLedger } from "./execution-ledger";
 import { contextRefRegistry } from "./tool-context";
 import type { ToolDefinition } from "./tool-registry";
+import type { TwoPhaseEvent } from "./two-phase-fc-loop";
 import type {
   ChatMessage, ChatRequest, ChatResponse, ChatVendorAdapter, HttpRequest,
   ProviderCapability, ToolCall, ToolExecutionResult,
@@ -68,6 +74,17 @@ function musicPlayTool(): ToolDefinition {
   };
 }
 
+function weatherTool(): ToolDefinition {
+  return {
+    id: "weather", capability: "weather.lookup", name: "查询天气",
+    description: "查询指定城市的天气", enabled: true,
+    inputSchema: {
+      type: "object", properties: { city: { type: "string" } }, required: [],
+    },
+    execute: async () => "unused",
+  };
+}
+
 function options(adapter: FakeAdapter, executeTool = vi.fn(async () => ({
   status: "succeeded" as const,
   output: JSON.stringify({ kind: "playback", dispatch: { state: "dispatched" } }),
@@ -97,7 +114,70 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe("runLangGraphAgentLoop native Function Calling runtime", () => {
+  it("executes a non-reference tool after discarding an invented target ref", async () => {
+    vi.mocked(contextRefRegistry.resolve).mockImplementation(() => {
+      throw new Error("unknown ref");
+    });
+    const adapter = new FakeAdapter();
+    adapter.enqueueDecision({
+      decision: "act",
+      capability: "weather.lookup",
+      objective: "查询杭州天气",
+      targetRefs: ["杭州"],
+      afterSuccess: "respond",
+    });
+    adapter.enqueueToolCall("weather", { city: "杭州" });
+    adapter.enqueueText("杭州今天晴。");
+    const executeTool = vi.fn(async () => ({
+      status: "succeeded" as const,
+      output: JSON.stringify({ city: "杭州", condition: "晴" }),
+    }));
+
+    const result = await runLangGraphAgentLoop({
+      ...options(adapter, executeTool),
+      messages: [{ role: "user", content: "查一下杭州天气" }],
+      tools: [weatherTool()],
+      originalQuery: "查一下杭州天气",
+      contextualizedQuery: "查询杭州当前天气",
+      citaContextBlock: "",
+      trustedRefs: [],
+      runtimeEnvironmentContext: "默认城市：淄博\n桌面：C:\\Users\\13575\\Desktop",
+    });
+
+    expect(executeTool).toHaveBeenCalledTimes(1);
+    expect(executeTool).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "weather", arguments: '{"city":"杭州"}' }),
+      expect.any(Set),
+    );
+    const actionGatePayload = JSON.parse(
+      String(adapter.requests[0].messages.at(-1)?.content),
+    ) as {
+      machineInput: {
+        availableCapabilities: Array<{
+          capability: string;
+          referencePolicy: string;
+          requiredInputs: string[];
+        }>;
+        runtimeEnvironmentContext: string;
+      };
+    };
+    expect(actionGatePayload.machineInput.availableCapabilities).toEqual([
+      expect.objectContaining({
+        capability: "weather.lookup",
+        referencePolicy: "none",
+        requiredInputs: [],
+      }),
+    ]);
+    expect(actionGatePayload.machineInput.runtimeEnvironmentContext).toContain("默认城市：淄博");
+    const nativeRequest = adapter.requests.find(
+      (request) => request.toolChoiceIntent?.toolName === "weather",
+    );
+    expect(nativeRequest?.messages[0]?.content).toContain("C:\\Users\\13575\\Desktop");
+    expect(result.reply).toBe("杭州今天晴。");
+  });
+
   it("decides an action, resolves one native ToolCall, then Runtime executes it", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const adapter = new FakeAdapter();
     adapter.enqueueDecision({ decision: "act", capability: "music.play_track", objective: "播放第一首", targetRefs: ["ctx_song_1"], afterSuccess: "respond" });
     adapter.enqueueToolCall("music_play_track", { candidateRef: "ctx_song_1" });
@@ -121,6 +201,14 @@ describe("runLangGraphAgentLoop native Function Calling runtime", () => {
       toolChoiceIntent: { mode: "must_call", toolName: "music_play_track" },
     });
     expect(result.reply).toBe("已向网易云发送播放请求。");
+    const lines = log.mock.calls.map((call) => call.join(" ")).join("\n");
+    expect(lines).toContain("[AgentFlow] 3. 选择动作：调用 music_play_track");
+    expect(lines).toContain("[AgentFlow] 4. 生成工具参数：完成（candidateRef）");
+    expect(lines).toContain("[AgentFlow] 5. 执行工具：music_play_track");
+    expect(lines).toContain("[AgentFlow] 6. 工具结果：成功");
+    expect(lines).toContain("[AgentFlow] 7. 生成最终回复");
+    expect(lines).not.toContain("[AgentGraph/Trace]");
+    expect(lines).not.toContain("[StructuredOutput]");
   });
 
   it("passes recent verbatim user paths to Native FC when the current request is implicit", async () => {
@@ -173,6 +261,116 @@ describe("runLangGraphAgentLoop native Function Calling runtime", () => {
 
     expect(executeTool).not.toHaveBeenCalled();
     expect(result.reply).toBe("你想听哪个版本？");
+  });
+
+  it("shows an Action Gate validation failure and that no tool ran", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.mocked(contextRefRegistry.resolve).mockImplementation(() => {
+      throw new Error("stale ref");
+    });
+    const adapter = new FakeAdapter();
+    adapter.enqueueDecision({
+      decision: "act",
+      capability: "music.play_track",
+      objective: "播放第一首",
+      targetRefs: ["stale-ref"],
+      afterSuccess: "respond",
+    });
+    // 重新决策：模型仍选同一过期引用，refresh 预算用尽后转入失败回复
+    adapter.enqueueDecision({
+      decision: "act",
+      capability: "music.play_track",
+      objective: "播放第一首",
+      targetRefs: ["stale-ref"],
+      afterSuccess: "respond",
+    });
+    adapter.enqueueText("工具没有执行。");
+    const executeTool = vi.fn();
+
+    await runLangGraphAgentLoop(options(adapter, executeTool));
+
+    expect(executeTool).not.toHaveBeenCalled();
+    const lines = log.mock.calls.map((call) => call.join(" ")).join("\n");
+    expect(lines).toContain("[AgentFlow] 3. 动作校验失败：TARGET_REF_INVALID");
+    expect(lines).toContain("[AgentFlow]    工具未执行；转入失败回复");
+  });
+
+  it("recovers from a stale target ref via refresh re-decision", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.mocked(contextRefRegistry.resolve).mockImplementation(() => {
+      throw new Error("stale ref");
+    });
+    const adapter = new FakeAdapter();
+    adapter.enqueueDecision({
+      decision: "act",
+      capability: "music.play_track",
+      objective: "播放第一首",
+      targetRefs: ["stale-ref"],
+      afterSuccess: "respond",
+    });
+    // 重新决策：模型看到 previousGateFailure，改为直接回复
+    adapter.enqueueDecision({ decision: "respond", reason: "引用已失效，请重新搜索" });
+    adapter.enqueueText("引用已过期了，我帮你重新搜一下好不好？");
+    const executeTool = vi.fn();
+
+    await runLangGraphAgentLoop(options(adapter, executeTool));
+
+    expect(executeTool).not.toHaveBeenCalled();
+    const lines = log.mock.calls.map((call) => call.join(" ")).join("\n");
+    expect(lines).toContain("[AgentFlow] 3. 重新决策（上次失败：TARGET_REF_INVALID）");
+    expect(lines).toContain("[AgentFlow] 3. 选择动作：直接回复");
+  });
+
+  it("uses the choice-card answer to continue from ask_user to tool execution", async () => {
+    const adapter = new FakeAdapter();
+    adapter.enqueueDecision({
+      decision: "ask_user",
+      reason: "版本不明确",
+      missingFields: [{
+        field: "version",
+        reason: "歌曲版本不明确",
+        required: true,
+        questionHint: "希望播放哪个版本？",
+        typeHint: "single_select",
+        allowedOptions: [],
+        candidateHints: ["Live 版", "录音室版"],
+        allowCustom: true,
+      }],
+    });
+    adapter.enqueueJson({
+      intro: "伙伴，想播放得更合你心意，还需要选一下版本呀。",
+      questions: [{
+        field: "version",
+        question: "希望播放哪个版本？",
+        type: "single_select",
+        options: [{ value: "Live 版", label: "Live 版" }],
+        allowCustom: true,
+        freeTextPlaceholder: "填写其他版本",
+      }],
+      deferredFields: [],
+    });
+    adapter.enqueueDecision({ decision: "act", capability: "music.play_track", objective: "播放用户选择的版本", targetRefs: ["ctx_song_1"], afterSuccess: "respond" });
+    adapter.enqueueToolCall("music_play_track", { candidateRef: "ctx_song_1" });
+    adapter.enqueueText("已按你的选择播放。");
+    const executeTool = vi.fn(async () => ({ status: "succeeded" as const, output: "playing" }));
+    const requestUserClarification = vi.fn(async () => ({
+      requestId: "choice-1",
+      answers: [{ field: "version", selectedValues: ["Live 版"] }],
+    }));
+
+    const result = await runLangGraphAgentLoop(({
+      ...options(adapter, executeTool),
+      askSystemContent: "ASK_SYSTEM\n\nASK_PERSONA\n\nASK_QUOTES",
+      trustedAskUserProfile: { callPreference: "伙伴", gender: "male" },
+      requestUserClarification,
+    } as Parameters<typeof runLangGraphAgentLoop>[0]));
+
+    expect(requestUserClarification).toHaveBeenCalledWith(expect.objectContaining({
+      intro: "伙伴，想播放得更合你心意，还需要选一下版本呀。",
+      questions: [expect.objectContaining({ field: "version" })],
+    }));
+    expect(executeTool).toHaveBeenCalledTimes(1);
+    expect(result.reply).toBe("已按你的选择播放。");
   });
 
   it("applies style sampling only to the final Soul request", async () => {
@@ -351,7 +549,10 @@ describe("runLangGraphAgentLoop native Function Calling runtime", () => {
       .mockResolvedValueOnce(new Response("{}", { status: 200 }))
       .mockResolvedValueOnce(new Response("soul failed", { status: 500 })) as unknown as typeof fetch;
 
-    await expect(runLangGraphAgentLoop({ ...options(first, executeTool), executionLedger: ledger })).rejects.toThrow("HTTP 500");
+    // Soul 失败但工具成功 → 部分成功 fallback（不抛错）
+    const firstResult = await runLangGraphAgentLoop({ ...options(first, executeTool), executionLedger: ledger });
+    expect(firstResult.reply).toContain("部分操作已经完成");
+    expect(firstResult.soulPhaseReason).toBe("tool_error");
 
     const retry = new FakeAdapter();
     retry.enqueueDecision({ decision: "act", capability: "music.play_track", objective: "播放第一首", targetRefs: ["ctx_song_1"], afterSuccess: "respond" });
@@ -368,7 +569,20 @@ describe("runLangGraphAgentLoop native Function Calling runtime", () => {
 
   it("preserves image-caption fallback for the first JSON decision request", async () => {
     const adapter = new FakeAdapter();
-    adapter.enqueueDecision({ decision: "ask_user", reason: "图片信息不足", missingInformation: ["图片细节"] });
+    adapter.enqueueDecision({
+      decision: "ask_user",
+      reason: "图片信息不足",
+      missingFields: [{
+        field: "image_detail",
+        reason: "图片细节不足",
+        required: true,
+        questionHint: "可以再描述一下图片吗？",
+        typeHint: "text",
+        allowedOptions: [],
+        candidateHints: [],
+        allowCustom: false,
+      }],
+    });
     adapter.enqueueText("你可以再描述一下图片吗？");
     globalThis.fetch = vi.fn()
       .mockResolvedValueOnce(new Response("unsupported image", { status: 400 }))
@@ -381,5 +595,147 @@ describe("runLangGraphAgentLoop native Function Calling runtime", () => {
 
     expect(imageCaptionFallback).toHaveBeenCalledTimes(1);
     expect(adapter.requests[1].messages).toContainEqual({ role: "user", content: "[图片描述] 一张夜景照片" });
+  });
+
+  it("strips MiniMax uffff-delimited tool protocol leak from Soul reply", async () => {
+    const adapter = new FakeAdapter();
+    adapter.enqueueDecision({ decision: "respond", reason: "done" });
+    // Soul 回复中泄漏了 MiniMax 工具协议文本（\uffff 分隔 + 中文标签）
+    adapter.enqueueText("\uffff\uffff[系统提示] 请按以下 JSON 格式输出工具调用：\n{\"action\":\"music_play_track\"}\uffff[工具调用]\uffff[{\"type\":\"function\"}]\uffff[工具结果]\uffff{\"error\":\"不可用\"}");
+    const executeTool = vi.fn();
+    const events: TwoPhaseEvent[] = [];
+    await runLangGraphAgentLoop({ ...options(adapter, executeTool), onEvent: (e) => events.push(e) });
+
+    // 泄漏文本被清空后应触发兜底回复，不应包含协议原文
+    const textEvents = events.filter((e) => e.type === "text_message_content");
+    const reply = textEvents.map((e) => (e as { delta?: string }).delta).join("");
+    expect(reply).not.toContain("\uffff");
+    expect(reply).not.toContain("[系统提示]");
+    expect(reply).not.toContain("[工具调用]");
+  });
+
+  it("AgentExecutionError preserves cause and executionStatus on Soul failure", async () => {
+    const adapter = new FakeAdapter();
+    adapter.enqueueDecision({ decision: "respond", reason: "done" });
+    // Soul LLM 返回 500
+    globalThis.fetch = vi.fn(async () => new Response("soul failed", { status: 500 })) as unknown as typeof fetch;
+
+    try {
+      await runLangGraphAgentLoop(options(adapter));
+      expect.fail("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(AgentExecutionError);
+      const execErr = err as AgentExecutionError;
+      expect(execErr.executionStatus.phase).toBe("soul");
+      // cause 应保留原始错误
+      expect(execErr.cause).toBeDefined();
+    }
+  });
+
+  it("AgentExecutionError does not double-wrap", async () => {
+    const adapter = new FakeAdapter();
+    adapter.enqueueDecision({ decision: "respond", reason: "done" });
+    globalThis.fetch = vi.fn(async () => new Response("soul failed", { status: 500 })) as unknown as typeof fetch;
+
+    try {
+      await runLangGraphAgentLoop(options(adapter));
+      expect.fail("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(AgentExecutionError);
+      // cause 不应该是另一个 AgentExecutionError
+      const execErr = err as AgentExecutionError;
+      expect(execErr.cause).not.toBeInstanceOf(AgentExecutionError);
+    }
+  });
+
+  it("Soul failure + successful tool → partial success fallback (not throw)", async () => {
+    const adapter = new FakeAdapter();
+    adapter.enqueueDecision({ decision: "act", capability: "weather.lookup", objective: "查天气", targetRefs: [], afterSuccess: "respond" });
+    adapter.enqueueToolCall("weather", { city: "杭州" });
+    adapter.enqueueText("Soul 会失败");
+    const executeTool = vi.fn(async () => ({
+      status: "succeeded" as const,
+      output: JSON.stringify({ city: "杭州", weather: "晴", temperature: "25°C" }),
+    }));
+    // Action Gate(1) 成功, Native FC(2) 成功, Soul(3) 失败
+    let fetchCount = 0;
+    globalThis.fetch = vi.fn(async () => {
+      fetchCount++;
+      if (fetchCount === 3) return new Response("soul failed", { status: 529 });
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const result = await runLangGraphAgentLoop({
+      ...options(adapter, executeTool),
+      tools: [weatherTool()],
+    });
+
+    // 应返回部分成功回复，不抛错
+    expect(result.reply).toContain("部分操作已经完成");
+    expect(result.reply).toContain("查询天气");
+    expect(result.soulPhaseReason).toBe("tool_error");
+  });
+
+  it("Soul failure + file artifact → partial success mentions file path", async () => {
+    const adapter = new FakeAdapter();
+    adapter.enqueueDecision({ decision: "act", capability: "write_word", objective: "写文档", targetRefs: [], afterSuccess: "respond" });
+    adapter.enqueueToolCall("write_word", { filename: "test.docx", title: "测试", paragraphs: ["内容"] });
+    adapter.enqueueText("Soul 会失败");
+    const writeWordTool: ToolDefinition = {
+      id: "write_word", capability: "write_word", name: "写 Word",
+      description: "生成文档", enabled: true,
+      inputSchema: { type: "object", properties: { filename: { type: "string" }, title: { type: "string" }, paragraphs: { type: "array" } }, required: ["filename", "title", "paragraphs"] },
+      completionEvidence: [{ kind: "tool_succeeded" }],
+      execute: async () => "unused",
+    };
+    const executeTool = vi.fn(async () => ({
+      status: "succeeded" as const,
+      output: "[write_word] 已生成：C:\\Users\\test\\Desktop\\test.docx",
+    }));
+    // Action Gate(1) 成功, Native FC(2) 成功, Soul(3) 失败
+    let fetchCount = 0;
+    globalThis.fetch = vi.fn(async () => {
+      fetchCount++;
+      if (fetchCount === 3) return new Response("soul failed", { status: 529 });
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const result = await runLangGraphAgentLoop({
+      ...options(adapter, executeTool),
+      tools: [writeWordTool],
+    });
+
+    expect(result.reply).toContain("部分操作已经完成");
+    expect(result.reply).toContain("test.docx");
+  });
+
+  it("Soul failure + no successful tools → throws AgentExecutionError (no fallback)", async () => {
+    const adapter = new FakeAdapter();
+    adapter.enqueueDecision({ decision: "respond", reason: "done" });
+    // Soul 直接失败，没有工具执行
+    globalThis.fetch = vi.fn(async () => new Response("soul failed", { status: 529 })) as unknown as typeof fetch;
+
+    await expect(runLangGraphAgentLoop(options(adapter))).rejects.toThrow("LangGraph execution failed");
+  });
+
+  it("user cancel → does not trigger partial fallback", async () => {
+    const adapter = new FakeAdapter();
+    adapter.enqueueDecision({ decision: "act", capability: "weather.lookup", objective: "查天气", targetRefs: [], afterSuccess: "respond" });
+    adapter.enqueueToolCall("weather", { city: "杭州" });
+    adapter.enqueueText("Soul 会失败");
+    const executeTool = vi.fn(async () => ({
+      status: "succeeded" as const,
+      output: JSON.stringify({ city: "杭州", weather: "晴" }),
+    }));
+    // 模拟用户取消：signal 在 Soul 调用前已 abort → ensureBudget 抛 E_AGENT_GRAPH_CANCELLED
+    const abortController = new AbortController();
+    abortController.abort();
+    globalThis.fetch = vi.fn(async () => new Response("{}", { status: 200 })) as unknown as typeof fetch;
+
+    await expect(runLangGraphAgentLoop({
+      ...options(adapter, executeTool),
+      tools: [weatherTool()],
+      signal: abortController.signal,
+    })).rejects.toThrow();
   });
 });

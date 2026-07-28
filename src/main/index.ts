@@ -60,6 +60,7 @@ import {
 import { decideImageSendStrategy } from "./chat/image-send-strategy";
 import { buildAlwaysOnContext, buildMemoryInjection, scheduleMemoryWrite } from "./orchestrator";
 import { CyreneAgent } from "./orchestrator/cyrene-agent";
+import { validateSearchApiKey } from "./orchestrator/search-backend-filter";
 import { indexConversationTurn } from "./orchestrator/history-tools";
 import { buildToneInjection } from "./orchestrator/tone-injector";
 import { getAdapter, buildVendorUrl, getAdapterForConfig, createSseReader } from "./orchestrator/vendors";
@@ -1505,10 +1506,24 @@ const MINIMAX_SEARCH_MCP_ID = "minimax-web-search";
  * 同步搜索 MCP Server：选 MiniMax+有key→注册连接，否则→移除断开。
  * 在 TTS_SAVE_SETTINGS 检测到搜索配置变化时调用。
  */
-async function syncVolcanoSearchMcp(settings: GeneralSettings): Promise<void> {
+async function syncVolcanoSearchMcp(settings: GeneralSettings): Promise<{ mcpSyncResult: string }> {
   // ── MiniMax（PyPI包，不依赖GitHub，推荐）──
-  const minimaxEnable = settings.searchEngine === "minimax" && settings.searchMinimaxKey.trim().length > 0;
+  const minimaxEnable = settings.searchEngine === "minimax";
   const minimaxExists = listMcpServers().some(s => s.id === MINIMAX_SEARCH_MCP_ID);
+
+  // Key 校验（不泄漏原始 Key）
+  if (minimaxEnable) {
+    const keyValidation = validateSearchApiKey(settings.searchMinimaxKey, "MiniMax API Key");
+    console.log(`[Cyrene] MiniMax Key 校验: length=${keyValidation.diagnostics.length} trimmed=${keyValidation.diagnostics.trimmed} nonAscii=${keyValidation.diagnostics.hasNonAscii} controlChars=${keyValidation.diagnostics.hasControlChars}`);
+    if (!keyValidation.valid) {
+      console.error(`[Cyrene] MiniMax Key 校验失败: ${keyValidation.error}`);
+      // Key 不合法时，如果 MCP 存在则清理
+      if (minimaxExists) {
+        try { await removeMcpServer(MINIMAX_SEARCH_MCP_ID); } catch (err) { console.error("[Cyrene] MiniMax 搜索 MCP 移除异常:", err); }
+      }
+      return { mcpSyncResult: `key_invalid: ${keyValidation.error}` };
+    }
+  }
 
   if (minimaxEnable && !minimaxExists) {
     console.log("[Cyrene] 注册 MiniMax 搜索 MCP Server...");
@@ -1526,15 +1541,18 @@ async function syncVolcanoSearchMcp(settings: GeneralSettings): Promise<void> {
       });
       if (result.ok) {
         console.log("[Cyrene] MiniMax 搜索 MCP 注册成功，工具:", result.toolIds?.join(", "));
+        return { mcpSyncResult: `registered: ${result.toolIds?.join(", ") ?? "none"}` };
       } else {
         console.error("[Cyrene] MiniMax 搜索 MCP 注册失败:", result.error);
+        return { mcpSyncResult: `register_failed: ${result.error}` };
       }
     } catch (err) {
       console.error("[Cyrene] MiniMax 搜索 MCP 注册异常:", err);
+      return { mcpSyncResult: `register_exception: ${err}` };
     }
   } else if (!minimaxEnable && minimaxExists) {
     console.log("[Cyrene] 移除 MiniMax 搜索 MCP Server...");
-    try { await removeMcpServer(MINIMAX_SEARCH_MCP_ID); } catch (err) { console.error("[Cyrene] MiniMax 搜索 MCP 移除异常:", err); }
+    try { await removeMcpServer(MINIMAX_SEARCH_MCP_ID); return { mcpSyncResult: "removed" }; } catch (err) { console.error("[Cyrene] MiniMax 搜索 MCP 移除异常:", err); return { mcpSyncResult: `remove_exception: ${err}` }; }
   } else if (minimaxEnable && minimaxExists) {
     console.log("[Cyrene] MiniMax 搜索 key 变化，重新注册 MCP Server...");
     try {
@@ -1545,8 +1563,10 @@ async function syncVolcanoSearchMcp(settings: GeneralSettings): Promise<void> {
         args: ["minimax-coding-plan-mcp", "-y"],
         env: { MINIMAX_API_KEY: settings.searchMinimaxKey.trim(), MINIMAX_API_HOST: "https://api.minimaxi.com" },
       });
-    } catch (err) { console.error("[Cyrene] MiniMax 搜索 MCP 重新注册异常:", err); }
+      return { mcpSyncResult: "reregistered" };
+    } catch (err) { console.error("[Cyrene] MiniMax 搜索 MCP 重新注册异常:", err); return { mcpSyncResult: `reregister_exception: ${err}` }; }
   }
+  return { mcpSyncResult: "no_change" };
 }
 
 function loadStickerSettings(): Record<string, boolean> {
@@ -2214,10 +2234,10 @@ function buildSystemPrompt(styleFile: string, includeStyle = true): string {
 
   // Chat 模式使用独立基础规则；仍兼容旧调用方传入的 "talk"。
   const isChatMode = styleFile.startsWith("chat") || styleFile.startsWith("talk");
-  const system = loadPromptFile(isChatMode ? "chat_system.md" : "system.md");
+  const system = loadPromptFile(isChatMode ? "chat_system.md" : "work_system.md");
   if (system) parts.push(system);
 
-  const identity = loadPromptFile("identity.md");
+  const identity = loadPromptFile(isChatMode ? "chat_identity.md" : "work_identity.md");
   if (identity) parts.push(identity);
 
   const soul = loadPromptFile("soul.md");
@@ -2488,7 +2508,7 @@ function buildToolSystemPrompt(enabledTools: ReadonlyArray<ToolDefinition>): str
 
 /**
  * Soul 阶段使用的基础 system prompt。
- * 包含：人设（system.md + identity.md + soul.md + canon + style）+ 后续可追加的环境/记忆等。
+ * 包含：人设（work_system.md/chat_system.md + work_identity.md/chat_identity.md + soul.md + canon + style）+ 后续可追加的环境/记忆等。
  * 注意：工具结果（`role: "tool"` 消息）在 conversation 中已携带，本函数不重复注入。
  * 第一期：build-options 会把 environmentContext / skillCatalog / toneInjection /
  * alwaysOnContext / relationshipContext / attachmentContext 等都拼到 baseContent 末尾，
@@ -5384,6 +5404,9 @@ app.whenReady().then(async () => {
     },
     loadActionGateSystemPrompt: () => loadPromptFile("action_gate_system.md"),
     loadNativeFcSystemPrompt: () => loadPromptFile("native_fc_system.md"),
+    loadAskSystemPrompt: () => loadPromptFile("ask_system.md"),
+    loadAskPersonaPrompt: () => loadPromptFile("ask_persona.md"),
+    loadAskQuotesPrompt: () => loadPromptFile("ask_quotes.md"),
     prepareCitaTurn: (input) => citaService.prepareTurn(input),
     buildChatSocialContext: async ({ conversationId, query }) => {
       const now = Date.now();

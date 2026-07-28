@@ -13,6 +13,8 @@
 // - 错误用 observer.error() 抛，桥层捕获。
 import { AbstractAgent, type RunAgentInput } from "@ag-ui/client";
 import { EventType, type BaseEvent } from "@ag-ui/core";
+import { AgentRuntimeError } from "./agent-runtime-error";
+import { AgentExecutionError, type RunPhase } from "./run-execution-status";
 import { Observable } from "rxjs";
 import { toolRegistry, type ToolDefinition } from "./tool-registry";
 import type { ToolCallResult, ToolExecutionOutcome } from "./types";
@@ -29,7 +31,11 @@ import { runChatLoop } from "./chat-loop";
 import type { SocialAtom } from "../social-context/types";
 import { ExecutionLedgerStore } from "./execution-ledger";
 import { perf } from "../perf-trace";
+import { debugLog, flowLog } from "../agent-log";
 import type { ApprovedStyleSampling } from "./vendors/style-sampling";
+import { requestUserClarification } from "../user-choice";
+import type { TrustedAskUserProfile } from "../../shared/ask-clarification";
+import type { SkillRouteInfo } from "./task-router";
 
 const executionLedgers = new ExecutionLedgerStore();
 
@@ -81,6 +87,12 @@ export interface CyreneRunOptions {
   actionGateSystemPrompt?: string;
   /** [RESPONSE_CONTEXT] 文本，从 CITA 结果生成，给 Soul 动态追加。 */
   responseContext?: string;
+  /** 本地主进程生成的可信默认城市、桌面等运行环境信息。 */
+  runtimeEnvironmentContext?: string;
+  /** Ask Soul 专用轻量提示词。 */
+  askSystemContent?: string;
+  /** Ask Soul 只使用称呼、昵称和性别约束。 */
+  trustedAskUserProfile?: TrustedAskUserProfile;
   /** 仅 Chat：异步社交原子抽取所需的已校验证据元数据。 */
   socialContext?: {
     enabled: true;
@@ -90,6 +102,8 @@ export interface CyreneRunOptions {
     retrievedAtoms: SocialAtom[];
     now: number;
   };
+  /** Task Router 可用 Skill 列表（feature flag 开启时使用）。Router 不依赖该字段是否存在。 */
+  availableSkills?: SkillRouteInfo[];
 }
 
 /** FC 循环最终结果（供桥层做副作用用）。 */
@@ -151,6 +165,8 @@ function toAguiEvent(event: TwoPhaseEvent): BaseEvent {
       };
     case "text_message_end":
       return { type: EventType.TEXT_MESSAGE_END, messageId: event.messageId };
+    case "task_plan_update":
+      return { type: EventType.CUSTOM, name: "cyrene.taskPlan", value: event.snapshot };
   }
 }
 
@@ -235,7 +251,16 @@ export class CyreneAgent extends AbstractAgent {
   runWithEvents(options: CyreneRunOptions): Observable<BaseEvent> {
     const threadId = this.threadId;
     const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const conversationId = options.conversationId ?? "default";
     const abortController = new AbortController();
+
+    // first-source-wins：谁先触发 abort，谁就是最终分类
+    let abortSource: AbortSource | undefined;
+    const markAbort = (source: AbortSource) => {
+      if (abortSource) return; // 已有来源，不覆盖
+      abortSource = source;
+      abortController.abort({ source });
+    };
 
     return new Observable<BaseEvent>((subscriber) => {
       let cancelled = false;
@@ -254,12 +279,19 @@ export class CyreneAgent extends AbstractAgent {
           };
           const executionMode = resolveExecutionMode(options.executionMode);
           const runtime = resolveAgentRuntime(options.agentRuntime);
-          console.log(
+          debugLog(
             `${LOG_PREFIX} executionMode=${executionMode} agentRuntime=${runtime} provider=${options.settings.provider} model=${options.settings.model}`,
           );
+          const enabledToolCount = executionMode === "chat"
+            ? 0
+            : (options.tools ?? toolRegistry.getEnabledTools()).filter((tool) => tool.enabled).length;
+          flowLog("── 新请求 ─────────────────────────");
+          flowLog(`1. 准备上下文：${executionMode === "chat" ? "Chat" : "Work"} 模式，模型 ${options.settings.model}，${enabledToolCount} 个工具可用`);
+          flowLog(`2. 理解用户请求：${executionMode === "chat" ? "Chat 模式无需工具上下文" : `完成，可信引用 ${(options.trustedRefs ?? []).length} 个`}`);
 
           let result: TwoPhaseFcResult;
           if (executionMode === "chat") {
+            flowLog("3. Chat 模式：生成回复");
             result = await perf.track("chat_loop", () => runChatLoop({
               settings: options.settings,
               adapter,
@@ -290,11 +322,17 @@ export class CyreneAgent extends AbstractAgent {
               nativeFcSystemContent: options.nativeFcSystemContent,
               actionGateSystemPrompt: options.actionGateSystemPrompt,
               responseContext: options.responseContext,
+              runtimeEnvironmentContext: options.runtimeEnvironmentContext,
+              askSystemContent: options.askSystemContent,
+              trustedAskUserProfile: options.trustedAskUserProfile,
               conversationId: options.conversationId ?? "default",
+              requestUserClarification,
               timeoutMs: options.timeoutMs,
               executeTool,
               onEvent,
               signal: abortController.signal,
+              markAbort,
+              availableSkills: options.availableSkills ?? [],
             };
             const conversationId = options.conversationId ?? "default";
             const executionLedger = executionLedgers.forScope(`${conversationId}:messages-${options.messages.length}`);
@@ -322,6 +360,7 @@ export class CyreneAgent extends AbstractAgent {
             executionMode,
             socialContext: options.socialContext,
           };
+          flowLog("── 本轮完成 ────────────────────────");
 
           if (cancelled) return;
           subscriber.next({
@@ -332,14 +371,31 @@ export class CyreneAgent extends AbstractAgent {
           subscriber.complete();
         } catch (err) {
           if (cancelled) return;
-          console.error(LOG_PREFIX, "run 失败:", err);
-          subscriber.error(err instanceof Error ? err : new Error(String(err)));
+          // 从 AgentExecutionError 提取真实执行状态
+          const execStatus = err instanceof AgentExecutionError ? err.executionStatus : undefined;
+          const hasToolResults = (execStatus?.successfulTools.length ?? 0) > 0;
+          const phase = execStatus?.phase ?? "unknown";
+          const classification = classifyRunError(
+            err, abortSource, runId, conversationId, phase, hasToolResults,
+          );
+          console.error(LOG_PREFIX, `run 失败 [${classification.source}]:`, classification.diagnostics);
+          if (classification.source === "user_cancelled") {
+            subscriber.next({
+              type: EventType.RUN_FINISHED,
+              threadId,
+              runId,
+            });
+            subscriber.complete();
+            return;
+          }
+          const safeErr = new Error(classification.userMessage);
+          subscriber.error(safeErr);
         }
       })();
 
       return () => {
         cancelled = true;
-        abortController.abort();
+        markAbort("user_cancelled");
       };
     });
   }
@@ -356,4 +412,118 @@ export class CyreneAgent extends AbstractAgent {
     void input;
     return this.runWithEvents(this._runOptions);
   }
+}
+
+/** Abort 来源分类 */
+export type AbortSource =
+  | "user_cancelled"
+  | "call_timeout"
+  | "run_timeout"
+  | "window_destroyed"
+  | "upstream_cleanup";
+
+/** 执行阶段（Abort 诊断用，引用 RunPhase + 旧节点名） */
+export type AbortPhase = RunPhase | "decide" | "execute";
+
+export interface AbortDiagnostic {
+  source: AbortSource;
+  phase: AbortPhase;
+  userMessage: string;
+  diagnostics: Record<string, unknown>;
+}
+
+/** 分类 abort/error 来源，返回用户安全消息和诊断信息 */
+export function classifyRunError(
+  err: unknown,
+  abortSource: AbortSource | undefined,
+  runId: string,
+  conversationId: string,
+  phase: AbortPhase,
+  hasToolResults: boolean,
+): AbortDiagnostic {
+  const diagnostics: Record<string, unknown> = {
+    runId,
+    conversationId,
+    abortSource,
+    phase,
+    hasToolResults,
+    errorName: err instanceof Error ? err.name : undefined,
+    errorMessage: err instanceof Error ? err.message : String(err),
+  };
+
+  // 图级超时（ensureBudget 抛 E_AGENT_GRAPH_TIMEOUT，不是 AbortError）
+  if (err instanceof Error && err.message === "E_AGENT_GRAPH_TIMEOUT") {
+    const userMessage = phase === "soul" && hasToolResults
+      ? "工具结果已获得，但最终回复生成超时，请重试。"
+      : "请求处理超时，请重试。";
+    return { source: "run_timeout", phase, userMessage, diagnostics };
+  }
+
+  // 图级取消（ensureBudget 抛 E_AGENT_GRAPH_CANCELLED）
+  if (err instanceof Error && err.message === "E_AGENT_GRAPH_CANCELLED") {
+    if (abortSource === "user_cancelled") {
+      return { source: "user_cancelled", phase, userMessage: "", diagnostics };
+    }
+    return { source: abortSource ?? "upstream_cleanup", phase, userMessage: "操作已中断，请重试。", diagnostics };
+  }
+
+  // 判断是否是 AbortError
+  const isAbort =
+    (err instanceof DOMException && err.name === "AbortError") ||
+    (err instanceof Error && err.name === "AbortError") ||
+    (typeof err === "object" && err !== null && "name" in err && (err as { name: string }).name === "AbortError");
+
+  // AgentExecutionError：解包 cause 找真实错误类型（保留 diagnostics 中的 status 和 cause 链）
+  if (err instanceof AgentExecutionError) {
+    if (err.cause instanceof Error) {
+      return classifyRunError(
+        err.cause, abortSource, runId, conversationId, phase, hasToolResults,
+      );
+    }
+  }
+
+  // AgentRuntimeError（E_MODEL_REQUEST_FAILED 等）：映射为用户安全消息，避免泄露 HTTP 原始响应
+  if (err instanceof AgentRuntimeError) {
+    const safeMessages: Record<string, string> = {
+      E_MODEL_REQUEST_FAILED: "模型服务暂时不可用，请稍后重试。",
+      E_AGENT_NO_PROGRESS: "请求处理遇到问题，请重试。",
+      E_AGENT_GRAPH_ITERATION_LIMIT: "请求处理步骤过多，请简化问题后重试。",
+    };
+    const userMessage = safeMessages[err.code] ?? "请求处理出错，请重试。";
+    // 从消息中提取 HTTP 状态码供诊断（不暴露给用户）
+    const httpMatch = err.message.match(/HTTP\s+(\d{3})/);
+    if (httpMatch) diagnostics.httpStatus = Number(httpMatch[1]);
+    diagnostics.errorCode = err.code;
+    return {
+      source: abortSource ?? "upstream_cleanup",
+      phase,
+      userMessage,
+      diagnostics,
+    };
+  }
+
+  if (!isAbort) {
+    // 未知 plain Error：使用白名单固定安全消息，绝不展示原始 message
+    // （message 可能含 HTTP body、request_id、Authorization 等内部信息）
+    return {
+      source: abortSource ?? "upstream_cleanup",
+      phase,
+      userMessage: "请求处理失败，请重试。",
+      diagnostics,
+    };
+  }
+
+  // AbortError：使用触发时记录的 abortSource
+  const source = abortSource ?? "unknown_abort" as AbortSource;
+
+  if (source === "user_cancelled") {
+    return { source, phase, userMessage: "", diagnostics };
+  }
+  if (source === "call_timeout") {
+    const userMessage = phase === "soul" && hasToolResults
+      ? "工具结果已获得，但最终回复生成超时，请重试。"
+      : "请求处理超时，请重试。";
+    return { source, phase, userMessage, diagnostics };
+  }
+  return { source, phase, userMessage: "操作已中断，请重试。", diagnostics };
 }

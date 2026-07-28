@@ -39,6 +39,7 @@ import {
 import { applyCachedSummary, scheduleSummaryUpdate } from "./conversation-summarizer";
 import type { VendorConfig } from "./vendors";
 import { perf } from "../perf-trace";
+import { debugLog } from "../agent-log";
 import { buildResponseContext } from "../cita/context-package";
 import {
   STYLE_IDS,
@@ -51,6 +52,9 @@ import type {
   SocialAtom,
   SocialExtractionInput,
 } from "../social-context/types";
+import type { TrustedAskUserProfile } from "../../shared/ask-clarification";
+import type { SkillRouteInfo } from "./task-router";
+import { filterToolsBySearchBackend, type SearchBackend } from "./search-backend-filter";
 
 /** index.ts 模块级符号的最小可注入子集。
  *  类型故意用宽签名（unknown / 任意 shape）—— 因为 build-options 是纯消费者，
@@ -105,6 +109,9 @@ export interface BuildOptionsDeps {
   captionImageForFallback?: (filePath: string) => Promise<{ ok: boolean; caption?: string; error?: string }>;
   loadActionGateSystemPrompt: () => string;
   loadNativeFcSystemPrompt: () => string;
+  loadAskSystemPrompt: () => string;
+  loadAskPersonaPrompt: () => string;
+  loadAskQuotesPrompt: () => string;
   prepareCitaTurn?: (input: {
     conversationId: string;
     turnId: string;
@@ -485,6 +492,15 @@ export async function buildAgentRunOptions(
   const skillCatalog = deps.buildSkillCatalog(enabledSkills);
   const autoInjectedSkillContext = deps.buildAutoInjectedSkillContext(enabledSkills);
   const autoInjectedSoulContext = deps.buildAutoInjectedSoulContext?.(enabledSkills) ?? "";
+
+  // Task Router 可用 Skill 列表（Router 判断 direct/plan 和 Skill 加载用）
+  const availableSkills: SkillRouteInfo[] = (enabledSkills as Array<Record<string, unknown>>).map((s) => ({
+    id: String(s.id ?? ""),
+    description: String(s.description ?? ""),
+    ...((s.manifest as Record<string, unknown>)?.defaultExecutionMode
+      ? { defaultExecutionMode: (s.manifest as Record<string, unknown>).defaultExecutionMode as "direct" | "plan" }
+      : {}),
+  })).filter((s) => s.id);
   const channelSystem = buildChannelSystem(input.channel);
   const messageRhythmSystem = buildMessageRhythmSystem();
   const externalChannelContext = deps.buildExternalChannelContext?.() ?? "";
@@ -539,11 +555,11 @@ export async function buildAgentRunOptions(
           prepared.contextPackage.resolvedReferences,
         );
       }
-      console.log(
+      debugLog(
         `[CITA/Trace] injection conversation=${conversationId} tool=${citaContextBlock.length > 0} soul=${citaContextBlock.length > 0} blockChars=${citaContextBlock.length}`,
       );
     } catch {
-      console.warn(`[CITA/Trace] injection conversation=${conversationId} tool=false soul=false reason=prepare_failed`);
+      console.warn(`[CITA] injection conversation=${conversationId} tool=false soul=false reason=prepare_failed`);
     }
   }
 
@@ -578,7 +594,20 @@ export async function buildAgentRunOptions(
   // 运行模式只决定基础 system；表达 style 始终单独注入 Soul。
   const basePromptMode = isChatMode ? "chat" : "work";
   const enabledTools = deps.toolRegistry.getEnabled();
-  const runTools = isChatMode ? [] : enabledTools;
+
+  // 搜索后端互斥过滤：每轮只暴露当前后端对应的搜索工具
+  const generalSettings = deps.loadGeneralSettings();
+  const activeSearchBackend = ((generalSettings as Record<string, unknown>).searchEngine as string ?? "off") as SearchBackend;
+  const filteredBySearch = isChatMode ? [] : filterToolsBySearchBackend(
+    enabledTools as unknown as Array<{ id: string }>,
+    activeSearchBackend,
+  );
+
+  const runTools = filteredBySearch as unknown as typeof enabledTools;
+  const searchToolIds = filteredBySearch
+    .filter((t) => t.id === "web_search" || t.id.startsWith("minimax-web-search-"))
+    .map((t) => t.id);
+  console.log(`[Cyrene] 搜索后端=${activeSearchBackend} 暴露搜索工具=[${searchToolIds.join(", ") || "无"}]`);
   // 第一期：保留旧 systemContent 兼容（已不再使用，保留字段是为了 logger 诊断）。
   // 同时新增 toolSystemContent / soulSystemBaseContent 两套。
   const systemContent =
@@ -627,6 +656,22 @@ export async function buildAgentRunOptions(
 
   const nativeFcSystemContent = deps.loadNativeFcSystemPrompt();
   const actionGateSystemPrompt = deps.loadActionGateSystemPrompt();
+  const askSystemContent = [
+    deps.loadAskSystemPrompt(),
+    deps.loadAskPersonaPrompt(),
+    deps.loadAskQuotesPrompt(),
+  ].filter(Boolean).join("\n\n");
+  const profileGender: NonNullable<TrustedAskUserProfile["gender"]> = profile.gender === "male"
+    || profile.gender === "female"
+    || profile.gender === "nonbinary"
+    || profile.gender === "secret"
+    ? profile.gender
+    : "unknown";
+  const trustedAskUserProfile = {
+    ...(profile.callPreference?.trim() ? { callPreference: profile.callPreference.trim() } : {}),
+    ...(profile.nickname?.trim() ? { nickname: profile.nickname.trim() } : {}),
+    gender: profileGender,
+  };
 
   deps.logWorldbookInjection(alwaysOnContext, systemContent);
 
@@ -674,6 +719,9 @@ export async function buildAgentRunOptions(
       citaContextBlock,
       trustedRefs,
       responseContext,
+      runtimeEnvironmentContext: environmentContext,
+      askSystemContent,
+      trustedAskUserProfile,
       nativeFcSystemContent,
       actionGateSystemPrompt,
       timeoutMs: deps.chatRequestTimeoutMs,
@@ -692,6 +740,7 @@ export async function buildAgentRunOptions(
       } : {}),
       ...(imageCaptionFallback ? { imageCaptionFallback } : {}),
       ...(isChatMode ? { tools: runTools as ToolDefinition[] } : {}),
+      ...(availableSkills.length > 0 ? { availableSkills } : {}),
     },
     latestUserText,
   };

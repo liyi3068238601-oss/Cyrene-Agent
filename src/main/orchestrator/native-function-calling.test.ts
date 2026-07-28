@@ -23,6 +23,25 @@ function response(toolCalls: ChatResponse["toolCalls"], text = ""): ChatResponse
 }
 
 describe("resolveNativeToolCall", () => {
+  it("passes trusted runtime paths and defaults to native argument generation", async () => {
+    const invoke = vi.fn(async (_request: ChatRequest) => response([{
+      id: "call-1", name: "music_search", arguments: '{"keyword":"左转灯"}',
+    }]));
+
+    await resolveNativeToolCall(({
+      model: "m",
+      nativeFcSystemPrompt: "test",
+      executionBrief: "test",
+      runtimeEnvironmentContext: "默认城市：淄博\n桌面：C:\\Users\\13575\\Desktop",
+      toolResults: [],
+      tool: tool({ keyword: { type: "string" } }),
+    } as unknown) as Parameters<typeof resolveNativeToolCall>[0], invoke);
+
+    const system = String(invoke.mock.calls[0]?.[0].messages[0]?.content);
+    expect(system).toContain("[TRUSTED_RUNTIME_ENVIRONMENT]");
+    expect(system).toContain("C:\\Users\\13575\\Desktop");
+  });
+
   it("executes a zero-argument action without another model request", async () => {
     const invoke = vi.fn<(_: ChatRequest) => Promise<ChatResponse>>();
     const result = await resolveNativeToolCall({
@@ -52,6 +71,31 @@ describe("resolveNativeToolCall", () => {
 
   it("rejects text pretending to be a function call", async () => {
     const invoke = vi.fn(async () => response([], '{"name":"music_search","arguments":{"keyword":"左转灯"}}'));
+    await expect(resolveNativeToolCall({
+      model: "m", nativeFcSystemPrompt: "test", executionBrief: "test",
+      toolResults: [], tool: tool({ keyword: { type: "string" } }),
+    }, invoke)).rejects.toThrow("E_NATIVE_TOOL_PROTOCOL");
+  });
+
+  it("accepts first same-name tool call when model returns multiple (MiniMax compatibility)", async () => {
+    const invoke = vi.fn(async () => response([
+      { id: "call-1", name: "music_search", arguments: '{"keyword":"左转灯"}' },
+      { id: "call-2", name: "music_search", arguments: '{"keyword":"右转灯"}' },
+    ]));
+    const result = await resolveNativeToolCall({
+      model: "m", nativeFcSystemPrompt: "test", executionBrief: "test",
+      toolResults: [], tool: tool({ keyword: { type: "string" } }),
+    }, invoke);
+
+    // 应接受第一个，丢弃第二个
+    expect(result).toEqual({ id: "call-1", name: "music_search", arguments: '{"keyword":"左转灯"}' });
+  });
+
+  it("rejects when multiple tool calls have different names", async () => {
+    const invoke = vi.fn(async () => response([
+      { id: "call-1", name: "wrong_tool", arguments: '{}' },
+      { id: "call-2", name: "music_search", arguments: '{"keyword":"左转灯"}' },
+    ]));
     await expect(resolveNativeToolCall({
       model: "m", nativeFcSystemPrompt: "test", executionBrief: "test",
       toolResults: [], tool: tool({ keyword: { type: "string" } }),

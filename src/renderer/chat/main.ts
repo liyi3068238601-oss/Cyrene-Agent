@@ -33,6 +33,11 @@ import {
 } from "./types";
 import { normalizeMusicCardData, type MusicCardData } from "../../shared/music-card";
 import { requestTrackPlayback } from "../settings/music-playback";
+import type {
+  AskClarificationCard,
+  AskQuestion,
+  AskUserAnswer,
+} from "../../shared/ask-clarification";
 
 type Role = "user" | "model";
 
@@ -190,7 +195,7 @@ interface SchedulerEventsApi {
 
 /** 用户选择卡片 API（window.choice）。卡片展示走 AGUI_EVENT CUSTOM，resolve 走独立 IPC。 */
 interface ChoiceApi {
-  resolve: (id: string, value: string) => Promise<unknown>;
+  resolve: (id: string, value: unknown) => Promise<unknown>;
 }
 
 interface ChatMusicApi {
@@ -1150,6 +1155,181 @@ function formatTime(at: number): string {
   return `${hh}:${mm}`;
 }
 
+/** 渲染 Task Plan 进度卡（只读浮动面板，可拖动）。 */
+interface PlanStepSnapshot {
+  stepId: string;
+  objective: string;
+  status: "pending" | "running" | "completed" | "failed" | "skipped" | "superseded";
+  failureMessage?: string;
+}
+interface PlanSnapshot {
+  planId: string;
+  goal: string;
+  planStatus: string;
+  steps: PlanStepSnapshot[];
+  replanCount: number;
+  timestamp: number;
+}
+const PLAN_CARD_KEY = "cyrene_plan_card_position";
+const TERMINAL_STATUSES = ["completed", "failed", "cancelled"];
+let planCardFadeTimer: number | null = null;
+
+function clampPlanCardPosition(x: number, y: number, card: HTMLElement): { x: number; y: number } {
+  const chatEl = document.querySelector(".chat") as HTMLElement;
+  if (!chatEl) return { x, y };
+  const bounds = chatEl.getBoundingClientRect();
+  const cardRect = card.getBoundingClientRect();
+  const maxX = bounds.width - cardRect.width;
+  const maxY = bounds.height - cardRect.height;
+  return {
+    x: Math.max(0, Math.min(x, maxX)),
+    y: Math.max(0, Math.min(y, maxY)),
+  };
+}
+
+function renderPlanCard(snapshot: PlanSnapshot): void {
+  const chatEl = document.querySelector(".chat") as HTMLElement;
+  if (!chatEl) return;
+
+  let card = document.querySelector(".plan-card") as HTMLElement | null;
+
+  // 首次创建
+  if (!card) {
+    card = document.createElement("div");
+    card.className = "plan-card";
+    chatEl.appendChild(card);
+
+    // 恢复位置
+    let savedPos: { x: number; y: number } | null = null;
+    try { savedPos = JSON.parse(localStorage.getItem(PLAN_CARD_KEY) || "null"); } catch { /* ignore */ }
+    const defaultX = chatEl.clientWidth - 340;
+    const pos = clampPlanCardPosition(savedPos?.x ?? defaultX, savedPos?.y ?? 60, card);
+    card.style.left = pos.x + "px";
+    card.style.top = pos.y + "px";
+
+    // 拖动逻辑
+    let dragging = false;
+    let dragOffsetX = 0;
+    let dragOffsetY = 0;
+    card.addEventListener("mousedown", (e) => {
+      const header = (e.target as HTMLElement).closest(".plan-card__header");
+      if (!header) return;
+      dragging = true;
+      const rect = card!.getBoundingClientRect();
+      dragOffsetX = e.clientX - rect.left;
+      dragOffsetY = e.clientY - rect.top;
+      e.preventDefault();
+    });
+    document.addEventListener("mousemove", (e) => {
+      if (!dragging || !card) return;
+      const chatBounds = chatEl.getBoundingClientRect();
+      const x = e.clientX - chatBounds.left - dragOffsetX;
+      const y = e.clientY - chatBounds.top - dragOffsetY;
+      const clamped = clampPlanCardPosition(x, y, card);
+      card.style.left = clamped.x + "px";
+      card.style.top = clamped.y + "px";
+    });
+    document.addEventListener("mouseup", () => {
+      if (!dragging || !card) return;
+      dragging = false;
+      try {
+        localStorage.setItem(PLAN_CARD_KEY, JSON.stringify({
+          x: parseInt(card.style.left) || 0,
+          y: parseInt(card.style.top) || 0,
+        }));
+      } catch { /* ignore */ }
+    });
+
+    // 悬停暂停淡出
+    card.addEventListener("mouseenter", () => {
+      if (planCardFadeTimer) { clearTimeout(planCardFadeTimer); planCardFadeTimer = null; }
+      card!.classList.remove("plan-card--fading");
+    });
+    card.addEventListener("mouseleave", () => {
+      startPlanCardFadeIfTerminal(card!);
+    });
+
+    // 窗口 resize 时纠正越界
+    window.addEventListener("resize", () => {
+      if (!card || card.classList.contains("plan-card--fading")) return;
+      const clamped = clampPlanCardPosition(
+        parseInt(card.style.left) || 0,
+        parseInt(card.style.top) || 0,
+        card,
+      );
+      card.style.left = clamped.x + "px";
+      card.style.top = clamped.y + "px";
+    });
+  }
+
+  // 更新内容
+  card.classList.remove("plan-card--fading");
+
+  const statusLabels: Record<string, string> = {
+    running: "执行中", completed: "完成", failed: "失败", cancelled: "已取消",
+    awaiting_user: "等待用户", paused: "已暂停",
+  };
+  const statusLabel = statusLabels[snapshot.planStatus] ?? snapshot.planStatus;
+  const badgeClass = snapshot.planStatus === "running" ? "running"
+    : snapshot.planStatus === "completed" ? "completed"
+    : snapshot.planStatus === "failed" ? "failed"
+    : snapshot.planStatus === "cancelled" ? "cancelled"
+    : snapshot.planStatus === "awaiting_user" ? "awaiting_user"
+    : "paused";
+
+  const stepIcons: Record<string, string> = {
+    pending: "⬜", running: "🔄", completed: "✅",
+    failed: "❌", skipped: "⏭️", superseded: "──",
+  };
+
+  const stepsHtml = snapshot.steps.map((s) => {
+    const icon = stepIcons[s.status] ?? "⬜";
+    const failureHtml = s.failureMessage
+      ? `<div class="plan-card__step-failure">${escapeHtml(s.failureMessage)}</div>`
+      : "";
+    return `<div class="plan-card__step plan-card__step--${s.status}">
+      <span class="plan-card__step-icon">${icon}</span>
+      <span class="plan-card__step-text">${escapeHtml(s.objective)}</span>
+    </div>${failureHtml}`;
+  }).join("");
+
+  const footerHtml = snapshot.replanCount > 0
+    ? `<div class="plan-card__footer">重规划 ${snapshot.replanCount} 次</div>`
+    : "";
+
+  card.innerHTML = `
+    <div class="plan-card__header">
+      <span class="plan-card__icon">📋</span>
+      <span class="plan-card__goal">${escapeHtml(snapshot.goal)}</span>
+      <span class="plan-card__badge plan-card__badge--${badgeClass}">${statusLabel}</span>
+    </div>
+    <div class="plan-card__steps">${stepsHtml}</div>
+    ${footerHtml}
+  `;
+
+  // 终态淡出
+  if (TERMINAL_STATUSES.includes(snapshot.planStatus)) {
+    startPlanCardFadeIfTerminal(card);
+  } else {
+    if (planCardFadeTimer) { clearTimeout(planCardFadeTimer); planCardFadeTimer = null; }
+  }
+}
+
+function startPlanCardFadeIfTerminal(card: HTMLElement): void {
+  const snapshot = (card.querySelector(".plan-card__badge")?.textContent ?? "");
+  if (!TERMINAL_STATUSES.some(s => {
+    const labels: Record<string, string> = { completed: "完成", failed: "失败", cancelled: "已取消" };
+    return labels[s] === snapshot;
+  })) return;
+  if (planCardFadeTimer) clearTimeout(planCardFadeTimer);
+  planCardFadeTimer = window.setTimeout(() => {
+    card.classList.add("plan-card--fading");
+    setTimeout(() => {
+      if (card.classList.contains("plan-card--fading")) card.remove();
+    }, 400);
+  }, 5000);
+}
+
 /** 渲染左上角任务进度面板。todos 为空时收起并稍后移除。
  *  面板可收缩/展开：点击 header 或 toggle 按钮切换。 */
 function renderTodoPanel(state: TodoState | null): void {
@@ -1319,6 +1499,160 @@ function buildChoiceCardEl(data: {
   customWrap.appendChild(customBtn);
   card.appendChild(customWrap);
 
+  return card;
+}
+
+function isAskClarificationCard(value: unknown): value is AskClarificationCard & { id: string } {
+  return Boolean(
+    value
+    && typeof value === "object"
+    && "id" in value
+    && "intro" in value
+    && "questions" in value
+    && Array.isArray((value as { questions?: unknown }).questions),
+  );
+}
+
+/** Ask Soul 多字段澄清卡片。按钮只负责选择，统一由底部确认按钮结构化提交。 */
+function buildAskClarificationCardEl(
+  data: AskClarificationCard & { id: string },
+): HTMLElement {
+  const card = document.createElement("div");
+  card.className = "choice-card choice-card--structured";
+  card.dataset.choiceId = data.id;
+
+  const intro = document.createElement("div");
+  intro.className = "choice-card__title";
+  intro.textContent = data.intro;
+  card.appendChild(intro);
+
+  const questionStates = new Map<string, {
+    question: AskQuestion;
+    selected: Set<string>;
+    customInput?: HTMLInputElement;
+    section: HTMLElement;
+  }>();
+
+  for (const question of data.questions.slice(0, 3)) {
+    const section = document.createElement("section");
+    section.className = "choice-card__question";
+    const prompt = document.createElement("div");
+    prompt.className = "choice-card__question-title";
+    prompt.textContent = question.question;
+    section.appendChild(prompt);
+    const selected = new Set<string>();
+    const state: {
+      question: AskQuestion;
+      selected: Set<string>;
+      customInput?: HTMLInputElement;
+      section: HTMLElement;
+    } = { question, selected, section };
+
+    if (question.type === "text") {
+      const input = document.createElement("input");
+      input.type = "text";
+      input.className = "choice-card__custom-input";
+      input.placeholder = question.freeTextPlaceholder || "请填写你的具体要求";
+      state.customInput = input;
+      section.appendChild(input);
+    } else {
+      const list = document.createElement("div");
+      list.className = "choice-card__list";
+      for (const option of question.options.slice(0, 4)) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "choice-card__option";
+        button.dataset.value = option.value;
+        const label = document.createElement("span");
+        label.className = "choice-card__option-label";
+        label.textContent = option.label;
+        button.appendChild(label);
+        if (option.description) {
+          const description = document.createElement("span");
+          description.className = "choice-card__option-desc";
+          description.textContent = option.description;
+          button.appendChild(description);
+        }
+        button.addEventListener("click", () => {
+          section.classList.remove("choice-card__question--invalid");
+          if (question.type === "single_select") {
+            selected.clear();
+            list.querySelectorAll(".choice-card__option").forEach((item) => {
+              item.classList.remove("choice-card__option--selected");
+            });
+          }
+          if (question.type === "multi_select" && selected.has(option.value)) {
+            selected.delete(option.value);
+            button.classList.remove("choice-card__option--selected");
+          } else {
+            selected.add(option.value);
+            button.classList.add("choice-card__option--selected");
+          }
+          if (option.value === "__custom__" && state.customInput) {
+            state.customInput.hidden = false;
+            state.customInput.focus();
+          } else if (question.type === "single_select" && state.customInput) {
+            state.customInput.hidden = true;
+            state.customInput.value = "";
+          }
+        });
+        list.appendChild(button);
+      }
+      section.appendChild(list);
+      if (question.options.some((option) => option.value === "__custom__")) {
+        const input = document.createElement("input");
+        input.type = "text";
+        input.hidden = true;
+        input.className = "choice-card__custom-input choice-card__custom-input--standalone";
+        input.placeholder = question.freeTextPlaceholder || "填写其他选择";
+        state.customInput = input;
+        section.appendChild(input);
+      }
+    }
+    questionStates.set(question.field, state);
+    card.appendChild(section);
+  }
+
+  const submit = document.createElement("button");
+  submit.type = "button";
+  submit.className = "choice-card__custom-btn choice-card__submit";
+  submit.textContent = "确认并继续";
+  submit.addEventListener("click", () => {
+    const answers: AskUserAnswer["answers"] = [];
+    let firstInvalid: HTMLElement | undefined;
+    for (const [field, state] of questionStates) {
+      state.section.classList.remove("choice-card__question--invalid");
+      const customText = state.customInput?.value.trim();
+      const selectedValues = [...state.selected].filter((value) => value !== "__custom__");
+      const usesCustom = state.question.type === "text" || state.selected.has("__custom__");
+      if ((usesCustom && !customText) || (!usesCustom && selectedValues.length === 0)) {
+        state.section.classList.add("choice-card__question--invalid");
+        firstInvalid ??= state.section;
+        continue;
+      }
+      answers.push({
+        field,
+        ...(selectedValues.length ? { selectedValues } : {}),
+        ...(usesCustom && customText ? { customText } : {}),
+      });
+    }
+    if (firstInvalid) {
+      firstInvalid.querySelector<HTMLElement>("input,button")?.focus();
+      return;
+    }
+    card.classList.add("choice-card--resolved");
+    card.querySelectorAll<HTMLButtonElement>("button").forEach((button) => {
+      button.disabled = true;
+    });
+    card.querySelectorAll<HTMLInputElement>("input").forEach((input) => {
+      input.disabled = true;
+    });
+    void window.choice?.resolve(data.id, {
+      requestId: data.id,
+      answers,
+    } satisfies AskUserAnswer);
+  });
+  card.appendChild(submit);
   return card;
 }
 
@@ -3326,8 +3660,15 @@ async function triggerCyreneGreeting(): Promise<void> {
             } else if (event.name === "cyrene.todos") {
               renderTodoPanel(event.value as TodoState | null);
             } else if (event.name === "cyrene.choice") {
-              const choiceData = event.value as { id: string; question: string; options: Array<{ label: string; value: string; description?: string }>; default?: string };
-              const card = buildChoiceCardEl(choiceData);
+              const choiceData = event.value;
+              const card = isAskClarificationCard(choiceData)
+                ? buildAskClarificationCardEl(choiceData)
+                : buildChoiceCardEl(choiceData as {
+                    id: string;
+                    question: string;
+                    options: Array<{ label: string; value: string; description?: string }>;
+                    default?: string;
+                  });
               if (isSessionVisible(runSessionId, runMessages)) {
                 messagesEl.appendChild(card);
                 messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -3877,12 +4218,21 @@ async function send(): Promise<void> {
               renderTodoPanel(event.value as TodoState | null);
             } else if (event.name === "cyrene.choice") {
               // 选择卡片：立即插入聊天流（不等 runDone，因为要即时交互）
-              const choiceData = event.value as { id: string; question: string; options: Array<{ label: string; value: string; description?: string }>; default?: string };
-              const card = buildChoiceCardEl(choiceData);
+              const choiceData = event.value;
+              const card = isAskClarificationCard(choiceData)
+                ? buildAskClarificationCardEl(choiceData)
+                : buildChoiceCardEl(choiceData as {
+                    id: string;
+                    question: string;
+                    options: Array<{ label: string; value: string; description?: string }>;
+                    default?: string;
+                  });
               if (isSessionVisible(runSessionId, runMessages)) {
                 messagesEl.appendChild(card);
                 messagesEl.scrollTop = messagesEl.scrollHeight;
               }
+            } else if (event.name === "cyrene.taskPlan") {
+              renderPlanCard(event.value);
             }
             break;
           case "RUN_FINISHED":
