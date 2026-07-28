@@ -74,7 +74,7 @@ export function normalizeChatMessagesWithTime(input: unknown): ChatContextMessag
       return message;
     })
     .filter((item): item is ChatContextMessage => item !== null)
-    .slice(-150);
+    .slice(-200);
 }
 
 function formatLocalTime(timestamp: number, timezone: string): string {

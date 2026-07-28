@@ -10,6 +10,7 @@
 
 import * as fs from "fs";
 import * as path from "path";
+import * as os from "os";
 import { app } from "electron";
 import { toolRegistry } from "./tool-registry";
 import { currentUserTimezone } from "./built-in-tools";
@@ -282,39 +283,69 @@ function registerApplyPatchTool(): void {
       "对文件应用精确的字符串替换。\n\n" +
       "何时用：\n" +
       "- 修改现有文件中的特定代码片段\n" +
-      "- 用户要「把 X 改成 Y」「把第 N 行的 A 替换成 B」\n\n" +
+      "- 用户要「把 X 改成 Y」「把第 N 行的 A 替换成 B」\n" +
+      "- 全局替换（如把全文中某个名字全部改掉）——设置 replace_all=true\n\n" +
       "不要用于：\n" +
       "- 整文件重写（用 write_file）\n" +
       "- 新建文件（用 write_file）\n\n" +
-      "参数：file_path（文件路径），old_string（要替换的原文本，必须精确匹配含缩进），new_string（替换后的文本）。\n" +
-      "old_string 必须在文件中唯一；匹配多处会报错，需要更长的上下文使其唯一。",
+      "参数：file_path（文件路径），old_string（要替换的原文本，必须精确匹配含缩进），new_string（替换后的文本），replace_all（可选，true=替换全部匹配项，默认 false=要求唯一匹配）。\n" +
+      "默认行为：old_string 必须在文件中唯一；匹配多处会报错，需要更长的上下文使其唯一。\n" +
+      "全局替换：设置 replace_all=true 时，替换文件中所有匹配项，不再要求唯一。",
     enabled: true,
     risk: "fs-write",
     inputSchema: {
       type: "object",
       properties: {
-        file_path:   { type: "string", description: "文件绝对路径" },
-        old_string:  { type: "string", description: "要替换的原文本（必须精确匹配，含缩进）" },
-        new_string:  { type: "string", description: "替换后的文本" },
+        file_path:    { type: "string", description: "文件绝对路径" },
+        old_string:   { type: "string", description: "要替换的原文本（必须精确匹配，含缩进）" },
+        new_string:   { type: "string", description: "替换后的文本" },
+        replace_all:  { type: "boolean", description: "true=替换全部匹配项（全局替换），false=要求唯一匹配（默认）" },
       },
       required: ["file_path", "old_string", "new_string"],
     },
     execute: async (args) => {
-      const filePath = String(args.file_path || "");
+      const filePath = String(args.file_path || "").trim();
       if (!filePath) return "[错误] file_path 不能为空";
+      if (!path.isAbsolute(filePath)) return "[错误] file_path 必须是绝对路径";
+
+      // 用户目录一致性校验（与 fs-tools.ts 的 validateUserDirectory 逻辑一致）
+      const currentUser = os.userInfo().username;
+      const userDirMatch = filePath.match(/^([A-Za-z]):\\Users\\([^\\]+)/i);
+      if (userDirMatch) {
+        const pathUser = userDirMatch[2];
+        if (pathUser.toLowerCase() !== currentUser.toLowerCase()) {
+          const corrected = filePath.replace(
+            /^([A-Za-z]):\\Users\\[^\\]+/i,
+            `$1:\\Users\\${currentUser}`,
+          );
+          return `[错误] 路径中的用户名 "${pathUser}" 与当前用户 "${currentUser}" 不匹配。请使用正确路径: ${corrected}`;
+        }
+      }
+
       if (!fs.existsSync(filePath)) return `[错误] 文件不存在：${filePath}`;
 
       const content = fs.readFileSync(filePath, "utf8");
       const oldStr = String(args.old_string ?? "");
       const newStr = String(args.new_string ?? "");
+      const replaceAll = args.replace_all === true;
       if (!oldStr) return "[错误] old_string 不能为空";
 
       const count = content.split(oldStr).length - 1;
       if (count === 0) {
         return "[错误] old_string 在文件中未找到。请确认内容（包括缩进、换行）是否精确匹配。";
       }
+
+      if (replaceAll) {
+        // 全局替换模式：替换所有匹配项
+        const newContent = content.split(oldStr).join(newStr);
+        fs.writeFileSync(filePath, newContent, "utf8");
+        console.log(LOG_PREFIX, "apply_patch (replace_all):", filePath, `replaced ${count} occurrences`);
+        return `[apply_patch] 已更新 ${filePath}（全局替换 ${count} 处）`;
+      }
+
       if (count > 1) {
-        return `[错误] old_string 在文件中匹配 ${count} 处，需要更长的上下文使其唯一。`;
+        return `[错误] old_string 在文件中匹配 ${count} 处，需要更长的上下文使其唯一。` +
+          `如果确实要替换全部，请设置 replace_all=true。`;
       }
 
       const newContent = content.replace(oldStr, newStr);

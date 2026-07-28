@@ -242,6 +242,13 @@ function contentToText(content: ChatMessage["content"]): string {
   return "";
 }
 
+/**
+ * 从用户消息中剥离模型上下文注入块（【本轮文件】【文档内容】等），
+ * 但保留其中的文件路径信息，以免记忆系统丢失用户最近操作的文件。
+ *
+ * 原来直接丢弃整个块，导致文件路径在对话间丢失——用户上一轮创建的文件，
+ * 下一轮对话中模型完全不记得路径。
+ */
 function stripTurnModelContextForSideEffects(text: string): string {
   const markers = [
     "\n\n【本轮文件】",
@@ -257,7 +264,33 @@ function stripTurnModelContextForSideEffects(text: string): string {
     .map((marker) => text.indexOf(marker))
     .filter((index) => index >= 0)
     .sort((a, b) => a - b)[0];
-  return (cut === undefined ? text : text.slice(0, cut)).trim();
+
+  if (cut === undefined) return text.trim();
+
+  const before = text.slice(0, cut).trim();
+  const contextBlock = text.slice(cut);
+
+  // 从【本轮文件】块中提取文件路径（每行一个绝对路径，以盘符开头）
+  const filePaths = extractFilePaths(contextBlock);
+  if (filePaths.length === 0) return before;
+
+  // 将文件路径作为"最近使用的文件"前置，让记忆系统能感知
+  const pathsNote = "【最近使用的文件】\n" + filePaths.join("\n");
+  return pathsNote + "\n\n" + before;
+}
+
+/** 从文本中提取绝对文件路径（以盘符开头的 Windows 路径）。 */
+function extractFilePaths(text: string): string[] {
+  const matches = text.match(/[A-Za-z]:\\[^\s\n,，。]+/g);
+  if (!matches) return [];
+  // 去重，保留原始顺序
+  const seen = new Set<string>();
+  return matches.filter((path) => {
+    const normalized = path.toLowerCase();
+    if (seen.has(normalized)) return false;
+    seen.add(normalized);
+    return true;
+  });
 }
 
 function withDirectImageAttachments(messages: ChatMessage[], input: AguiRunInput): ChatMessage[] {
@@ -581,7 +614,6 @@ export async function buildAgentRunOptions(
     (channelSystem ? channelSystem + "\n\n" : "") +
     messageRhythmSystem + "\n\n" +
     deps.buildSoulSystemBasePrompt(basePromptMode) +
-    (skillCatalog ? "\n\n---\n\n" + skillCatalog : "") +
     (chatSocialContextBlock ? "\n\n---\n\n" + chatSocialContextBlock : "") +
     (stylePromptBlock ? "\n\n---\n\n" + stylePromptBlock : "") +
     (autoInjectedSoulContext ? "\n\n---\n\n" + autoInjectedSoulContext : "") +

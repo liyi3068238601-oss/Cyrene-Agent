@@ -2247,7 +2247,7 @@ body {
 [data-ui-theme="pearl-white"] .music-agui-card__order,
 [data-ui-theme="pearl-white"] .music-agui-card__meta span { color: #8b7180; }
 
-/* ── NovelAI drawing studio chat cards (local) ──
+/* ── NovelAI drawing studio chat cards (local) ── */
 .novelai-chat-card {
   width: min(calc(var(--sticker-width) + 40px), 48vw, 240px);
   margin: 8px 0 14px;

@@ -360,6 +360,7 @@ async function compressMemories(): Promise<number> {
         "要求：",
         "- 保留所有关键信息，去重",
         "- 用中文自然语言",
+        "- 用第一人称（昔涟视角）书写，即昔涟观察到的关于用户的信息，例如「梨衣喜欢…」「他在…」，禁止用「用户喜欢…」等第三人称，也不要用「我喜欢…」这种容易混淆人称的写法",
         "- 控制在 100 字以内",
         "- 直接输出总结文本，不要额外解释",
         "",
@@ -368,7 +369,7 @@ async function compressMemories(): Promise<number> {
       ].join("\n");
 
       const summary = await callMemoryBackgroundModel([
-        { role: "system", content: "你是一个简洁的记忆总结助手。" },
+        { role: "system", content: "你是一个简洁的记忆总结助手。输出必须用第一人称（昔涟视角），即昔涟观察到的关于用户的信息。" },
         { role: "user", content: prompt },
       ], 300);
 
@@ -440,15 +441,17 @@ async function runReflection(): Promise<void> {
       `   可用字段：\n${fieldDescriptions}`,
       "2. 是否有信息可以更新 L1 字段（近期目标/偏好/项目）？",
       "",
+      "content 字段必须用第一人称（昔涟视角）书写，即昔涟观察到的关于用户的信息，例如「梨衣喜欢编程」「他叫小李」，禁止用「用户喜欢…」等第三人称，也不要用「我喜欢…」这种容易混淆人称的写法。",
+      "",
       "如果没有需要更新的信息，返回空数组 []。",
       "如果需要更新，以 JSON 数组格式返回，每个元素包含：",
-      '{ "layer": "L0"|"L1", "field": "字段名", "content": "新值", "confidence": 0.0~1.0 }',
+      '{ "layer": "L0"|"L1", "field": "字段名", "content": "昔涟第一人称的新值", "confidence": 0.0~1.0 }',
       "",
       "只输出 JSON，不要额外解释。",
     ].join("\n");
 
     const raw = await callMemoryBackgroundModel([
-      { role: "system", content: "你是一个谨慎的用户画像反思助手。只输出 JSON 数组。" },
+      { role: "system", content: "你是一个谨慎的用户画像反思助手。content 字段必须用第一人称（昔涟视角）书写，即昔涟观察到的关于用户的信息。只输出 JSON 数组。" },
       { role: "user", content: prompt },
     ], 500);
 

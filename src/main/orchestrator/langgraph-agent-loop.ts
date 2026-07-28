@@ -18,7 +18,12 @@ import {
   parseAndValidateToolCallArguments,
   resolveToolForCapability,
 } from "./tool-argument-validator";
-import { buildToolExecutionContext, buildExecutionBrief } from "./tool-execution-context";
+import {
+  buildToolExecutionContext,
+  buildExecutionBrief,
+  collectRecentUserMessages,
+  collectConversationContext,
+} from "./tool-execution-context";
 import type { ToolDefinition } from "./tool-registry";
 import type { ToolCallResult, ToolExecutionOutcome } from "./types";
 import type { TwoPhaseEvent, TwoPhaseFcResult, AgentLoopSettings } from "./two-phase-fc-loop";
@@ -139,6 +144,12 @@ function stripToolProtocol(text: string): string {
     .replace(/<tool_call\b[^>]*>[\s\S]*?<\/tool_call>/gi, "")
     .replace(/\[tool_call\][\s\S]*?\[\/tool_call\]/gi, "")
     .replace(/<invoke\b[^>]*>[\s\S]*?<\/invoke>/gi, "")
+    .replace(/\[ACTION_DECISION\][\s\S]*?\[\/ACTION_DECISION\]/gi, "")
+    .replace(/\[TOOL_EXECUTION_CONTEXT\][\s\S]*?\[\/TOOL_EXECUTION_CONTEXT\]/gi, "")
+    .replace(/\[FAILURE_SOUL_POLICY\][\s\S]*?\[\/FAILURE_SOUL_POLICY\]/gi, "")
+    .replace(/\[EXECUTION_BRIEF\][\s\S]*?\[\/EXECUTION_BRIEF\]/gi, "")
+    .replace(/\[CONVERSATION_CONTEXT\][\s\S]*?\[\/CONVERSATION_CONTEXT\]/gi, "")
+    .replace(/\s*\[(tool[\s_]*call)\s*:[\s\S]*$/gi, "")
     .trim();
 }
 
@@ -154,7 +165,13 @@ function errorCodeOf(error: unknown): string {
 
 export async function runLangGraphAgentLoop(options: LangGraphAgentLoopOptions): Promise<TwoPhaseFcResult> {
   const startedAt = Date.now();
-  const perCallTimeout = Math.max(1_000, Math.min(75_000, options.timeoutMs));
+  // 单次 LLM 调用超时上限：150 秒。
+  // 原值 75 秒对大内容工具调用（如 write_file 写万字小说）不够——
+  // DeepSeek V4-Pro 生成 10KB+ 的 tool_call 参数需要 60-90 秒，
+  // 75 秒超时会导致 "This operation was aborted" 中断。
+  // 总预算 600 秒（CHAT_REQUEST_TIMEOUT_MS），150 秒上限可容纳：
+  // 150s FC 超时 + 150s 重试 + 60s 工具执行 + 30s AG/Soul ≈ 390s，留 210s 余量。
+  const perCallTimeout = Math.max(1_000, Math.min(150_000, options.timeoutMs));
   const enabledTools = options.tools.filter((tool) => tool.enabled);
   const runnableToolIds = new Set(enabledTools.map((tool) => tool.id));
   const capabilities: ActionCapability[] = enabledTools.map((tool) => ({
@@ -274,9 +291,18 @@ export async function runLangGraphAgentLoop(options: LangGraphAgentLoopOptions):
           actionGateSystemPrompt: options.actionGateSystemPrompt,
           signal: options.signal,
           generate: (request, signal) => invokeWithFallback(
-            // buildActionGateRequest 已在 messages 中包含历史对话，
-            // 这里直接使用 request 本身，不再通过回调插入 cleanMessages（会导致重复）
-            () => request,
+            // 正常请求已经包含 cleanMessages，不能重复插入；只有图片直发失败并
+            // 切换到 caption fallback 时，才用降级消息替换中间的历史消息。
+            (activeMessages) => activeMessages === fallbackMessages
+              ? {
+                  ...request,
+                  messages: [
+                    request.messages[0],
+                    ...activeMessages,
+                    request.messages[request.messages.length - 1],
+                  ],
+                }
+              : request,
             actionGateSettings,
             undefined,
             signal,
@@ -363,7 +389,12 @@ export async function runLangGraphAgentLoop(options: LangGraphAgentLoopOptions):
           decision.targetRefs,
           state.contextualizedQuery,
           refVerification,
+          state.originalQuery,
+          collectRecentUserMessages(options.cleanMessages ?? state.messages),
         );
+
+        // 收集最近对话上下文，供 write_file / apply_patch 等原创内容工具使用，防止幻觉
+        const conversationContext = collectConversationContext(options.cleanMessages ?? state.messages);
 
         let args: Record<string, unknown> | undefined;
         let toolCall: ToolCall | undefined;
@@ -376,13 +407,23 @@ export async function runLangGraphAgentLoop(options: LangGraphAgentLoopOptions):
               executionBrief,
               toolResults: state.toolResults,
               tool: selectedTool,
+              conversationContext,
               ...(lastError instanceof Error ? { protocolFeedback: lastError.message } : {}),
             }, async (request) => {
               // DeepSeek V4-Pro thinking 模式不支持 tool_choice，
               // 工具执行阶段必须显式禁用 thinking（与 Action Gate 一致）
               const toolExecSettings = { ...options.settings, reasoning: { mode: "off" as const } };
+              const fcStartedAt = Date.now();
               const response = await perf.track("execute_native_tool_llm", () => invokeWithFallback(() => request, toolExecSettings));
+              const fcDurationMs = Date.now() - fcStartedAt;
               trackUsage(response.usage);
+              traceToolCall(
+                "native-fc",
+                `工具参数响应: tool=${selectedTool.id} finishReason=${response.finishReason} toolCalls=${response.toolCalls.length}`
+                + ` names=${response.toolCalls.map((call) => call.name).join(",") || "(empty)"}`
+                + ` duration=${fcDurationMs}ms`
+                + ` text(300)=${response.text.slice(0, 300) || "(empty)"}`,
+              );
               return response;
             });
             args = parseAndValidateToolCallArguments(
@@ -396,6 +437,10 @@ export async function runLangGraphAgentLoop(options: LangGraphAgentLoopOptions):
           } catch (error) {
             lastError = error;
             console.warn(`${LOG_PREFIX} node=native-tool tool=${selectedTool.id} protocol_retry=${attempt} error=${errorCodeOf(error)}`);
+            traceToolCall(
+              "native-fc",
+              `工具参数失败: tool=${selectedTool.id} attempt=${attempt} error=${error instanceof Error ? error.message : String(error)}`,
+            );
           }
         }
         if (!args || !toolCall) {
@@ -430,6 +475,13 @@ export async function runLangGraphAgentLoop(options: LangGraphAgentLoopOptions):
           }
         });
         const outcome = normalizeToolExecutionOutcome(execution.outcome);
+        traceToolCall(
+          "tool-runtime",
+          `执行完成: tool=${selectedTool.id} status=${outcome.status}`
+          + `${outcome.errorCode ? ` errorCode=${outcome.errorCode}` : ""}`
+          + ` args=${JSON.stringify(args).slice(0, 500)}`
+          + ` output(300)=${outcome.output.slice(0, 300)}`,
+        );
         const deduplicated = execution.cached && outcome.terminal;
         if (deduplicated) {
           duplicateTerminalStreak += 1;

@@ -248,6 +248,7 @@ export async function runDeepArchivist(
         "你是 Cyrene 记忆系统的 Archivist。把同一事件或项目阶段的原子记忆整理为 Episode。",
         "只使用给出的 fragment，不补充来源中不存在的动机、结果、时间或评价。",
         "每个 Episode 至少引用 3 个 fragment；正文建议 100-300 个汉字。",
+        "content 字段必须用第一人称（昔涟视角）书写，即昔涟观察到的关于用户的信息，例如「梨衣完成了…」「他去了…」，禁止用「用户完成了…」等第三人称，也不要用「我完成了…」这种容易混淆人称的写法。",
         "输出 JSON 数组，每项字段：title、content、fragmentIds、confidence、importance。不要输出解释。",
       ].join("\n"),
     },

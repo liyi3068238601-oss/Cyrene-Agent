@@ -20,8 +20,8 @@ describe("chat time context", () => {
     ]);
   });
 
-  it("keeps only the latest 24 normalized messages for main-process compatibility", () => {
-    const input = Array.from({ length: 25 }, (_, index) => ({
+  it("keeps only the latest 200 normalized messages for main-process compatibility", () => {
+    const input = Array.from({ length: 201 }, (_, index) => ({
       role: index % 2 === 0 ? "user" : "model",
       content: `message ${index}`,
       at: 1783929600000 + index,
@@ -29,9 +29,9 @@ describe("chat time context", () => {
 
     const result = normalizeChatMessagesWithTime(input);
 
-    expect(result).toHaveLength(24);
+    expect(result).toHaveLength(200);
     expect(result[0]).toEqual({ role: "assistant", content: "message 1", at: 1783929600001 });
-    expect(result.at(-1)).toEqual({ role: "user", content: "message 24", at: 1783929600024 });
+    expect(result.at(-1)).toEqual({ role: "user", content: "message 200", at: 1783929600200 });
   });
 
   it("uses profile timezone when valid and falls back when missing or invalid", () => {

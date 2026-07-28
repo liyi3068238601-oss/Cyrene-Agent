@@ -114,8 +114,9 @@ export async function buildMemoryInjection(
   }
 
   try {
-    // 检索 top-2 导入文档片段
-    const docResults = await searchMemory(userInput, "imported_doc", 2);
+    // 检索 top-5 导入文档片段（与工具 imported_docs 默认 topK 对齐；
+    // 之前只取 2 条导致知识库上下文严重不足，用户上传的文档几乎无法被模型感知）
+    const docResults = await searchMemory(userInput, "imported_doc", 5);
     if (docResults.length > 0) {
       parts.push("【相关文档】\n" + docResults.map((d) => "· " + d).join("\n"));
     }

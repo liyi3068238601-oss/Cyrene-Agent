@@ -205,7 +205,7 @@ export function buildResolverMessages(payload: ResolverPayload): Array<{ role: "
   ].join("\n")
 
   return [
-    { role: "system", content: "你是谨慎的用户记忆冲突 Resolver。你只根据 summary 和 evidence 判断，不要编造事实，只输出 JSON。" },
+    { role: "system", content: "你是谨慎的用户记忆冲突 Resolver。你只根据 summary 和 evidence 判断，不要编造事实，只输出 JSON。resolvedSummary/currentSummary/historicalSummary 字段必须用第一人称（昔涟视角）书写，即昔涟观察到的关于用户的信息，例如「梨衣喜欢…」「他叫…」，禁止用「用户喜欢…」等第三人称，也不要用「我喜欢…」这种容易混淆人称的写法。" },
     { role: "user", content: userPrompt },
   ]
 }

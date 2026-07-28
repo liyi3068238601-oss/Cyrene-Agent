@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildToolExecutionContext } from "./tool-execution-context";
+import {
+  buildExecutionBrief,
+  buildToolExecutionContext,
+  collectRecentUserMessages,
+} from "./tool-execution-context";
 
 describe("buildToolExecutionContext", () => {
   it("explicitly reports that no tool ran in the current turn", () => {
@@ -94,5 +98,29 @@ describe("buildToolExecutionContext", () => {
 
     expect(block).toContain("[truncated:");
     expect(block).not.toContain("UNBOUNDED_TAIL");
+  });
+});
+
+describe("Native FC execution brief", () => {
+  it("preserves exact paths from recent user messages after Action Gate summarizes them", () => {
+    const messages = [
+      { role: "user" as const, content: '文件在 "C:\\Users\\liyi\\Desktop\\我们的故事.txt"' },
+      { role: "assistant" as const, content: "我之后会读取它。" },
+      { role: "user" as const, content: "继续写吧" },
+    ];
+
+    const recent = collectRecentUserMessages(messages);
+    const brief = buildExecutionBrief(
+      "读取已写的小说文件",
+      [],
+      "读取此前提到的小说文件",
+      undefined,
+      "继续写吧",
+      recent,
+    );
+
+    expect(brief).toContain("C:\\\\Users\\\\liyi\\\\Desktop\\\\我们的故事.txt");
+    expect(brief).toContain("继续写吧");
+    expect(brief).not.toContain("我之后会读取它");
   });
 });

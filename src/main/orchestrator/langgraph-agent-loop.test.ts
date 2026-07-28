@@ -123,6 +123,46 @@ describe("runLangGraphAgentLoop native Function Calling runtime", () => {
     expect(result.reply).toBe("已向网易云发送播放请求。");
   });
 
+  it("passes recent verbatim user paths to Native FC when the current request is implicit", async () => {
+    const adapter = new FakeAdapter();
+    const readFileTool: ToolDefinition = {
+      id: "read_file", capability: "read_file", name: "读取文件",
+      description: "读取本地文本文件", enabled: true, risk: "fs-read",
+      inputSchema: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
+      },
+      execute: async () => "unused",
+    };
+    adapter.enqueueDecision({
+      decision: "act", capability: "read_file", objective: "读取此前提到的小说文件",
+      targetRefs: [], afterSuccess: "respond",
+    });
+    adapter.enqueueToolCall("read_file", { path: "C:\\Users\\liyi\\Desktop\\我们的故事.txt" });
+    adapter.enqueueText("已经读到了。");
+
+    await runLangGraphAgentLoop({
+      ...options(adapter),
+      originalQuery: "继续吧",
+      contextualizedQuery: "继续读取此前提到的小说文件",
+      messages: [
+        { role: "user", content: '文件是 "C:\\Users\\liyi\\Desktop\\我们的故事.txt"' },
+        { role: "assistant", content: "好。" },
+        { role: "user", content: "继续吧" },
+      ],
+      cleanMessages: [
+        { role: "user", content: '文件是 "C:\\Users\\liyi\\Desktop\\我们的故事.txt"' },
+        { role: "assistant", content: "好。" },
+        { role: "user", content: "继续吧" },
+      ],
+      tools: [readFileTool],
+    });
+
+    const nativeRequest = adapter.requests.find((request) => request.toolChoiceIntent?.toolName === "read_file");
+    expect(String(nativeRequest?.messages[0].content)).toContain("C:\\\\Users\\\\liyi\\\\Desktop\\\\我们的故事.txt");
+  });
+
   it("routes ask_user to Soul without executing a tool", async () => {
     const adapter = new FakeAdapter();
     adapter.enqueueDecision({ decision: "ask_user", reason: "版本不明确", missingInformation: ["歌曲版本"] });

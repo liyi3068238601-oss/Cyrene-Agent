@@ -5,16 +5,19 @@
 //   - 摘要生成是异步 fire-and-forget：当前对话用已有缓存（零延迟），
 //     摘要在后台生成后供下次对话使用。
 //   - 缓存持久化到 <userData>/cyrene-chats/summaries/<sessionId>.json
-//   - 消息数变化超过 RE_SUMMARY_DELTA 才重新生成，避免每轮都调 LLM。
+//   - 缓存尾部之后累计新消息超过 RE_SUMMARY_DELTA 才重新生成，兼容固定长度滑动窗口。
 //   - 摘要失败时 graceful fallback：直接用原始消息，不阻断对话。
 //
 // 阈值设计（基于前端 slice(-150) 的 150 条消息窗口）：
 //   SUMMARY_THRESHOLD = 60   → 超过 60 条（30 轮）开始摘要
-//   KEEP_RECENT = 30         → 保留最近 30 条（15 轮）完整
-//   RE_SUMMARY_DELTA = 10    → 消息数变化超 10 条才重新生成摘要
+//   KEEP_RECENT = 100        → 保留最近 100 条（约 50 轮）完整，之前 KEEP_RECENT=60
+//                               导致中间 90 条消息被摘要压缩为一段文字后丢失细节，
+//                               用户反馈"稍微前一点的内容就不记得了"
+//   RE_SUMMARY_DELTA = 10    → 缓存尾部之后新增 10 条才重新生成摘要
 
 import * as fs from "fs";
 import * as path from "path";
+import { createHash } from "node:crypto";
 import { app } from "electron";
 import { getAdapterForConfig } from "./vendors";
 import type { ChatMessage, VendorConfig } from "./vendors";
@@ -23,17 +26,19 @@ import { recordUsage } from "../token-usage-store";
 const LOG_PREFIX = "[ConversationSummarizer]";
 
 const SUMMARY_THRESHOLD = 60;
-const KEEP_RECENT = 30;
+const KEEP_RECENT = 100;
 const RE_SUMMARY_DELTA = 10;
-const SUMMARY_TIMEOUT_MS = 60_000;
+const SUMMARY_TIMEOUT_MS = 120_000;
 const MAX_SUMMARY_INPUT_CHARS = 200_000;
-const PER_MESSAGE_TRUNCATE = 800;
+const PER_MESSAGE_TRUNCATE = 2000;
 
 /** 摘要缓存结构 */
 interface SummaryCache {
   summary: string;
   messageCount: number;
   updatedAt: number;
+  /** 摘要生成时最后一条输入消息的内容指纹，用于识别固定长度滑动窗口的前进。 */
+  lastMessageFingerprint?: string;
 }
 
 /** 正在生成摘要的 session 集合（防止并发） */
@@ -108,6 +113,27 @@ function stripThinkBlocks(text: string): string {
     .trim();
 }
 
+export function fingerprintConversationMessage(message: ChatMessage): string {
+  return createHash("sha256")
+    .update(message.role)
+    .update("\0")
+    .update(contentToText(message.content))
+    .digest("hex");
+}
+
+export function countMessagesAfterCachedTail(
+  messages: ChatMessage[],
+  lastMessageFingerprint?: string,
+): number {
+  if (!lastMessageFingerprint) return RE_SUMMARY_DELTA;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    if (fingerprintConversationMessage(messages[index]) === lastMessageFingerprint) {
+      return messages.length - 1 - index;
+    }
+  }
+  return RE_SUMMARY_DELTA;
+}
+
 /**
  * 把要摘要的消息格式化成纯文本。每条消息截断到 PER_MESSAGE_TRUNCATE 字符，
  * 总长度不超过 MAX_SUMMARY_INPUT_CHARS。
@@ -123,7 +149,15 @@ function formatMessagesForSummary(messages: ChatMessage[]): string {
       "系统";
     let content = contentToText(m.content);
     if (content.length > PER_MESSAGE_TRUNCATE) {
-      content = content.slice(0, PER_MESSAGE_TRUNCATE) + "…";
+      // 工具结果和用户消息的末尾通常包含文件路径（如 [OK] 已写入: C:\...\xxx.txt），
+      // 只截取前部会丢失路径。保留头部 + 尾部，确保文件路径不丢失。
+      if (m.role === "tool" || m.role === "user") {
+        const head = content.slice(0, PER_MESSAGE_TRUNCATE - 500);
+        const tail = content.slice(-500);
+        content = head + "\n…[中间已省略]…\n" + tail;
+      } else {
+        content = content.slice(0, PER_MESSAGE_TRUNCATE) + "…";
+      }
     }
     const line = `[${role}] ${content}`;
     if (totalLen + line.length > MAX_SUMMARY_INPUT_CHARS) {
@@ -143,12 +177,14 @@ const SUMMARIZER_SYSTEM_PROMPT = `你是对话摘要助手。请将以下对话�
 要求：
 1. 保留关键事实、决定和承诺
 2. 保留用户的核心需求、偏好和重要信息（人名、项目、时间线、技术细节等）
-3. 保留未完成的任务或待办事项
-4. 保留昔涟（Cyrene）的人格状态和情绪线索（如果有）
-5. 用第三人称叙述，中文输出
-6. 控制在 800 字以内
-7. 不要加入新的信息或推测
-8. 按时间顺序组织，最近的重要信息放后面
+3. **必须保留所有文件路径**：对话中创建、修改、读取或提及的任何文件路径
+   （如 C:\\Users\\...\\xxx.txt、E:\\...\\xxx.md 等），这是最高优先级的信息。
+4. 保留未完成的任务或待办事项，**尤其要保留昔涟承诺但未执行的动作**（如"昔涟说会写文件但还没写""昔涟答应去查资料但未执行"），这是 Action Gate 判断是否需要 act 的关键依据
+5. 保留昔涟（Cyrene）的人格状态和情绪线索（如果有）
+6. 用第三人称叙述，中文输出
+7. 控制在 1500 字以内
+8. 不要加入新的信息或推测
+9. 按时间顺序组织，最近的重要信息放后面
 
 只输出摘要正文，不要加前缀、标题或任何说明性文字。`;
 
@@ -172,7 +208,7 @@ async function generateSummary(
       {
         model: cfg.model,
         messages: llmMessages,
-        maxTokens: 2000,
+        maxTokens: 4000,
         stream: false,
       },
       cfg,
@@ -243,6 +279,15 @@ export function applyCachedSummary(
   const cache = readCache(sessionId);
   if (!cache || !cache.summary) return messages;
 
+  // 旧缓存没有内容指纹，或其尾消息已经落后当前滑动窗口太多时，
+  // 暂时保留完整原文，等待后台生成新摘要，避免过期摘要覆盖新近对话。
+  if (
+    !cache.lastMessageFingerprint
+    || countMessagesAfterCachedTail(messages, cache.lastMessageFingerprint) >= RE_SUMMARY_DELTA
+  ) {
+    return messages;
+  }
+
   // 旧摘要即使消息数有差异也作兜底使用（总比完全丢失上下文好）；
   // scheduleSummaryUpdate 会在后台异步刷新。
   console.log(
@@ -270,7 +315,7 @@ export function scheduleSummaryUpdate(
 
   const cache = readCache(sessionId);
   if (cache) {
-    const delta = Math.abs(messages.length - cache.messageCount);
+    const delta = countMessagesAfterCachedTail(messages, cache.lastMessageFingerprint);
     if (delta < RE_SUMMARY_DELTA) return; // 缓存仍然有效
   }
 
@@ -298,6 +343,9 @@ async function performSummaryUpdate(
       summary,
       messageCount: messages.length,
       updatedAt: Date.now(),
+      lastMessageFingerprint: messages.length > 0
+        ? fingerprintConversationMessage(messages[messages.length - 1])
+        : undefined,
     });
     console.log(LOG_PREFIX, `摘要生成完成: sessionId=${sessionId}, ${summary.length} 字符`);
   } catch (err) {

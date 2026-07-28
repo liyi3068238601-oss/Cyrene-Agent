@@ -197,6 +197,7 @@ export async function runSagaArchivist(
       content: [
         "你是 Cyrene 的长期记忆 Archivist。把至少三个 Episode 整理成长期 Saga。",
         "Saga 是弱叙事，只能概括给定 Episode，不得增加新的事实、数字、动机或保证。",
+        "content 字段必须用第一人称（昔涟视角）书写，即昔涟观察到的关于用户的信息，例如「梨衣经历了…」「他参与了…」，禁止用「用户经历了…」等第三人称，也不要用「我经历了…」这种容易混淆人称的写法。",
         "输出 JSON 数组，每项字段：theme、content、episodeIds、confidence。不要输出解释。",
       ].join("\n"),
     },

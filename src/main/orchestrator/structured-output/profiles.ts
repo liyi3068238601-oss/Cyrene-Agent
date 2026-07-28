@@ -222,7 +222,10 @@ const FALLBACK: StructuredOutputProfile = {
   allowCapabilityPromotion: false,
   requestHints: { sendJsonObject: false, reasoningSplit: false },
   reasoning: "disabled",
-  repair: REPAIR,
+  // unknown provider（如 Gemini 经中转站接入）使用更宽松的超时：
+  // REPAIR 的 action_gate perAttemptTimeoutMs=5s 对 Gemini Flash 太紧
+  //（成功响应就需要 3-5s），改用 B_REPAIR 的 10s 超时避免大量 fail_closed。
+  repair: B_REPAIR,
 };
 
 export function resolveStructuredOutputProfile(

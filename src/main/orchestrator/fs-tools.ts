@@ -3,6 +3,7 @@
 
 import * as fs from "fs";
 import * as path from "path";
+import * as os from "os";
 import { toolRegistry } from "./tool-registry";
 import { captionImage } from "./vision-captioner";
 import type { ToolContext } from "./tool-context";
@@ -22,6 +23,28 @@ function ensureAbsolute(p: string): string | null {
   return path.normalize(p);
 }
 
+/**
+ * 校验路径中的 Windows 用户目录是否与当前登录用户一致。
+ * 防止模型虚构路径或替换用户名（如 C:\Users\Administrator\... → C:\Users\liyi\...）。
+ * 返回 null 表示通过；返回字符串表示错误信息。
+ */
+function validateUserDirectory(filePath: string): string | null {
+  const currentUser = os.userInfo().username;
+  // 匹配 C:\Users\XXX 或 D:\Users\XXX 等
+  const userDirMatch = filePath.match(/^([A-Za-z]):\\Users\\([^\\]+)/i);
+  if (!userDirMatch) return null; // 非 Users 目录路径不校验
+  const pathUser = userDirMatch[2];
+  if (pathUser.toLowerCase() !== currentUser.toLowerCase()) {
+    const corrected = filePath.replace(
+      /^([A-Za-z]):\\Users\\[^\\]+/i,
+      `$1:\\Users\\${currentUser}`,
+    );
+    return `[错误] 路径中的用户名 "${pathUser}" 与当前用户 "${currentUser}" 不匹配。` +
+      `请使用正确路径: ${corrected}`;
+  }
+  return null;
+}
+
 function safeStat(p: string): fs.Stats | null {
   try { return fs.statSync(p); } catch { return null; }
 }
@@ -39,6 +62,9 @@ async function executeReadFile(args: Record<string, unknown>): Promise<string> {
   const raw = String(args.path || "").trim();
   const filePath = ensureAbsolute(raw);
   if (!filePath) return "[错误] path 必须是绝对路径";
+
+  const userDirError = validateUserDirectory(filePath);
+  if (userDirError) return userDirError;
 
   const stat = safeStat(filePath);
   if (!stat) return "[错误] 文件不存在或无法访问: " + filePath;
@@ -219,6 +245,9 @@ async function executeWriteFile(args: Record<string, unknown>): Promise<string> 
   const raw = String(args.path || "").trim();
   const filePath = ensureAbsolute(raw);
   if (!filePath) return "[错误] path 必须是绝对路径";
+
+  const userDirError = validateUserDirectory(filePath);
+  if (userDirError) return userDirError;
 
   const content = typeof args.content === "string" ? args.content : "";
   const append = args.append === true;

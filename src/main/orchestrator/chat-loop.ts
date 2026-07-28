@@ -41,6 +41,12 @@ function stripToolProtocol(text: string): string {
     .replace(/<tool_call\b[^>]*>[\s\S]*?<\/tool_call>/gi, "")
     .replace(/\[tool_call\][\s\S]*?\[\/tool_call\]/gi, "")
     .replace(/<invoke\b[^>]*>[\s\S]*?<\/invoke>/gi, "")
+    .replace(/\[ACTION_DECISION\][\s\S]*?\[\/ACTION_DECISION\]/gi, "")
+    .replace(/\[TOOL_EXECUTION_CONTEXT\][\s\S]*?\[\/TOOL_EXECUTION_CONTEXT\]/gi, "")
+    .replace(/\[FAILURE_SOUL_POLICY\][\s\S]*?\[\/FAILURE_SOUL_POLICY\]/gi, "")
+    .replace(/\[EXECUTION_BRIEF\][\s\S]*?\[\/EXECUTION_BRIEF\]/gi, "")
+    .replace(/\[CONVERSATION_CONTEXT\][\s\S]*?\[\/CONVERSATION_CONTEXT\]/gi, "")
+    .replace(/\s*\[(tool[\s_]*call)\s*:[\s\S]*$/gi, "")
     .trim();
 }
 

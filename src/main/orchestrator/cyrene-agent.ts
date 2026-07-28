@@ -197,9 +197,13 @@ async function executeToolCall(
   }
 
   try {
+    const output = await tool.execute(args, tool.needsContext ? ctx : undefined);
+    if (/^\[错误(?:\]|·)/.test(output.trimStart())) {
+      return failed("E_TOOL_REPORTED_ERROR", output);
+    }
     return {
       status: "succeeded",
-      output: await tool.execute(args, tool.needsContext ? ctx : undefined),
+      output,
     };
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
