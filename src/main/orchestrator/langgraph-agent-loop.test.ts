@@ -253,14 +253,40 @@ describe("runLangGraphAgentLoop native Function Calling runtime", () => {
 
   it("routes ask_user to Soul without executing a tool", async () => {
     const adapter = new FakeAdapter();
-    adapter.enqueueDecision({ decision: "ask_user", reason: "版本不明确", missingInformation: ["歌曲版本"] });
+    adapter.enqueueDecision({
+      decision: "ask_user",
+      reason: "版本不明确",
+      missingFields: [{
+        field: "version",
+        reason: "歌曲版本不明确",
+        required: true,
+        questionHint: "希望播放哪个版本？",
+        typeHint: "single_select",
+        allowedOptions: [],
+        candidateHints: ["Live 版", "录音室版"],
+        allowCustom: true,
+      }],
+    });
+    adapter.enqueueJson({
+      intro: "你想听哪个版本？",
+      questions: [{
+        field: "version",
+        question: "希望播放哪个版本？",
+        type: "single_select",
+        options: [{ value: "Live 版", label: "Live 版" }, { value: "录音室版", label: "录音室版" }],
+        allowCustom: true,
+        freeTextPlaceholder: "填写其他版本",
+      }],
+      deferredFields: [],
+    });
     adapter.enqueueText("你想听哪个版本？");
     const executeTool = vi.fn();
 
     const result = await runLangGraphAgentLoop(options(adapter, executeTool));
 
     expect(executeTool).not.toHaveBeenCalled();
-    expect(result.reply).toBe("你想听哪个版本？");
+    expect(result.reply).toContain("你想听哪个版本？");
+    expect(result.reply).toContain('"field":"version"');
   });
 
   it("shows an Action Gate validation failure and that no tool ran", async () => {
