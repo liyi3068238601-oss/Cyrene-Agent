@@ -17,6 +17,44 @@
 
 ---
 
+## 🔀 Fork 分支改动（liyi-Cyrene）
+
+本分支基于 `origin/master`，在保持上游兼容的前提下进行了以下增强与修复。
+
+### 记忆系统
+
+- **Memory v2 架构** — 实现 Scribe-Queue 持久化、Claim-Graph 证据链、Entity-Linker 实体关联与 Resolver 冲突解决队列，构建完整的 v2 记忆管线
+- **LLM 驱动的实体提取** — `MemoryJudge` prompt 改为返回 `{candidates, entities}` 对象，LLM 在提取记忆候选的同时提取实体名，零额外 API 调用；正则提取保留为 fallback
+- **正则实体提取修复** — 用 `[^标点/空格/的]` 字符类替代贪婪 `.`，修复实体名断裂问题（如 "昨晚睡前的那份纯然的"）
+- **记忆系统调优** — Scribe/Archivist/Compressor maxTokens 提升至 50000 防 JSON 截断；MemoryJudge 超时增至 120s；聊天窗口扩至 300 条消息；摘要触发阈值 60 条
+- **对话摘要机制** — session 级摘要缓存（`cyrene-chats/summaries/<sessionId>.json`），原子写入 + 异步更新 + 60s 超时回退
+
+### Agent 工作流
+
+- **DeepSeek V4-Pro 适配** — 修复 `reasoning_content` 字段处理（保留空值防 HTTP 400）、thinking 模式与 `tool_choice` 冲突、工具执行阶段显式关闭 reasoning
+- **Gemini 模型适配** — Action Gate 超时调优（10s/20s）、内部标记剥离（`[ACTION_DECISION]` 等）、fallback 修复配置从 REPAIR 改为 B_REPAIR
+- **Action Gate 修复** — 历史消息去重防 token 膨胀、targetRefs 仅接受 CITA 可信引用、无 controlledInput 工具跳过 targetRefs 校验、完整流程诊断日志
+- **Native Function Calling 增强** — `write_file` 路径校验（`validateUserDirectory` 拦截用户名不匹配）、对话上下文注入（最近 20 条消息）、`maxTokens` 提升至 16384 防参数截断
+- **超时配置调优** — 单轮工具调用超时 150s、连续超时上限 3 次、CHAT_REQUEST_TIMEOUT 600s（10min）
+
+### NovelAI 绘图
+
+- **NovelAI 工作台** — 队列化图片生成、多图同时显示（`pendingNovelAiImages` 数组替代单值）
+- **创作流程增强** — 角色档案与衣橱系统、多角色支持、`get_drawing_detail` 批量回显（最多 8 张）
+- **`generate_novelai_image` 增强** — `count` 上限 8、collab 协作模式可用
+
+### 渠道与陪伴
+
+- **QQ NapCat 渠道集成** — 基于 NapCat 的 QQ 消息接入
+- **主动陪伴完善** — 屏幕观察与图片分享、主动聊天状态感知与多渠道投递
+- **桌面 UI 统一** — 侧边栏导航与检查器面板布局恢复
+
+### 测试适配
+
+- **ask_user 测试** — 适配上游结构化 ask 流程（`missingFields` + ask-soul JSON）
+
+---
+
 ## ✨ 速览
 
 - 🌸 **趣味桌面陪伴** — Live2D 角色常驻桌面，支持表情、动作、状态、心情、气泡互动与智能表情包
