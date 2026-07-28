@@ -9,6 +9,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { app } from "electron";
 import { registerJiebaCustomWord, registerJiebaCustomWords } from "../rag/retriever";
+import type { ExtractedEntity } from "./memory-types";
 
 // ── 类型 ──
 
@@ -36,45 +37,53 @@ interface EntityGraphData {
   relations: EntityRelation[];
 }
 
-// ── 简单解析器（不依赖 LLM，用正则启发式提取） ──
+// ── 简单解析器（正则启发式提取，作为 LLM 提取的 fallback） ──
+
+/**
+ * 实体名停用字符集：标点、空格、换行、以及"的"等修饰助词。
+ * 用 [^停用字符] 替代通配 . ，避免贪婪匹配把实体名后的句子碎片
+ * 也吃进来——这是实体名"断裂"（如"昨晚睡前的那份纯然的"）的根因。
+ */
+const NAME_STOP = "，。、！？…—\\s,.;:!?()'\"「」『』（）【】；：·~的"
+const NAME_CHAR = `[^${NAME_STOP}]`
 
 // 常见实体触发模式
 const ENTITY_PATTERNS: Array<{ type: EntityNode["type"]; patterns: RegExp[] }> = [
   {
     type: "person",
     patterns: [
-      /我的朋友(.{1,6})/g,
-      /我认识(.{1,6})/g,
-      /同事(.{1,6})/g,
-      /叫(.{1,4})(?:的人|的朋友|的同事|的老板)/g,
-      /有.{0,4}朋友.{0,4}(.{1,6})/g,
-      /(.{1,4})是我的朋友/g,
+      new RegExp(`我的朋友(${NAME_CHAR}{1,6})`, "g"),
+      new RegExp(`我认识(${NAME_CHAR}{1,6})`, "g"),
+      new RegExp(`同事(${NAME_CHAR}{1,6})`, "g"),
+      new RegExp(`叫(${NAME_CHAR}{1,4})(?:的人|的朋友|的同事|的老板)`, "g"),
+      new RegExp(`有.{0,4}朋友.{0,4}(${NAME_CHAR}{1,6})`, "g"),
+      new RegExp(`(${NAME_CHAR}{1,4})是我的朋友`, "g"),
     ],
   },
   {
     type: "place",
     patterns: [
-      /住在(.{1,10})/g,
-      /在(.{1,10})(?:工作|学习|生活|上班|上学)/g,
-      /去了(.{1,10})/g,
-      /在(.{1,10})出差/g,
-      /在(.{1,10})城市/g,
-      /来自(.{1,10})/g,
+      new RegExp(`住在(${NAME_CHAR}{1,8})`, "g"),
+      new RegExp(`在(${NAME_CHAR}{1,8})(?:工作|学习|生活|上班|上学)`, "g"),
+      new RegExp(`去了(${NAME_CHAR}{1,8})`, "g"),
+      new RegExp(`在(${NAME_CHAR}{1,8})出差`, "g"),
+      new RegExp(`在(${NAME_CHAR}{1,8})城市`, "g"),
+      new RegExp(`来自(${NAME_CHAR}{1,8})`, "g"),
     ],
   },
   {
     type: "organization",
     patterns: [
-      /在(.{1,10})(?:公司|单位|工作室|团队|学校|大学|学院)/g,
-      /(.{1,10})公司/g,
+      new RegExp(`在(${NAME_CHAR}{1,8})(?:公司|单位|工作室|团队|学校|大学|学院)`, "g"),
+      new RegExp(`(${NAME_CHAR}{1,8})公司`, "g"),
     ],
   },
   {
     type: "preference",
     patterns: [
-      /喜欢(.{1,10})(?:的东西|的活动|的食物|的音乐|的运动|的游戏|的动画|的漫画)/g,
-      /最爱(.{1,10})/g,
-      /讨厌(.{1,10})(?:的东西|的事情)/g,
+      new RegExp(`喜欢(${NAME_CHAR}{1,8})(?:的东西|的活动|的食物|的音乐|的运动|的游戏|的动画|的漫画)`, "g"),
+      new RegExp(`最爱(${NAME_CHAR}{1,8})`, "g"),
+      new RegExp(`讨厌(${NAME_CHAR}{1,8})(?:的东西|的事情)`, "g"),
     ],
   },
 ];
@@ -134,7 +143,42 @@ class EntityGraph {
     fs.writeFileSync(filePath, JSON.stringify(this.cache, null, 2), "utf8");
   }
 
-  /** 从一条对话文本中提取实体并入库 */
+  /** 接收 LLM 提取的实体列表并入库（优先于正则 ingest 使用） */
+  ingestEntities(entities: ExtractedEntity[]): void {
+    if (!entities || entities.length === 0) return;
+    const data = this.load();
+    const now = Date.now();
+    const PUNCTUATION = /[，。、！？…—\.\（\）「」『』"';；：\s]/
+
+    for (const { type, name } of entities) {
+      const trimmed = name.trim();
+      if (!trimmed || trimmed.length < 2 || trimmed.length > 20) continue;
+      if (PUNCTUATION.test(trimmed)) continue;
+
+      const existing = data.entities.find(
+        (e) => e.name === trimmed || e.aliases.includes(trimmed),
+      );
+      if (existing) {
+        existing.mentionCount++;
+        existing.lastMentionedAt = now;
+      } else {
+        data.entities.push({
+          id: `ent_${now}_${Math.random().toString(36).slice(2, 8)}`,
+          name: trimmed,
+          type,
+          aliases: [],
+          mentionCount: 1,
+          firstMentionedAt: now,
+          lastMentionedAt: now,
+        });
+        this.feedSingleName(trimmed);
+      }
+    }
+
+    this.save();
+  }
+
+  /** 从一条对话文本中提取实体并入库（正则 fallback） */
   ingest(text: string): void {
     const data = this.load();
     const extracted = extractEntitiesFromText(text);

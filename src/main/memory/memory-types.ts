@@ -174,6 +174,18 @@ export interface MemoryJudgeTurn {
   assistantReply: string
 }
 
+/** LLM 从对话中提取的实体（人物/地点/组织/偏好/概念） */
+export interface ExtractedEntity {
+  type: "person" | "place" | "concept" | "preference" | "organization"
+  name: string
+}
+
+/** MemoryJudge 的完整返回：记忆候选 + 实体 */
+export interface MemoryJudgeResult {
+  candidates: MemoryCandidate[]
+  entities: ExtractedEntity[]
+}
+
 export interface MemoryStore {
   schemaVersion: number
   l0: L0Profile

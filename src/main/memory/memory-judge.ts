@@ -3,7 +3,7 @@ import * as path from "path"
 import { getAdapterForConfig } from "../orchestrator/vendors"
 import type { VendorConfig, ChatMessage } from "../orchestrator/vendors"
 import { app } from "electron"
-import { MemoryCandidate, L0_FIELD_DESCRIPTIONS, MemoryJudgeTurn } from "./memory-types"
+import { MemoryCandidate, L0_FIELD_DESCRIPTIONS, MemoryJudgeTurn, ExtractedEntity, MemoryJudgeResult } from "./memory-types"
 import { recordUsage } from "../token-usage-store"
 import { getMemoryV2Database } from "../memory-v2/bridge"
 import { isMemoryBackgroundBudgetAvailable, recordMemoryBackgroundCall } from "../memory-v2/background-metrics"
@@ -194,6 +194,57 @@ function normalizeCandidate(input: unknown): MemoryCandidate | null {
   }
 }
 
+const ENTITY_PUNCTUATION = /[，。、！？…—\.\（\）「」『』"';；：\s]/
+
+function normalizeEntity(input: unknown): ExtractedEntity | null {
+  if (!input || typeof input !== "object") return null
+  const record = input as Record<string, unknown>
+  const type = record.type
+  const name = record.name
+  if (type !== "person" && type !== "place" && type !== "concept" && type !== "preference" && type !== "organization") return null
+  if (typeof name !== "string" || !name.trim()) return null
+  const trimmed = name.trim()
+  if (trimmed.length < 2 || trimmed.length > 20) return null
+  if (ENTITY_PUNCTUATION.test(trimmed)) return null
+  return { type, name: trimmed }
+}
+
+/**
+ * 解析 MemoryJudge 的 LLM 输出。
+ * 优先解析对象格式 { candidates, entities }；
+ * 失败时回退到数组格式（兼容旧 prompt），entities 为空。
+ */
+function extractJudgeResult(raw: string): { candidates: unknown[]; entities: unknown[] } | null {
+  const text = raw
+    .replace(/```json\s*/gi, '')
+    .replace(/```\s*/gi, '')
+    .trim()
+
+  const objStart = text.indexOf('{')
+  const arrStart = text.indexOf('[')
+
+  if (objStart !== -1 && (arrStart === -1 || objStart < arrStart)) {
+    try {
+      const obj = JSON.parse(text.slice(objStart))
+      if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+        return {
+          candidates: Array.isArray(obj.candidates) ? obj.candidates : [],
+          entities: Array.isArray(obj.entities) ? obj.entities : [],
+        }
+      }
+    } catch {
+      // 对象解析失败（可能被 max_tokens 截断），回退到数组格式
+    }
+  }
+
+  const parsed = extractJsonArray(raw)
+  if (parsed) {
+    return { candidates: parsed, entities: [] }
+  }
+
+  return null
+}
+
 async function callChatCompletions(
   settings: ModelSettings,
   messages: Array<{ role: "system" | "user"; content: string }>,
@@ -271,7 +322,7 @@ export class MemoryJudge {
   async judgeRecentTurns(
     turns: MemoryJudgeTurn[],
     conversationId: string,
-  ): Promise<MemoryCandidate[]> {
+  ): Promise<MemoryJudgeResult> {
     console.log(`[MemoryJudge] 分析最近 ${turns.length} 轮对话...`)
 
     try {
@@ -279,7 +330,7 @@ export class MemoryJudge {
       if (!settings.apiKey) {
         console.error("[MemoryJudge] LLM 调用失败: missing api key")
         console.log("[MemoryJudge] 本轮无值得记录的信息")
-        return []
+        return { candidates: [], entities: [] }
       }
 
       const systemPrompt = [
@@ -317,11 +368,16 @@ export class MemoryJudge {
         "- summary 和 evidenceQuotes 字段的值里，禁止出现英文双引号 \"",
         "- 如果内容里有引号，统一用中文引号「」替代，例如：用户希望被称为「宝宝」",
         "- 不要用 markdown 代码块包裹 JSON，直接输出裸 JSON",
-        "- 数组第一个字符必须是 [，最后一个字符必须是 ]",
+        "- 输出的第一个字符必须是 {，最后一个字符必须是 }",
         "",
-        "输出格式为 JSON 数组，禁止用 markdown 代码块包裹，直接输出裸 JSON。",
+        "输出格式为 JSON 对象，禁止用 markdown 代码块包裹，直接输出裸 JSON。",
+        "对象结构：",
+        "{",
+        "  \"candidates\": [ ... 记忆候选数组 ... ],",
+        "  \"entities\": [ ... 实体数组 ... ]",
+        "}",
         "",
-        "每个候选必须包含这些字段：",
+        "candidates 数组中每个候选必须包含这些字段：",
         "{",
         "  \"layer\": \"L0\",",
         "  \"field\": \"preferredName\",",
@@ -337,9 +393,19 @@ export class MemoryJudge {
         "  \"forbiddenOverclaims\": []",
         "}",
         "",
+        "entities 数组中每个实体包含两个字段：",
+        "{ \"type\": \"person|place|organization|preference|concept\", \"name\": \"实体名\" }",
+        "实体提取规则：",
+        "- type 只能是：person（人物）、place（地点）、organization（组织）、preference（偏好/爱好）、concept（概念/话题）",
+        "- name 必须是准确的专有名词或常用名称，2-20个字符",
+        "- 不能包含修饰语、助词、标点或句子碎片",
+        "- 正确：{\"type\":\"person\",\"name\":\"张三\"}  错误：{\"type\":\"person\",\"name\":\"我的朋友张三\"}",
+        "- 只提取对话中明确提到的实体，不要推断",
+        "- 如果没有实体，entities 返回空数组 []",
+        "",
         "L1/L2 不需要 field。",
         "inferred / uncertain 不允许进入 L0；如果还值得保留，放到 L2。",
-        "没有值得记录的信息时，输出：[]",
+        "没有值得记录的信息时，candidates 和 entities 都输出空数组 []",
         "summary 和 evidenceQuotes 里禁止出现英文双引号，用「」替代。",
       ].join("\n")
 
@@ -365,33 +431,40 @@ export class MemoryJudge {
         "MemoryJudge",
       )
 
-      const parsed = extractJsonArray(raw)
-      if (!parsed) {
+      const result = extractJudgeResult(raw)
+      if (!result) {
         console.error("[MemoryJudge] JSON 解析失败，原始内容：\n", raw.slice(0, 200))
         console.log("[MemoryJudge] 本轮无值得记录的信息")
-        return []
+        return { candidates: [], entities: [] }
       }
 
-      const candidates = parsed
+      const candidates = result.candidates
         .map(normalizeCandidate)
         .filter((item): item is MemoryCandidate => item !== null)
         .filter((item) => item.shouldWrite === true)
         .filter((item) => item.layer !== "L0" || (item.certainty === "explicit" && item.attribution === "user_explicit"))
 
-      if (candidates.length === 0) {
+      const entities = result.entities
+        .map(normalizeEntity)
+        .filter((item): item is ExtractedEntity => item !== null)
+
+      if (candidates.length === 0 && entities.length === 0) {
         console.log("[MemoryJudge] 本轮无值得记录的信息")
-        return []
+        return { candidates: [], entities: [] }
       }
 
-      console.log(`[MemoryJudge] 提取候选: ${candidates.length} 条（过滤后）`)
+      console.log(`[MemoryJudge] 提取候选: ${candidates.length} 条，实体: ${entities.length} 个`)
       console.log(
         `[MemoryJudge] 候选详情: ${candidates.map((item) => item.layer === "L0" && item.field ? `${item.layer}.${item.field}(\"${item.content.slice(0, 20)}\", ${item.confidence.toFixed(2)})` : `${item.layer}(\"${item.content.slice(0, 20)}\", ${item.confidence.toFixed(2)})`).join(" ")}`,
       )
-      return candidates
+      if (entities.length > 0) {
+        console.log(`[MemoryJudge] 实体详情: ${entities.map((e) => `${e.type}:${e.name}`).join(", ")}`)
+      }
+      return { candidates, entities }
     } catch (error) {
       console.error("[MemoryJudge] LLM 调用失败:", error)
       console.log("[MemoryJudge] 本轮无值得记录的信息")
-      return []
+      return { candidates: [], entities: [] }
     }
   }
 
@@ -399,7 +472,7 @@ export class MemoryJudge {
     userMessage: string,
     assistantMessage: string,
     conversationId: string,
-  ): Promise<MemoryCandidate[]> {
+  ): Promise<MemoryJudgeResult> {
     return this.judgeRecentTurns([{ userInput: userMessage, assistantReply: assistantMessage }], conversationId)
   }
 }

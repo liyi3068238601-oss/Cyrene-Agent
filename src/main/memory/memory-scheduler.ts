@@ -18,7 +18,7 @@ import { memoryJudge } from "./memory-judge"
 import { memoryManager } from "./memory-manager"
 import { runResolverQueueOnce } from "./memory-resolver"
 import { memoryStore } from "./memory-store"
-import type { L1Profile, MemoryCandidate, MemoryJudgeTurn } from "./memory-types"
+import type { L1Profile, MemoryCandidate, MemoryJudgeTurn, MemoryJudgeResult, ExtractedEntity } from "./memory-types"
 
 const SCRIBE_MIN_PENDING_TURNS = 6
 const SCRIBE_MAX_BACKLOG_TURNS = 30
@@ -31,8 +31,9 @@ interface SchedulerEvent extends MemoryScribeEvent {
 
 export interface MemorySchedulerDeps {
   ingestEntity: (text: string) => void
+  ingestEntities: (entities: ExtractedEntity[]) => void
   enqueueTask: <T>(label: string, task: () => Promise<T>) => Promise<T>
-  judgeMemory: (turns: MemoryJudgeTurn[], conversationId: string) => Promise<MemoryCandidate[]>
+  judgeMemory: (turns: MemoryJudgeTurn[], conversationId: string) => Promise<MemoryJudgeResult>
   writeMemory: (candidates: MemoryCandidate[], conversationId: string, events: MemoryScribeEvent[]) => Promise<void>
   getL1: () => Promise<L1Profile>
   replaceL1Field: (field: "roundCount", value: number) => Promise<void>
@@ -179,9 +180,16 @@ export class MemoryScheduler {
           userInput: sanitizeMemoryModelText(event.userText),
           assistantReply: sanitizeMemoryModelText(event.assistantText),
         }))
-        const candidates = await this.deps.judgeMemory(turns, "global")
+        const { candidates, entities } = await this.deps.judgeMemory(turns, "global")
         for (const candidate of candidates) {
           await this.deps.writeMemory([candidate], sourceConversationForCandidate(candidate, group), group)
+        }
+        if (entities.length > 0) {
+          try {
+            this.deps.ingestEntities(entities)
+          } catch (error) {
+            console.warn("[Memory] LLM 实体注入失败:", error)
+          }
         }
       }
       this.deps.completeScribeEvents(persistentIds)
@@ -201,6 +209,7 @@ export class MemoryScheduler {
 
 export const memoryScheduler = new MemoryScheduler({
   ingestEntity: (text) => entityGraph.ingest(text),
+  ingestEntities: (entities) => entityGraph.ingestEntities(entities),
   enqueueTask: enqueueLLMTask,
   judgeMemory: (turns, conversationId) => memoryJudge.judgeRecentTurns(turns, conversationId),
   writeMemory: async (candidates, conversationId, events) => {

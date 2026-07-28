@@ -13,13 +13,14 @@ function createScheduler(overrides: Partial<MemorySchedulerDeps> = {}) {
   let sequence = 0
   const deps: MemorySchedulerDeps = {
     ingestEntity: vi.fn((text: string) => calls.push(`ingest:${text}`)),
+    ingestEntities: vi.fn(),
     enqueueTask: <T>(label: string, task: () => Promise<T>) => {
       enqueueLabels.push(label)
       const run = queue.then(task)
       queue = run.then(() => undefined, () => undefined)
       return run
     },
-    judgeMemory: vi.fn(async () => [] as MemoryCandidate[]),
+    judgeMemory: vi.fn(async () => ({ candidates: [] as MemoryCandidate[], entities: [] })),
     writeMemory: vi.fn(async () => { calls.push("write") }),
     getL1: vi.fn(async () => ({
       recentGoals: "",
@@ -100,7 +101,7 @@ describe("MemoryScheduler global Scribe", () => {
   it("processes six globally pending turns and marks them complete", async () => {
     const memory = candidate()
     const { scheduler, deps, completed } = createScheduler({
-      judgeMemory: vi.fn(async () => [memory]),
+      judgeMemory: vi.fn(async () => ({ candidates: [memory], entities: [] })),
     })
     for (let index = 1; index <= 6; index += 1) {
       scheduler.scheduleMemoryWrite(`user ${index}`, `assistant ${index}`)
