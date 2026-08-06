@@ -523,6 +523,22 @@ declare global {
     cyreneScheduler?: SchedulerApi;
     user?: UserApi;
     memoryPanel?: MemoryPanelApi;
+    plugins?: {
+      list(): Promise<
+        Array<{
+          id: string;
+          name: string;
+          version: string;
+          description: string;
+          author: string;
+          entry: string;
+          defaultEnabled: boolean;
+          enabled: boolean;
+          hasUnregister: boolean;
+        }>
+      >;
+      setEnabled(id: string, enabled: boolean): Promise<{ ok: boolean; error?: string }>;
+    };
   }
 }
 

@@ -375,6 +375,14 @@ const settingsApi = {
 
 contextBridge.exposeInMainWorld("settings", settingsApi);
 
+const pluginsApi = {
+  list: () => ipcRenderer.invoke(IPC.PLUGINS_LIST),
+  setEnabled: (id: string, enabled: boolean) =>
+    ipcRenderer.invoke(IPC.PLUGINS_SET_ENABLED, id, enabled),
+};
+
+contextBridge.exposeInMainWorld("plugins", pluginsApi);
+
 const schedulerApi = {
   list: () => ipcRenderer.invoke(IPC.SCHEDULER_LIST),
   add: (input: unknown) => ipcRenderer.invoke(IPC.SCHEDULER_ADD, input),
