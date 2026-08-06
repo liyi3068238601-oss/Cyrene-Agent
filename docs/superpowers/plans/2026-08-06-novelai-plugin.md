@@ -32,7 +32,8 @@
 
 | 步骤 | 日期时间 | 内容 | 状态 | 提交 |
 |---|---|---|---|---|
-| M0-S1 | - | 从 fork/liyi-Cyrene 提取 NovelAI 源码（main + renderer） | 待执行 | - |
+| M0-S1 | 2026-08-06 | 计划文档创建并落库（施工日志初始化） | 已完成 | 92f9596 |
+| M0-S2 | - | 从 fork/liyi-Cyrene 提取 NovelAI 源码（main + renderer） | 待执行 | - |
 | M1-S1 | - | 框架扩展：PluginDeps 增加 llm（translateText 注入）+ 单测 | 待执行 | - |
 | M1-S2 | - | 插件骨架：manifest.json + channels.ts + index.ts（可加载/可停用）+ manifest 测试 | 待执行 | - |
 | M2-S1 | - | 纯逻辑模块适配：types/providers/prompt-profile/task-queue 去除上游内部依赖 | 待执行 | - |
@@ -99,7 +100,7 @@ src/main/plugin-llm.ts# 翻译注入实现（主程序侧）
 
 ## 任务与步骤
 
-### Task M0-S1: 从 fork/liyi-Cyrene 提取源码
+### Task M0-S2: 从 fork/liyi-Cyrene 提取源码
 
 **Files:**
 - 工作区新增：`src/main/novelai/*`（临时，随后移入插件目录）、`src/renderer/novelai/*`
@@ -141,13 +142,13 @@ git status --short
 ```
 Expected: `src/plugins/novelai/{types,providers,prompt-profile,task-queue,service}.ts` + 3 个 `.test.ts`；`src/renderer/novelai/{index.html,main.ts,novelai.css,wardrobe.css}`。
 
-- [ ] **Step 6: 提交并回填施工日志（M0-S1）**
+- [ ] **Step 6: 提交并回填施工日志（M0-S2）**
 
 ```bash
 git add src/plugins/novelai src/renderer/novelai
-git commit -m "M0-S1 feat(plugins): 从 liyi-Cyrene 提取 NovelAI 源码（main/renderer）"
+git commit -m "M0-S2 feat(plugins): 从 liyi-Cyrene 提取 NovelAI 源码（main/renderer）"
 git add docs/superpowers/plans/2026-08-06-novelai-plugin.md
-git commit -m "M0-S1 docs(plugins): 施工日志回填 M0-S1"
+git commit -m "M0-S2 docs(plugins): 施工日志回填 M0-S2"
 ```
 
 ---
