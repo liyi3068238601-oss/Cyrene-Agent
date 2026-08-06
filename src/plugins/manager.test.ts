@@ -1,0 +1,133 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { PluginManager, type PluginManagerOptions } from "./manager";
+import type { PluginRuntime } from "./context";
+
+let tmp: string;
+
+function fixturePlugin(id: string, manifestId: string = id): string {
+  if (!tmp) tmp = mkdtempSync(path.join(os.tmpdir(), "cyrene-mgr-test-"));
+  const dir = path.join(tmp, id);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    path.join(dir, "manifest.json"),
+    JSON.stringify({
+      id: manifestId,
+      name: id,
+      version: "1.0.0",
+      description: "d",
+      author: "a",
+      entry: "index.cjs",
+      defaultEnabled: true,
+    }),
+    "utf8",
+  );
+  writeFileSync(
+    path.join(dir, "index.cjs"),
+    `module.exports = { register(ctx) {
+      ctx.registerIpc("ping", () => "pong");
+      ctx.registerTool({ id: "${id}_tool", name: "t", description: "d", enabled: true, inputSchema: { type: "object", properties: {}, required: [] }, execute: async () => "ok" });
+    }, unregister() {} };`,
+    "utf8",
+  );
+  return dir;
+}
+
+afterEach(() => {
+  if (tmp) {
+    rmSync(tmp, { recursive: true, force: true });
+    tmp = "";
+  }
+});
+
+function harness(overrides: Partial<PluginManagerOptions> = {}) {
+  const tools: string[] = [];
+  const ipc = new Map<string, (...args: unknown[]) => unknown>();
+  const runtime: PluginRuntime = {
+    toolRegistry: {
+      register: (t) => tools.push(t.id),
+      unregister: (id) => {
+        const i = tools.indexOf(id);
+        if (i >= 0) tools.splice(i, 1);
+        return true;
+      },
+    },
+    channelManager: { register: () => {}, unregister: async () => true, startOne: async () => {} },
+    registerIpc: (c, h) => ipc.set(c, h),
+    unregisterIpc: (c) => ipc.delete(c),
+    appEvents: { on: () => {} },
+  };
+  let enabledMap: Record<string, boolean> = {};
+  const options: PluginManagerOptions = {
+    scanRoots: [path.dirname(fixturePlugin("demo"))],
+    storageRoot: path.join(tmp ?? "tmp", "storage"),
+    runtime,
+    loadEnabledMap: () => ({ ...enabledMap }),
+    saveEnabledMap: (m) => {
+      enabledMap = { ...m };
+    },
+    ...overrides,
+  };
+  return { options, tools, ipc, getEnabledMap: () => ({ ...enabledMap }) };
+}
+
+describe("PluginManager", () => {
+  it("启动时启用 defaultEnabled 插件并注册列表/开关 IPC", async () => {
+    const h = harness();
+    const mgr = new PluginManager(h.options);
+    await mgr.start();
+    expect(mgr.list().map((e) => e.id)).toEqual(["demo"]);
+    expect(mgr.list()[0].enabled).toBe(true);
+    expect(h.ipc.has("plugins:list")).toBe(true);
+    expect(h.ipc.has("plugins:set-enabled")).toBe(true);
+    expect(h.ipc.has("plugin:demo:ping")).toBe(true);
+  });
+
+  it("开关关闭的插件不激活", async () => {
+    const h = harness({
+      loadEnabledMap: () => ({ demo: false }),
+    });
+    const mgr = new PluginManager(h.options);
+    await mgr.start();
+    expect(mgr.list()[0].enabled).toBe(false);
+    expect(h.ipc.has("plugin:demo:ping")).toBe(false);
+  });
+
+  it("setEnabled(false) 清理资源并持久化；setEnabled(true) 重新激活", async () => {
+    const h = harness();
+    const mgr = new PluginManager(h.options);
+    await mgr.start();
+    expect(h.tools).toContain("demo_tool");
+
+    const off = await mgr.setEnabled("demo", false);
+    expect(off.ok).toBe(true);
+    expect(mgr.list()[0].enabled).toBe(false);
+    expect(h.ipc.has("plugin:demo:ping")).toBe(false);
+    expect(h.tools).toEqual([]);
+    expect(h.getEnabledMap().demo).toBe(false);
+
+    const on = await mgr.setEnabled("demo", true);
+    expect(on.ok).toBe(true);
+    expect(h.ipc.has("plugin:demo:ping")).toBe(true);
+    expect(h.tools).toContain("demo_tool");
+  });
+
+  it("重复 id 只保留第一个扫描结果", async () => {
+    const h = harness();
+    fixturePlugin("demo-copy", "demo");
+    h.options.scanRoots = [path.dirname(fixturePlugin("demo"))];
+    const mgr = new PluginManager(h.options);
+    await mgr.start();
+    expect(mgr.list()).toHaveLength(1);
+  });
+
+  it("setEnabled 未知 id 返回失败", async () => {
+    const h = harness();
+    const mgr = new PluginManager(h.options);
+    await mgr.start();
+    const res = await mgr.setEnabled("nope", true);
+    expect(res.ok).toBe(false);
+  });
+});

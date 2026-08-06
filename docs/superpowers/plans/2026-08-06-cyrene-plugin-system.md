@@ -821,7 +821,7 @@ function harness(overrides: Partial<PluginManagerOptions> = {}) {
   };
   let enabledMap: Record<string, boolean> = {};
   const options: PluginManagerOptions = {
-    scanRoots: [fixturePlugin("demo")],
+    scanRoots: [path.dirname(fixturePlugin("demo"))],
     storageRoot: path.join(tmp ?? "tmp", "storage"),
     runtime,
     loadEnabledMap: () => ({ ...enabledMap }),
@@ -875,9 +875,9 @@ describe("PluginManager", () => {
   });
 
   it("重复 id 只保留第一个扫描结果", async () => {
-    const h = harness({
-      scanRoots: [fixturePlugin("demo"), fixturePlugin("demo-copy", "demo")],
-    });
+    const h = harness();
+    fixturePlugin("demo-copy", "demo");
+    h.options.scanRoots = [path.dirname(fixturePlugin("demo"))];
     const mgr = new PluginManager(h.options);
     await mgr.start();
     expect(mgr.list()).toHaveLength(1);
