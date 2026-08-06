@@ -39,12 +39,12 @@
 | M3-S1 | 2026-08-06 | 设置面板导航「功能插件」+ 空壳区块 | 已完成 | 5030f81 |
 | M3-S2 | 2026-08-06 | 设置面板插件列表渲染与开关 | 已完成 | 913c5a9 |
 | M4-S1 | 2026-08-06 | ChannelManager 追加 unregister/startOne + 单测（因 M2-S3 依赖提前执行） | 已完成 | a012b23 |
-| M4-S2 | - | 内置 TS 演示插件 src/plugins/demo/ | 待执行 | - |
-| M4-S3 | - | drop-in JS 插件端到端验证（放文件即用） | 待执行 | - |
+| M4-S2 | 2026-08-06 | 内置 TS 演示插件 src/plugins/demo/ | 已完成 | 8778c65 |
+| M4-S3 | 2026-08-06 | drop-in JS 插件端到端验证（放文件即用，含 M1-S1 加载器修复 23ba6b2） | 已完成 | 待回填 |
 | M5-S1 | 2026-08-06 | docs/plugins/plugin-authoring.md 编写（提前完成） | 已完成 | 4c93439 |
-| M5-S2 | - | 全量回归 npm test + npm run build | 待执行 | - |
-| M5-S3 | - | 上游合并演练与冲突面收敛核对 | 待执行 | - |
-| M5-S4 | - | 施工日志完结 + 风险清单核对 | 待执行 | - |
+| M5-S2 | 2026-08-06 | 全量回归 npm test + npm run build（2313 passed / 0 failed） | 已完成 | 待回填 |
+| M5-S3 | 2026-08-06 | 上游合并演练与冲突面收敛核对（origin/master 为祖先） | 已完成 | 待回填 |
+| M5-S4 | 2026-08-06 | 施工日志完结 + 风险清单核对 | 已完成 | 待回填 |
 
 ---
 
@@ -1827,6 +1827,15 @@ git commit -m "M5-S4 docs(plugins): 施工日志完结，插件系统 v1 交付"
 4. 设置面板「功能插件」页动态列出插件，开关可启停且状态持久化（重启后保持）。
 5. 在 `userData/plugins/` 新增一个符合契约的插件目录，无需改代码即可被加载使用（「放文件即用」）。
 6. 上游文件改动仅限 Global Constraints 收敛清单。
+
+### M5-S4 实测验收记录（施工完毕回填）
+
+- `npm test`：256 个测试文件通过，2313 passed / 12 skipped / 0 failed ✅
+- `npm run build`：skills/main/preload/cli/renderer 全绿 ✅
+- 启动应用日志：`[plugins] 已启用 demo@0.1.0`、`[plugins] 已启用 demo-dropin@0.1.0` ✅
+- 设置面板「功能插件」：导航、区块、渲染与开关已实现（renderer 测试 48 passed）✅
+- `userData/plugins/demo-dropin` 放文件即用：验证通过（含 M1-S1 加载器修复：CJS 走 require / ESM 走运行时 import）✅
+- 上游文件改动：全部落在收敛清单内（含 `vite.config.ts` 的 NovelAI 扩展说明）✅
 
 ## 风险与缓解
 
