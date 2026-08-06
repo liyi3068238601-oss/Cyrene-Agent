@@ -983,8 +983,8 @@ export class PluginManager {
       }
     }
     this.opts.runtime.registerIpc(IPC_LIST, () => this.list());
-    this.opts.runtime.registerIpc(IPC_SET_ENABLED, async (id: string, enabled: boolean) => {
-      return this.setEnabled(id, enabled);
+    this.opts.runtime.registerIpc(IPC_SET_ENABLED, async (id: unknown, enabled: unknown) => {
+      return this.setEnabled(String(id), Boolean(enabled));
     });
     this.opts.onListChanged?.();
   }
