@@ -39,4 +39,19 @@ describe("ChannelManager", () => {
     const mgr = new ChannelManager();
     expect(await mgr.unregister("nope" as never)).toBe(false);
   });
+
+  it("startAll 跳过已启动的 adapter（避免渠道插件双启动）", async () => {
+    const mgr = new ChannelManager();
+    let startCount = 0;
+    const adapter = fakeAdapter("qq");
+    const origStart = adapter.start;
+    adapter.start = async () => {
+      startCount += 1;
+      await origStart();
+    };
+    mgr.register(adapter);
+    await mgr.startOne("qq" as never);
+    await mgr.startAll();
+    expect(startCount).toBe(1);
+  });
 });

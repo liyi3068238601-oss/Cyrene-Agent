@@ -42,6 +42,8 @@ export class ChannelManager {
   /** 启动所有已注册 adapter（失败的跳过、记 log） */
   async startAll(): Promise<void> {
     for (const adapter of this.adapters.values()) {
+      // 跳过已启动的 adapter（插件注册渠道场景：registerChannelAdapter 已 startOne）
+      if (this.startedAdapters.has(adapter.id)) continue;
       try {
         // 每次 start 前重新注入 handler（防止 setDispatcher 之前 adapter 已经被外部注入 null）
         if (this.dispatchFn) {
