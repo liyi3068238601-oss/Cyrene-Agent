@@ -54,6 +54,7 @@
 | M5-S4 | 2026-08-06 | 施工日志完结 + 风险清单核对 | 已完成 | c46df4b |
 | M5-S5 | 2026-08-06 | 复核审查 P1/P2 修复（资源泄漏/渠道双启动/deps 白名单/校验硬化/dist 产物） | 已完成 | a203e73, d8dec17 |
 | M5-S6 | 2026-08-06 | 审查文档修正（验收记录如实化/方案决策记录/规范同步） | 已完成 | 57c86d4 |
+| M5-S7 | 2026-08-06 | 复核审查建议完整入档（19 项 + 范围观察，含采纳/处置/施工记录） | 已完成 | 待回填 |
 
 ---
 
@@ -1825,6 +1826,55 @@ git commit -m "M5-S3 docs(plugins): 上游合并演练完成，冲突面收敛�
 git add docs/superpowers/plans/2026-08-06-cyrene-plugin-system.md
 git commit -m "M5-S4 docs(plugins): 施工日志完结，插件系统 v1 交付"
 ```
+
+---
+
+## 复核审查处置记录（M5-S5/M5-S6/M5-S7）
+
+> 来源：外部复核审查报告（2026-08-06）。本节完整记录每条建议、是否采纳、如何采纳、施工记录（提交与验证），供后续追溯。
+
+### P1（建议尽快修复）
+
+| # | 审查建议 | 是否采纳 | 如何采纳 | 施工记录 |
+|---|---|---|---|---|
+| 1 | `register()` 抛错会泄漏已注册 tool/IPC/adapter（ctx 未入 map，dispose 永不执行） | ✅ 采纳 | `manager.ts` activate：`try { await plugin.register(ctx) } catch { ctx.dispose(); throw err }` | 提交 `a203e73`；插件/渠道测试 107 用例通过 |
+| 2 | `deactivate()` 无 try/finally，unregister 抛错导致 dispose/实例清理/持久化全部跳过 | ✅ 采纳 | `manager.ts` deactivate：unregister 与清理放入 `try/finally`，保证 dispose 与状态更新必然执行 | 提交 `a203e73` |
+| 3 | `registerChannelAdapter` 半成功泄漏：startOne 抛错时 adapter 已注册但未进跟踪集合 | ✅ 采纳 | `context.ts`：startOne 失败在 catch 中回滚 `unregister(adapter.id)` 后 rethrow | 提交 `a203e73` |
+| 4 | 渠道插件双启动时序：插件在 initChannels 前 startOne，随后 startAll 不检查 startedAdapters 会二次 start | ✅ 采纳 | `channels/manager.ts` startAll 跳过 `startedAdapters` 中已启动的 adapter；新增单测 | 提交 `d8dec17`；channels 测试全过 |
+| 5 | deps 白名单形同虚设：ctx.deps.channels 无条件注入，manifest.deps 未校验未消费 | ✅ 采纳 | 改为「声明才注入」：`createContext` 按 `manifest.deps` 组装 deps；`readManifest` 校验并过滤白名单外的 deps 值 | 提交 `a203e73`；新增 deps 注入/过滤测试 |
+
+### P2（建议改进）
+
+| # | 审查建议 | 是否采纳 | 如何采纳 | 施工记录 |
+|---|---|---|---|---|
+| 6 | 验收记录与实测不符（文档写 2313/0，实测 2311/2） | ✅ 采纳（含澄清） | 0 failed 以「对 `%USERPROFILE%\.cline\data` 可写」为前提；受限环境下 `scripts/cline-poc` 两例 readonly database 失败，该文件相对上游零改动。验收记录补勘误说明；审查修复后实测 2318/0 | 提交 `57c86d4`；全量回归 2318 passed / 12 skipped / 0 failed |
+| 7 | `plugins:set-enabled` 参数未校验，`Boolean("false")` 为 true | ✅ 采纳 | `manager.ts`：`typeof enabled !== "boolean"` 直接返回错误 | 提交 `a203e73` |
+| 8 | 工具 id 冲突静默覆盖，前缀仅文档约定未强制 | ✅ 采纳 | `context.ts` registerTool：强制 `<插件id>_` 前缀（违规抛错）+ `getById` 冲突告警；新增前缀测试 | 提交 `a203e73` |
+| 9 | storage key 无白名单、writeFileSync 非原子写 | ✅ 采纳 | `storage.ts`：key 正则 `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$` + tmp/rename 原子写；新增非法 key 测试 | 提交 `a203e73` |
+| 10 | before-quit 监听器随启停累积不释放 | ✅ 采纳 | `context.ts` 保存监听回调，dispose 时 `off`；`index.ts` appEvents 补 `off → app.removeListener` | 提交 `a203e73` |
+| 11 | `stop()` 不注销 plugins:list/set-enabled IPC、不清 records | ✅ 采纳 | `manager.ts` stop：`unregisterIpc` 两个通道 + `records.clear()` | 提交 `a203e73` |
+| 12 | demo 插件 defaultEnabled:true，生产默认塞演示工具 | ✅ 采纳 | `demo/manifest.json` 改为 `defaultEnabled: false` | 提交 `a203e73` |
+| 13 | IPC 常量双处定义易漂移 | ✅ 采纳 | `manager.ts` 引用共享 `IPC.PLUGINS_LIST / IPC.PLUGINS_SET_ENABLED` | 提交 `a203e73` |
+| 14 | dist/main/plugins 混入 .test.js 产物 | ✅ 采纳 | `tsconfig.main.json` exclude `src/plugins/**/*.test.ts` + 清理遗留测试产物 | 提交 `a203e73`；dist 已无测试产物 |
+| 15 | `readManifest` 不校验 entry 扩展名/路径穿越 | ✅ 采纳 | `loader.ts`：entry 必须为裸文件名（拒绝 `../` 与子目录路径）；新增测试 | 提交 `a203e73` |
+| 16 | 设置面板切换失败仅 console 记错 | ✅ 采纳 | `settings.ts` renderFeaturePlugins：失败行内显示错误并 4s 后消失 | 提交 `a203e73` |
+| 17 | 渲染层 `PluginListEntry` 类型重复声明 | ⏸️ 暂缓 v2 | renderer 若 import `src/plugins/types` 会拖入主进程依赖，需先做类型分层；随 NovelAI 阶段处理 | 记录于 `57c86d4` |
+| 18 | `.superpowers/sdd` 账本滞后 | ✅ 采纳 | `progress.md` 同步至 M5-S6（scratch 文件，不入库） | 记录于 `57c86d4` |
+| 19 | manifest 无 apiVersion/schema，契约演进无版本化手段 | ⏸️ 暂缓 v2 | v1 无兼容性负担，与 NovelAI 插件一起引入版本字段 | 记录于 `57c86d4` |
+
+### 范围层面观察
+
+| 观察 | 是否采纳 | 如何采纳 | 施工记录 |
+|---|---|---|---|
+| v1 与原参考设计（静态登记+打包）方案偏离 | ✅ 采纳 | 新增「方案决策记录」章节，说明动态 drop-in 的理由与信任边界代价 | 提交 `57c86d4` |
+| QQ NapCat 插件化会破「上游零改动」（需扩展 ChannelId/ChannelsSettings 等类型） | ✅ 采纳（记录） | 属 QQ 独立计划范畴，NovelAI 计划收敛清单不含；届时另立 QQ 计划并做冲突演练 | 记录于 `57c86d4` |
+| NovelAI/QQ 均未开工，交付范围 = 框架 + demo | ✅ 采纳（范围澄清） | v1 交付物明确为框架 + 演示插件；业务插件迁移为下一阶段（计划文档已就绪） | 记录于 `57c86d4` |
+
+### 复核修复后的回归证据（M5-S5 之后）
+
+- 插件 + 渠道测试：18 个测试文件 / 107 用例全过。
+- `npm run build:main`：全绿；`dist/main/plugins` 无 `.test.js` 产物。
+- 全量 `npm test`（完整权限）：**2318 passed / 12 skipped / 0 failed**。
 
 ---
 
