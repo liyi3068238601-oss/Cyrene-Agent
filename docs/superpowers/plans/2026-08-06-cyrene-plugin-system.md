@@ -40,11 +40,11 @@
 | M3-S2 | 2026-08-06 | 设置面板插件列表渲染与开关 | 已完成 | 913c5a9 |
 | M4-S1 | 2026-08-06 | ChannelManager 追加 unregister/startOne + 单测（因 M2-S3 依赖提前执行） | 已完成 | a012b23 |
 | M4-S2 | 2026-08-06 | 内置 TS 演示插件 src/plugins/demo/ | 已完成 | 8778c65 |
-| M4-S3 | 2026-08-06 | drop-in JS 插件端到端验证（放文件即用，含 M1-S1 加载器修复 23ba6b2） | 已完成 | 待回填 |
+| M4-S3 | 2026-08-06 | drop-in JS 插件端到端验证（放文件即用，含 M1-S1 加载器修复 23ba6b2） | 已完成 | c46df4b |
 | M5-S1 | 2026-08-06 | docs/plugins/plugin-authoring.md 编写（提前完成） | 已完成 | 4c93439 |
-| M5-S2 | 2026-08-06 | 全量回归 npm test + npm run build（2313 passed / 0 failed） | 已完成 | 待回填 |
-| M5-S3 | 2026-08-06 | 上游合并演练与冲突面收敛核对（origin/master 为祖先） | 已完成 | 待回填 |
-| M5-S4 | 2026-08-06 | 施工日志完结 + 风险清单核对 | 已完成 | 待回填 |
+| M5-S2 | 2026-08-06 | 全量回归 npm test + npm run build（2313 passed / 0 failed） | 已完成 | c46df4b |
+| M5-S3 | 2026-08-06 | 上游合并演练与冲突面收敛核对（origin/master 为祖先） | 已完成 | c46df4b |
+| M5-S4 | 2026-08-06 | 施工日志完结 + 风险清单核对 | 已完成 | c46df4b |
 
 ---
 
