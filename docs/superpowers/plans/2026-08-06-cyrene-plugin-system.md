@@ -35,9 +35,9 @@
 | M2-S1 | 2026-08-06 | IPC 常量 + 构建配置（tsconfig/vitest/package.json） | 已完成 | f33a17a |
 | M2-S2 | 2026-08-06 | GeneralSettings 增加 plugins 字段（默认/归一化） | 已完成 | 705fbdf |
 | M2-S3 | 2026-08-06 | index.ts 挂载 PluginManager（initSkills 之后、initChannels 之前） | 已完成 | 28ffa8f |
-| M2-S4 | - | preload 暴露 window.plugins + renderer 类型声明 | 待执行 | - |
-| M3-S1 | - | 设置面板导航「功能插件」+ 空壳区块 | 待执行 | - |
-| M3-S2 | - | 设置面板插件列表渲染与开关 | 待执行 | - |
+| M2-S4 | 2026-08-06 | preload 暴露 window.plugins + renderer 类型声明 | 已完成 | 4e5a9c2 |
+| M3-S1 | 2026-08-06 | 设置面板导航「功能插件」+ 空壳区块 | 已完成 | 5030f81 |
+| M3-S2 | 2026-08-06 | 设置面板插件列表渲染与开关 | 已完成 | 913c5a9 |
 | M4-S1 | 2026-08-06 | ChannelManager 追加 unregister/startOne + 单测（因 M2-S3 依赖提前执行） | 已完成 | a012b23 |
 | M4-S2 | - | 内置 TS 演示插件 src/plugins/demo/ | 待执行 | - |
 | M4-S3 | - | drop-in JS 插件端到端验证（放文件即用） | 待执行 | - |
