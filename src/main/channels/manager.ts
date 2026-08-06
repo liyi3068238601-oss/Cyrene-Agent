@@ -56,6 +56,35 @@ export class ChannelManager {
     }
   }
 
+  /** 注销 adapter：若已启动先 stop，再移除（运行时禁用插件渠道用） */
+  async unregister(id: ChannelId): Promise<boolean> {
+    const adapter = this.adapters.get(id);
+    if (!adapter) return false;
+    if (this.startedAdapters.has(id)) {
+      try {
+        await adapter.stop();
+      } catch (err) {
+        console.warn(LOG, `渠道停止失败 [${id}]:`, err instanceof Error ? err.message : err);
+      }
+      this.startedAdapters.delete(id);
+    }
+    this.adapters.delete(id);
+    logger.info(LogTag.Channels, `unregistered: ${id}`);
+    return true;
+  }
+
+  /** 启动单个 adapter（运行时启用插件渠道用） */
+  async startOne(id: ChannelId): Promise<void> {
+    const adapter = this.adapters.get(id);
+    if (!adapter) return;
+    if (this.dispatchFn) {
+      setAdapterHandler(adapter, this.makeAdapterHandler(id));
+    }
+    await adapter.start();
+    this.startedAdapters.add(id);
+    logger.info(LogTag.Channels, `started: ${id} (${adapter.displayName})`);
+  }
+
   /** 关闭所有已启动的 adapter */
   async stopAll(): Promise<void> {
     for (const id of this.startedAdapters) {
