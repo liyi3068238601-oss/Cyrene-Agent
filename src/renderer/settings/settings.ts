@@ -780,6 +780,8 @@ const placeholderPanel = document.getElementById("placeholder-panel") as HTMLEle
 const cyrenePanel = document.getElementById("cyrene-panel") as HTMLFormElement;
 const disclaimerPanel = document.getElementById("disclaimer-panel") as HTMLElement;
 const pluginsPanel = document.getElementById("plugins-panel") as HTMLElement;
+const featurePluginsPanel = document.getElementById("feature-plugins-panel") as HTMLElement;
+const featurePluginsList = document.getElementById("feature-plugins-list") as HTMLElement;
 document.querySelectorAll<HTMLImageElement>("[data-music-logo]").forEach((image) => {
   image.src = neteaseLogoUrl;
 });
@@ -951,6 +953,7 @@ const NAV_LABELS: Record<string, { emoji: string; title: string; hint: string }>
   general: { emoji: `<svg width="24" height="24" viewBox="0 0 48 48" fill="none" aria-hidden="true" style="vertical-align:-3px"><title>通用设置</title><path d="M18.2838 43.1713C14.9327 42.1736 11.9498 40.3213 9.58787 37.867C10.469 36.8227 11 35.4734 11 34.0001C11 30.6864 8.31371 28.0001 5 28.0001C4.79955 28.0001 4.60139 28.01 4.40599 28.0292C4.13979 26.7277 4 25.3803 4 24.0001C4 21.9095 4.32077 19.8938 4.91579 17.9995C4.94381 17.9999 4.97188 18.0001 5 18.0001C8.31371 18.0001 11 15.3138 11 12.0001C11 11.0488 10.7786 10.1493 10.3846 9.35011C12.6975 7.1995 15.5205 5.59002 18.6521 4.72314C19.6444 6.66819 21.6667 8.00013 24 8.00013C26.3333 8.00013 28.3556 6.66819 29.3479 4.72314C32.4795 5.59002 35.3025 7.1995 37.6154 9.35011C37.2214 10.1493 37 11.0488 37 12.0001C37 15.3138 39.6863 18.0001 43 18.0001C43.0281 18.0001 43.0562 17.9999 43.0842 17.9995C43.6792 19.8938 44 21.9095 44 24.0001C44 25.3803 43.8602 26.7277 43.594 28.0292C43.3986 28.01 43.2005 28.0001 43 28.0001C39.6863 28.0001 37 30.6864 37 34.0001C37 35.4734 37.531 36.8227 38.4121 37.867C36.0502 40.3213 33.0673 42.1736 29.7162 43.1713C28.9428 40.752 26.676 39.0001 24 39.0001C21.324 39.0001 19.0572 40.752 18.2838 43.1713Z" fill="none" stroke="currentColor" stroke-width="4" stroke-linejoin="round"/><path d="M24 31C27.866 31 31 27.866 31 24C31 20.134 27.866 17 24 17C20.134 17 17 20.134 17 24C17 27.866 20.134 31 24 31Z" fill="none" stroke="currentColor" stroke-width="4" stroke-linejoin="round"/></svg>`, title: "通用设置", hint: "管理窗口、音频和系统行为" },
   api: { emoji: `<svg width="24" height="24" viewBox="0 0 48 48" fill="none" aria-hidden="true" style="vertical-align:-3px"><title>API 设置</title><g clip-path="url(#api-key-nav-clip)"><circle cx="15" cy="33" r="8" fill="none" stroke="currentColor" stroke-width="4"/><path d="M29 16L35.5 22" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/><path d="M20 26L37 7" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/><path d="M35 11L42 17.5" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></g><defs><clipPath id="api-key-nav-clip"><rect width="48" height="48" fill="none"/></clipPath></defs></svg>`, title: "API 设置", hint: "选择预设后只需要填写 API Key。" },
   "api-advanced": { emoji: `<svg width="24" height="24" viewBox="0 0 48 48" fill="none" aria-hidden="true" style="vertical-align:-3px"><title>高级设置</title><path d="M34.0003 41L44 24L34.0003 7H14.0002L4 24L14.0002 41H34.0003Z" fill="none" stroke="currentColor" stroke-width="4" stroke-linejoin="round"/><path d="M24 29C26.7614 29 29 26.7614 29 24C29 21.2386 26.7614 19 24 19C21.2386 19 19 21.2386 19 24C19 26.7614 21.2386 29 24 29Z" fill="none" stroke="currentColor" stroke-width="4" stroke-linejoin="round"/></svg>`, title: "高级设置", hint: "配置 API 超时时间、调用模式．" },
+  "feature-plugins": { emoji: "🧩", title: "功能插件", hint: "启用/停用本地插件" },
   cyrene: { emoji: "🌸", title: "昔涟设置", hint: "管理 Agent 行为、记忆、RAG 与权限" },
   tts: { emoji: "🎙️", title: "TTS 设置", hint: "语音合成与朗读偏好" },
   asr: { emoji: "🎧", title: "ASR 设置", hint: "语音识别与通话配置" },
@@ -3327,6 +3330,43 @@ async function toggleSchedulerHistory(taskId: string, card: Element): Promise<vo
   box.classList.remove("is-hidden");
 }
 
+async function renderFeaturePlugins(): Promise<void> {
+  if (!featurePluginsList) return;
+  const items = await window.plugins?.list();
+  if (!items) return;
+  featurePluginsList.replaceChildren();
+  if (items.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "settings-empty";
+    empty.textContent = "暂无插件：把插件目录放进 userData/plugins/ 后重启生效";
+    featurePluginsList.appendChild(empty);
+    return;
+  }
+  for (const item of items) {
+    const row = document.createElement("div");
+    row.className = "setting-row";
+    const info = document.createElement("div");
+    const name = document.createElement("strong");
+    name.textContent = `${item.name} v${item.version}`;
+    const desc = document.createElement("span");
+    desc.textContent = `${item.description}（${item.author}）`;
+    info.append(name, desc);
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = item.enabled ? "save-btn" : "save-btn save-btn--ghost";
+    toggle.textContent = item.enabled ? "已启用" : "已停用";
+    toggle.addEventListener("click", async () => {
+      const res = await window.plugins?.setEnabled(item.id, !item.enabled);
+      if (!res?.ok) {
+        console.error("[settings] 切换插件失败", item.id, res?.error);
+      }
+      await renderFeaturePlugins();
+    });
+    row.append(info, toggle);
+    featurePluginsList.appendChild(row);
+  }
+}
+
 function switchSection(section: string): void {
   const label = NAV_LABELS[section] ?? NAV_LABELS.api;
   sectionTitle.textContent = label.title;
@@ -3349,6 +3389,7 @@ function switchSection(section: string): void {
   const isTts = section === "tts";
   const isAsr = section === "asr";
   const isMusic = section === "music";
+  const isFeaturePlugins = section === "feature-plugins";
   apiForm.classList.toggle("is-hidden", !isApi);
   apiRuntimeForm.classList.toggle("is-hidden", !isApiAdvanced);
   apiTimeoutForm.classList.toggle("is-hidden", !isApiAdvanced);
@@ -3381,9 +3422,11 @@ function switchSection(section: string): void {
   if (musicPanel) musicPanel.classList.toggle("is-hidden", !isMusic);
   if (isMusic) void loadMusicPanel();
   else disposeMusicPanel();
+  if (featurePluginsPanel) featurePluginsPanel.classList.toggle("is-hidden", !isFeaturePlugins);
+  if (isFeaturePlugins) void renderFeaturePlugins();
   placeholderPanel.classList.toggle(
     "is-hidden",
-    isApi || isApiAdvanced || isAppearance || isGeneral || isPreferences || isCyrene || isDisclaimer || isMemory || isUser || isTasks || isPlugins || isSkills || isTokens || isChannels || isTts || isAsr || isMusic,
+    isApi || isApiAdvanced || isAppearance || isGeneral || isPreferences || isCyrene || isDisclaimer || isMemory || isUser || isTasks || isPlugins || isSkills || isTokens || isChannels || isTts || isAsr || isMusic || isFeaturePlugins,
   );
 
   if (
@@ -3403,7 +3446,8 @@ function switchSection(section: string): void {
     !isChannels &&
     !isTts &&
     !isAsr &&
-    !isMusic
+    !isMusic &&
+    !isFeaturePlugins
   ) {
 	    placeholderIcon.innerHTML = label.emoji;
     placeholderTitle.textContent = label.title;
