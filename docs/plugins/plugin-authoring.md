@@ -31,7 +31,7 @@ userData/plugins/<id>/
 | `version` | string | 是 | 版本号 |
 | `description` | string | 是 | 一句话描述 |
 | `author` | string | 是 | 作者 |
-| `entry` | string | 是 | 相对插件目录的入口文件名，必须存在 |
+| `entry` | string | 是 | 插件目录内的**裸文件名**（不允许 `../` 或子目录路径），必须存在 |
 | `defaultEnabled` | boolean | 否 | 默认是否启用，缺省视为 `true` |
 | `deps` | string[] | 否 | 需要注入的主程序内部依赖白名单，v1 仅支持 `"channels"` |
 
@@ -115,6 +115,8 @@ ctx.registerTool({
 
 对应注销：`ctx.unregisterTool(id)`。
 
+> 前缀为**强制约束**：不满足 `<插件id>_` 前缀的 `registerTool` 会直接抛错；若注册了已存在的工具 id，框架会打印冲突告警（覆盖行为由 ToolRegistry 决定）。
+
 ### 4.2 注册 IPC 通道 `registerIpc(channel, handler)`
 
 通道会自动加 `plugin:<id>:` 前缀，杜绝与主程序其他通道冲突。例如插件 id 为 `my-plugin`、`registerIpc("ping", ...)` 实际注册的是 `plugin:my-plugin:ping`。
@@ -178,13 +180,16 @@ const config = ctx.storage.get("config");
 ctx.storage.rootDir(); // userData/plugins/<id>
 ```
 
+> key 必须匹配 `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`，否则抛错；写入采用临时文件 + rename 的原子写。
+
 ### 4.5 依赖注入 `ctx.deps`
 
 插件**不得直接 import 主程序内部模块**（`src/main/**`、`src/shared/**`），需要主程序能力时：
 
 - 通过 manifest `deps` 白名单声明；
 - 由框架在 `register` 前注入到 `ctx.deps`；
-- v1 支持：`ctx.deps.channels.channelManager`（渠道管理器，仅 `register/unregister/startOne` 三个方法）。
+- **白名单生效**：未在 `manifest.deps` 声明的依赖不会被注入（`ctx.deps.channels` 为 undefined）。
+- v1 支持：`deps: ["channels"]` → `ctx.deps.channels.channelManager`（仅 `register/unregister/startOne` 三个方法）。
 
 其余能力（如 LLM 翻译）按需扩展白名单，例如 `deps.llm.translateText`。
 
@@ -261,7 +266,7 @@ node dist/cli/index.js run
 ## 10. 插件自检清单
 
 1. 目录名、manifest `id`、工具 id 前缀三者一致。
-2. `manifest.json` 字段完整，`entry` 指向存在的文件。
+2. `manifest.json` 字段完整，`entry` 为目录内的裸文件名且指向存在的文件。
 3. 入口导出 `register(ctx)`；有清理逻辑时导出 `unregister()`。
 4. 工具 id 以 `<插件id>_` 开头，`inputSchema` 与 `execute` 匹配。
 5. IPC 通道不重复注册；统一用 `ctx.registerIpc`（自动前缀）。

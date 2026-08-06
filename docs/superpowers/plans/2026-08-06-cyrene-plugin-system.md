@@ -20,6 +20,13 @@
 
 ---
 
+## 方案决策记录（审查补充）
+
+- v1 采用 **userData 动态扫描 + drop-in JS** 加载，而非参考设计（`2026-08-06-plugin-system-on-upstream.md`）的「静态登记 + 打包」。
+- 理由：满足「插件文件导入即可用」的核心诉求——第三方插件无需随主程序重编译，放目录即生效。
+- 代价：主进程可执行任意 JS（信任边界已声明于 `docs/plugins/plugin-authoring.md` §9）；内置插件仍以 TS 编译进 `dist/main/plugins/`，与用户插件走同一条加载路径与契约。
+- 本记录由复核审查提出，落于此处以保留方案演变痕迹。
+
 ## 施工日志（Construction Log）
 
 > 规则：每完成一个步骤 → 先提交该步骤的代码/文档 → 再用一条 `docs` 提交把「时间 / 状态 / commit hash」回填到下表。表格初始状态全部为「待执行」。
@@ -45,6 +52,8 @@
 | M5-S2 | 2026-08-06 | 全量回归 npm test + npm run build（2313 passed / 0 failed） | 已完成 | c46df4b |
 | M5-S3 | 2026-08-06 | 上游合并演练与冲突面收敛核对（origin/master 为祖先） | 已完成 | c46df4b |
 | M5-S4 | 2026-08-06 | 施工日志完结 + 风险清单核对 | 已完成 | c46df4b |
+| M5-S5 | 2026-08-06 | 复核审查 P1/P2 修复（资源泄漏/渠道双启动/deps 白名单/校验硬化/dist 产物） | 已完成 | a203e73, d8dec17 |
+| M5-S6 | 2026-08-06 | 审查文档修正（验收记录如实化/方案决策记录/规范同步） | 已完成 | 本批 docs 提交 |
 
 ---
 
@@ -1836,6 +1845,8 @@ git commit -m "M5-S4 docs(plugins): 施工日志完结，插件系统 v1 交付"
 - 设置面板「功能插件」：导航、区块、渲染与开关已实现（renderer 测试 48 passed）✅
 - `userData/plugins/demo-dropin` 放文件即用：验证通过（含 M1-S1 加载器修复：CJS 走 require / ESM 走运行时 import）✅
 - 上游文件改动：全部落在收敛清单内（含 `vite.config.ts` 的 NovelAI 扩展说明）✅
+
+> **审查后勘误（M5-S6）**：`npm test` 的 0 failed 以「对 `%USERPROFILE%\.cline\data` 可写」为前提；在受限环境（如沙箱只读）下，`scripts/cline-poc/poc2-session-reconstruction.test.ts` 两例会以 `readonly database` 失败（对应 2311 passed / 2 failed），该文件相对 `origin/master` 零改动，属既有环境依赖，非本分支回归。审查修复后实测：2318 passed / 12 skipped / 0 failed（完整权限）。
 
 ## 风险与缓解
 
