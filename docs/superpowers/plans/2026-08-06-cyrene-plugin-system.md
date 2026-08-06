@@ -33,7 +33,7 @@
 | M1-S3 | 2026-08-06 | 插件上下文 context.ts + 单测 | 已完成 | 342f70f |
 | M1-S4 | 2026-08-06 | PluginManager manager.ts + 单测（含计划测试缺陷修正） | 已完成 | bb6cf49 |
 | M2-S1 | 2026-08-06 | IPC 常量 + 构建配置（tsconfig/vitest/package.json） | 已完成 | f33a17a |
-| M2-S2 | - | GeneralSettings 增加 plugins 字段（默认/归一化） | 待执行 | - |
+| M2-S2 | 2026-08-06 | GeneralSettings 增加 plugins 字段（默认/归一化） | 已完成 | 705fbdf |
 | M2-S3 | - | index.ts 挂载 PluginManager（initSkills 之后、initChannels 之前） | 待执行 | - |
 | M2-S4 | - | preload 暴露 window.plugins + renderer 类型声明 | 待执行 | - |
 | M3-S1 | - | 设置面板导航「功能插件」+ 空壳区块 | 待执行 | - |
