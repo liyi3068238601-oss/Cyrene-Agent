@@ -98,6 +98,7 @@ import { buildToolCatalog } from "./orchestrator/tool-catalog";
 import type { ToolRiskLevel } from "./permission";
 import { loadChannelsSettings } from "./channels/settings-store";
 import { channelManager } from "./channels/manager";
+import { PluginManager } from "../plugins/manager";
 import { canStartProactiveChannelDelivery, sendProactiveChannelMessage } from "./channels/proactive-delivery";
 // 触发 built-in-tools 的副作用注册（fetch_url / run_shell / install_mcp_server）
 import "./orchestrator/built-in-tools";
@@ -251,6 +252,7 @@ async function reconcileUserMemoryIndex(): Promise<void> {
 }
 
 let mainWindow: BrowserWindow | null = null;
+let pluginManager: PluginManager | null = null;
 let tray: Tray | null = null;
 let reactChatWindow: BrowserWindow | null = null;
 const reactChatSession: ReactChatSessionDispatcher =
@@ -5202,6 +5204,29 @@ app.whenReady().then(async () => {
 
   // Skill 系统：扫描双源 skills + 注册 meta-tool
   initSkills();
+  pluginManager = new PluginManager({
+    scanRoots: [
+      path.join(__dirname, "..", "plugins"),
+      path.join(app.getPath("userData"), "plugins"),
+    ],
+    storageRoot: path.join(app.getPath("userData"), "plugins"),
+    runtime: {
+      toolRegistry,
+      channelManager,
+      registerIpc: (channel, handler) => {
+        ipcMain.handle(channel, (_event, ...args: unknown[]) => handler(...args));
+      },
+      unregisterIpc: (channel) => {
+        ipcMain.removeHandler(channel);
+      },
+      appEvents: { on: (evt, cb) => app.on(evt, cb) },
+    },
+    loadEnabledMap: () => loadGeneralSettings().plugins,
+    saveEnabledMap: (map) => {
+      saveGeneralSettings({ plugins: map });
+    },
+  });
+  await pluginManager.start();
   try {
     loadMusicCompanionHost(
       path.join(app.getAppPath(), "dist", "skills", "cyrene-music-companion", "index.js"),
@@ -5736,6 +5761,7 @@ app.on("before-quit", () => {
   schedulerEngine?.stop();
   stopProactiveTrigger();
   codeRunWorker.cleanup();
+  void pluginManager?.stop();
   flushTokenUsage();
   void shutdownChannels();
   void screenshotService?.shutdown();
