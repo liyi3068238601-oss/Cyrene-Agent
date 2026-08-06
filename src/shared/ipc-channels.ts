@@ -348,5 +348,9 @@ export const IPC = {
 
   // TODO 卡片：初始加载当前状态（常驻需求）
   TODOS_GET_CURRENT: "todos:get-current",
+
+  // plugin system
+  PLUGINS_LIST: "plugins:list",
+  PLUGINS_SET_ENABLED: "plugins:set-enabled",
 } as const;
 
