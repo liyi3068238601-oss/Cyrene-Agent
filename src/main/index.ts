@@ -678,6 +678,8 @@ interface UserProfile {
 }
 
 interface GeneralSettings extends ChatAppearanceSettings {
+  /** 插件开关表：pluginId -> enabled */
+  plugins: Record<string, boolean>;
   citaEnabled: boolean;
   citaSemanticEngine: "remote";
   /** Chat 模式的轻量社交上下文；默认关闭，开启后每轮最多多一次异步抽取调用。 */
@@ -939,6 +941,7 @@ const DEFAULT_MODEL_SETTINGS: ModelSettings = {
 };
 
 const DEFAULT_GENERAL_SETTINGS: GeneralSettings = {
+  plugins: {},
   citaEnabled: false,
   citaSemanticEngine: "remote",
   chatSocialContextEnabled: false,
@@ -1415,7 +1418,17 @@ function saveModelSettings(settings: Partial<ModelSettings>): ModelSettings {
   return final;
 }
 
+function normalizePluginsEnabled(value: unknown): Record<string, boolean> {
+  if (!value || typeof value !== "object") return {};
+  const out: Record<string, boolean> = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (typeof v === "boolean") out[k] = v;
+  }
+  return out;
+}
+
 function normalizeGeneralSettings(input: Partial<GeneralSettings> | null | undefined): GeneralSettings {
+  const plugins = normalizePluginsEnabled(input?.plugins);
   const windowVisibility = normalizeWindowVisibilitySettings(input);
   const cita = normalizeCitaSettings({
     enabled: input?.citaEnabled,
@@ -1459,6 +1472,7 @@ function normalizeGeneralSettings(input: Partial<GeneralSettings> | null | undef
     customStyle: normalizeCustomStyleConfig(input?.customStyle),
     segmentedOutputMode: normalizeSegmentedOutputMode(input?.segmentedOutputMode),
     mobileMessageSegmentation: normalizeMobileMessageSegmentationMode(input?.mobileMessageSegmentation),
+    plugins,
     proactiveChatMode: normalizeProactiveChatMode(input?.proactiveChatMode),
     proactiveDeliveryTarget: normalizeProactiveDeliveryTarget(input?.proactiveDeliveryTarget),
     // TTS 配置
