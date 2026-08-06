@@ -67,4 +67,27 @@ describe("createContext", () => {
     ctx.storage.set("k", 1);
     expect(ctx.storage.get<number>("k")).toBe(1);
   });
+
+  it("工具 id 不满足 <插件id>_ 前缀时抛错", () => {
+    tmp = mkdtempSync(path.join(os.tmpdir(), "cyrene-ctx-test-"));
+    const ctx = createContext("demo", tmp, runtime());
+    expect(() =>
+      ctx.registerTool({
+        id: "bad_tool",
+        name: "t",
+        description: "d",
+        enabled: true,
+        inputSchema: { type: "object", properties: {}, required: [] },
+        execute: async () => "ok",
+      }),
+    ).toThrow(/demo_/);
+  });
+
+  it("未声明 deps 时不注入 channels；声明后注入", () => {
+    tmp = mkdtempSync(path.join(os.tmpdir(), "cyrene-ctx-test-"));
+    const without = createContext("demo", tmp, runtime());
+    expect(without.deps.channels).toBeUndefined();
+    const withDeps = createContext("demo", tmp, runtime(), ["channels"]);
+    expect(withDeps.deps.channels?.channelManager).toBeDefined();
+  });
 });

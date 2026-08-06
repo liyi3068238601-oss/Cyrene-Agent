@@ -5219,7 +5219,10 @@ app.whenReady().then(async () => {
       unregisterIpc: (channel) => {
         ipcMain.removeHandler(channel);
       },
-      appEvents: { on: (evt, cb) => app.on(evt, cb) },
+      appEvents: {
+        on: (evt, cb) => app.on(evt, cb),
+        off: (evt, cb) => app.removeListener(evt, cb),
+      },
     },
     loadEnabledMap: () => loadGeneralSettings().plugins,
     saveEnabledMap: (map) => {

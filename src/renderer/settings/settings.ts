@@ -3359,6 +3359,13 @@ async function renderFeaturePlugins(): Promise<void> {
       const res = await window.plugins?.setEnabled(item.id, !item.enabled);
       if (!res?.ok) {
         console.error("[settings] 切换插件失败", item.id, res?.error);
+        const err = document.createElement("span");
+        err.textContent = `切换失败：${res?.error ?? "未知错误"}`;
+        err.style.color = "#e5484d";
+        err.style.fontSize = "12px";
+        row.appendChild(err);
+        setTimeout(() => err.remove(), 4000);
+        return;
       }
       await renderFeaturePlugins();
     });

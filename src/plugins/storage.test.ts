@@ -22,4 +22,11 @@ describe("createPluginStorage", () => {
     expect(s.get("missing")).toBeUndefined();
     expect(s.rootDir()).toBe(tmp);
   });
+
+  it("非法 key 抛错", () => {
+    tmp = mkdtempSync(path.join(os.tmpdir(), "cyrene-store-test-"));
+    const s = createPluginStorage(tmp);
+    expect(() => s.set("../evil", 1)).toThrow(/非法存储 key/);
+    expect(() => s.get("a/b")).toThrow(/非法存储 key/);
+  });
 });

@@ -5,6 +5,7 @@ import type { CyrenePlugin, PluginManifest, PluginRecord } from "./types";
 
 const MANIFEST_FILE = "manifest.json";
 const ID_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+const DEPS_ALLOWED = new Set(["channels"]);
 
 /** 读取并校验 manifest；不合法返回 null（调用方跳过并留痕日志） */
 export function readManifest(dir: string): PluginManifest | null {
@@ -18,6 +19,8 @@ export function readManifest(dir: string): PluginManifest | null {
     if (typeof raw.description !== "string" || !raw.description) return null;
     if (typeof raw.author !== "string" || !raw.author) return null;
     if (typeof raw.entry !== "string" || !raw.entry) return null;
+    // entry 必须是目录内的裸文件名，拒绝 ../ 或子目录穿越
+    if (path.basename(raw.entry) !== raw.entry) return null;
     if (!existsSync(path.join(dir, raw.entry))) return null;
     return {
       id: raw.id,
@@ -27,7 +30,9 @@ export function readManifest(dir: string): PluginManifest | null {
       author: raw.author,
       entry: raw.entry,
       defaultEnabled: raw.defaultEnabled !== false,
-      deps: raw.deps,
+      deps: Array.isArray(raw.deps)
+        ? raw.deps.filter((d): d is "channels" => typeof d === "string" && DEPS_ALLOWED.has(d))
+        : undefined,
     };
   } catch {
     return null;

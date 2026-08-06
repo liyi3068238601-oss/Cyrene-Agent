@@ -53,6 +53,21 @@ describe("readManifest", () => {
     const dir = fixture("empty", { "readme.txt": "x" });
     expect(readManifest(dir)).toBeNull();
   });
+
+  it("拒绝带路径的 entry（防目录穿越）", () => {
+    const dir = fixture("bad-entry-path", {
+      "manifest.json": JSON.stringify({ ...validManifest, entry: "sub/index.js" }),
+    });
+    expect(readManifest(dir)).toBeNull();
+  });
+
+  it("非法 deps 值被过滤，仅保留白名单项", () => {
+    const dir = fixture("bad-deps", {
+      "manifest.json": JSON.stringify({ ...validManifest, deps: ["channels", "nope"] }),
+      "index.cjs": `module.exports = { register() {} };`,
+    });
+    expect(readManifest(dir)?.deps).toEqual(["channels"]);
+  });
 });
 
 describe("scanPluginDir", () => {

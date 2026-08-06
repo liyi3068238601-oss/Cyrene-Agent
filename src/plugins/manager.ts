@@ -1,4 +1,5 @@
 import path from "node:path";
+import { IPC } from "../shared/ipc-channels";
 import { createContext, type PluginRuntime } from "./context";
 import { loadPlugin, scanPluginDir } from "./loader";
 import type { CyrenePlugin, PluginContext, PluginRecord } from "./types";
@@ -26,9 +27,6 @@ export interface PluginManagerOptions {
   /** 列表/开关变化后回调（设置面板刷新用，可空） */
   onListChanged?: () => void;
 }
-
-const IPC_LIST = "plugins:list";
-const IPC_SET_ENABLED = "plugins:set-enabled";
 
 type DisposableContext = PluginContext & { dispose(): void };
 
@@ -78,9 +76,12 @@ export class PluginManager {
         console.error(`[plugins] 插件 ${id} 启用失败，跳过`, err);
       }
     }
-    this.opts.runtime.registerIpc(IPC_LIST, () => this.list());
-    this.opts.runtime.registerIpc(IPC_SET_ENABLED, async (id: unknown, enabled: unknown) => {
-      return this.setEnabled(String(id), Boolean(enabled));
+    this.opts.runtime.registerIpc(IPC.PLUGINS_LIST, () => this.list());
+    this.opts.runtime.registerIpc(IPC.PLUGINS_SET_ENABLED, async (id: unknown, enabled: unknown) => {
+      if (typeof enabled !== "boolean") {
+        return { ok: false, error: "enabled 必须是布尔值" };
+      }
+      return this.setEnabled(String(id), enabled);
     });
     this.opts.onListChanged?.();
   }
@@ -109,14 +110,28 @@ export class PluginManager {
     for (const id of Array.from(this.instances.keys())) {
       await this.deactivate(id);
     }
+    this.opts.runtime.unregisterIpc(IPC.PLUGINS_LIST);
+    this.opts.runtime.unregisterIpc(IPC.PLUGINS_SET_ENABLED);
+    this.records.clear();
   }
 
   private async activate(id: string): Promise<void> {
     const record = this.records.get(id);
     if (!record || this.instances.has(id)) return;
     const plugin = await loadPlugin(record);
-    const ctx = createContext(id, path.join(this.opts.storageRoot, id), this.opts.runtime);
-    await plugin.register(ctx);
+    const ctx = createContext(
+      id,
+      path.join(this.opts.storageRoot, id),
+      this.opts.runtime,
+      record.manifest.deps,
+    );
+    try {
+      await plugin.register(ctx);
+    } catch (err) {
+      // register 抛错时立即释放已注册资源，避免泄漏
+      ctx.dispose();
+      throw err;
+    }
     this.instances.set(id, plugin);
     this.contexts.set(id, ctx);
     console.log(`[plugins] 已启用 ${id}@${record.manifest.version}`);
@@ -124,10 +139,14 @@ export class PluginManager {
 
   private async deactivate(id: string): Promise<void> {
     const plugin = this.instances.get(id);
-    if (plugin?.unregister) await plugin.unregister();
-    this.contexts.get(id)?.dispose();
-    this.instances.delete(id);
-    this.contexts.delete(id);
+    try {
+      if (plugin?.unregister) await plugin.unregister();
+    } finally {
+      // unregister 抛错也不能跳过清理与状态更新，避免“半卸载”悬挂
+      this.contexts.get(id)?.dispose();
+      this.instances.delete(id);
+      this.contexts.delete(id);
+    }
     console.log(`[plugins] 已禁用 ${id}`);
   }
 }

@@ -5,5 +5,5 @@
   "description": "插件系统演示：注册一个工具与一个 IPC 通道",
   "author": "liyi",
   "entry": "index.js",
-  "defaultEnabled": true
+  "defaultEnabled": false
 }
