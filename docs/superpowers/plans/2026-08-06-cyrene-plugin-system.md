@@ -420,7 +420,19 @@ export function scanPluginDir(root: string): PluginRecord[] {
 /** 动态加载插件入口（.cjs/.js/.mjs 均可），归一化 default/named export */
 export async function loadPlugin(record: PluginRecord): Promise<CyrenePlugin> {
   const entry = path.join(record.dir, record.manifest.entry);
-  const mod = (await import(pathToFileURL(entry).href)) as Record<string, unknown>;
+  const ext = path.extname(entry).toLowerCase();
+  let mod: Record<string, unknown>;
+  if (ext === ".mjs") {
+    // commonjs 编译会把 import() 改写为 require()，require 无法加载 file:// URL，
+    // 因此 ESM 入口经运行时 import 加载（new Function 避开 tsc 改写）。
+    const dynamicImport = new Function(
+      "specifier",
+      "return import(specifier)",
+    ) as (specifier: string) => Promise<Record<string, unknown>>;
+    mod = await dynamicImport(pathToFileURL(entry).href);
+  } else {
+    mod = require(entry) as Record<string, unknown>;
+  }
   const plugin = (mod.default ?? mod) as Partial<CyrenePlugin>;
   if (typeof plugin.register !== "function") {
     throw new Error(`插件 ${record.manifest.id} 入口未导出 register()`);
