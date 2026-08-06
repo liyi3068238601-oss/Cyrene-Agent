@@ -55,6 +55,7 @@
 | M5-S5 | 2026-08-06 | 复核审查 P1/P2 修复（资源泄漏/渠道双启动/deps 白名单/校验硬化/dist 产物） | 已完成 | a203e73, d8dec17 |
 | M5-S6 | 2026-08-06 | 审查文档修正（验收记录如实化/方案决策记录/规范同步） | 已完成 | 57c86d4 |
 | M5-S7 | 2026-08-06 | 复核审查建议完整入档（19 项 + 范围观察，含采纳/处置/施工记录） | 已完成 | a115c04 |
+| M5-S8 | 2026-08-06 | 任务步骤全部勾选（81 个 - [x]），施工状态与复选框一致 | 已完成 | 待回填 |
 
 ---
 
@@ -207,21 +208,21 @@ module.exports = {
 **Interfaces:**
 - Produces: 施工日志表与提交约定，供全部后续任务使用。
 
-- [ ] **Step 1: 确认分支**
+- [x] **Step 1: 确认分支**
 
 ```bash
 git branch --show-current
 ```
 Expected: `liyi-Cyrene-v2`
 
-- [ ] **Step 2: 提交计划文档**
+- [x] **Step 2: 提交计划文档**
 
 ```bash
 git add docs/superpowers/plans/2026-08-06-cyrene-plugin-system.md
 git commit -m "M0-S1 docs(plugins): 插件系统实施计划（插件文件导入即用）"
 ```
 
-- [ ] **Step 3: 回填施工日志（M0-S1 行：状态=已完成，commit=上一步 hash），并提交日志更新**
+- [x] **Step 3: 回填施工日志（M0-S1 行：状态=已完成，commit=上一步 hash），并提交日志更新**
 
 ```bash
 git add docs/superpowers/plans/2026-08-06-cyrene-plugin-system.md
@@ -239,21 +240,21 @@ git commit -m "M0-S1 docs(plugins): 施工日志回填 M0-S1"
 - Consumes: 上游 `0de38dd` + `npm ci` 后的依赖树。
 - Produces: 基线证据（测试与构建全绿），作为后续任务可随时回归的基准。
 
-- [ ] **Step 1: 跑全量测试**
+- [x] **Step 1: 跑全量测试**
 
 ```bash
 npm test
 ```
 Expected: vitest 全量 PASS，无失败。
 
-- [ ] **Step 2: 跑主进程构建**
+- [x] **Step 2: 跑主进程构建**
 
 ```bash
 npm run build:main
 ```
 Expected: tsc 无类型错误，dist/main 产物生成。
 
-- [ ] **Step 3: 记录结果到施工日志（M0-S2 行），提交**
+- [x] **Step 3: 记录结果到施工日志（M0-S2 行），提交**
 
 ```bash
 git add docs/superpowers/plans/2026-08-06-cyrene-plugin-system.md
@@ -273,7 +274,7 @@ git commit -m "M0-S2 docs(plugins): 基线验证通过（test/build:main 全绿�
 - Produces: `readManifest(dir): PluginManifest | null`、`scanPluginDir(root): PluginRecord[]`、`loadPlugin(record): Promise<CyrenePlugin>`。
 - Consumed by: M1-S4 `manager.ts`。
 
-- [ ] **Step 1: 写失败测试 `src/plugins/loader.test.ts`**
+- [x] **Step 1: 写失败测试 `src/plugins/loader.test.ts`**
 
 ```ts
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -362,16 +363,16 @@ describe("loadPlugin", () => {
 });
 ```
 
-- [ ] **Step 2: 运行测试，确认失败（模块不存在）**
+- [x] **Step 2: 运行测试，确认失败（模块不存在）**
 
 ```bash
 npx vitest run src/plugins/loader.test.ts
 ```
 Expected: FAIL，`Cannot find module './loader'`。
 
-- [ ] **Step 3: 实现 `src/plugins/types.ts`（完整代码见 §2.1）**
+- [x] **Step 3: 实现 `src/plugins/types.ts`（完整代码见 §2.1）**
 
-- [ ] **Step 4: 实现 `src/plugins/loader.ts`**
+- [x] **Step 4: 实现 `src/plugins/loader.ts`**
 
 ```ts
 import { existsSync, readFileSync, readdirSync } from "node:fs";
@@ -451,14 +452,14 @@ export async function loadPlugin(record: PluginRecord): Promise<CyrenePlugin> {
 }
 ```
 
-- [ ] **Step 5: 运行测试，确认通过**
+- [x] **Step 5: 运行测试，确认通过**
 
 ```bash
 npx vitest run src/plugins/loader.test.ts
 ```
 Expected: 7 个用例全 PASS。
 
-- [ ] **Step 6: 提交并回填施工日志（M1-S1）**
+- [x] **Step 6: 提交并回填施工日志（M1-S1）**
 
 ```bash
 git add src/plugins/types.ts src/plugins/loader.ts src/plugins/loader.test.ts
@@ -479,7 +480,7 @@ git commit -m "M1-S1 docs(plugins): 施工日志回填 M1-S1"
 - Produces: `createPluginStorage(rootDir): PluginStorage`。
 - Consumed by: M1-S3 `context.ts`。
 
-- [ ] **Step 1: 写失败测试 `src/plugins/storage.test.ts`**
+- [x] **Step 1: 写失败测试 `src/plugins/storage.test.ts`**
 
 ```ts
 import { mkdtempSync, rmSync } from "node:fs";
@@ -509,13 +510,13 @@ describe("createPluginStorage", () => {
 });
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 ```bash
 npx vitest run src/plugins/storage.test.ts
 ```
 
-- [ ] **Step 3: 实现 `src/plugins/storage.ts`**
+- [x] **Step 3: 实现 `src/plugins/storage.ts`**
 
 ```ts
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -544,14 +545,14 @@ export function createPluginStorage(rootDir: string): PluginStorage {
 }
 ```
 
-- [ ] **Step 4: 运行测试，确认通过**
+- [x] **Step 4: 运行测试，确认通过**
 
 ```bash
 npx vitest run src/plugins/storage.test.ts
 ```
 Expected: PASS。
 
-- [ ] **Step 5: 提交并回填施工日志（M1-S2）**
+- [x] **Step 5: 提交并回填施工日志（M1-S2）**
 
 ```bash
 git add src/plugins/storage.ts src/plugins/storage.test.ts
@@ -572,7 +573,7 @@ git commit -m "M1-S2 docs(plugins): 施工日志回填 M1-S2"
 - Consumes: M1-S1 `types.ts`、M1-S2 `storage.ts`。
 - Produces: `PluginRuntime` 结构、`createContext(id, storageRoot, runtime)`；ctx 的 `registerIpc` 自动加 `plugin:<id>:` 前缀；`dispose()` 统一清理已注册的工具/IPC/渠道。
 
-- [ ] **Step 1: 写失败测试 `src/plugins/context.test.ts`**
+- [x] **Step 1: 写失败测试 `src/plugins/context.test.ts`**
 
 ```ts
 import { mkdtempSync, rmSync } from "node:fs";
@@ -647,13 +648,13 @@ describe("createContext", () => {
 });
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 ```bash
 npx vitest run src/plugins/context.test.ts
 ```
 
-- [ ] **Step 3: 实现 `src/plugins/context.ts`**
+- [x] **Step 3: 实现 `src/plugins/context.ts`**
 
 ```ts
 import type { ChannelAdapter } from "../main/channels/adapters/base";
@@ -748,14 +749,14 @@ export function createContext(
 }
 ```
 
-- [ ] **Step 4: 运行测试，确认通过**
+- [x] **Step 4: 运行测试，确认通过**
 
 ```bash
 npx vitest run src/plugins/context.test.ts
 ```
 Expected: 3 个用例 PASS。
 
-- [ ] **Step 5: 提交并回填施工日志（M1-S3）**
+- [x] **Step 5: 提交并回填施工日志（M1-S3）**
 
 ```bash
 git add src/plugins/context.ts src/plugins/context.test.ts
@@ -777,7 +778,7 @@ git commit -m "M1-S3 docs(plugins): 施工日志回填 M1-S3"
 - Produces: `PluginManagerOptions`、`PluginListEntry`、`PluginManager`（`start()/stop()/list()/setEnabled()`）；IPC 通道 `plugins:list` / `plugins:set-enabled`。
 - Consumed by: M2-S3 `src/main/index.ts` 挂载。
 
-- [ ] **Step 1: 写失败测试 `src/plugins/manager.test.ts`**
+- [x] **Step 1: 写失败测试 `src/plugins/manager.test.ts`**
 
 ```ts
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -915,13 +916,13 @@ describe("PluginManager", () => {
 });
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 ```bash
 npx vitest run src/plugins/manager.test.ts
 ```
 
-- [ ] **Step 3: 实现 `src/plugins/manager.ts`**
+- [x] **Step 3: 实现 `src/plugins/manager.ts`**
 
 ```ts
 import path from "node:path";
@@ -1059,14 +1060,14 @@ export class PluginManager {
 }
 ```
 
-- [ ] **Step 4: 运行测试，确认通过**
+- [x] **Step 4: 运行测试，确认通过**
 
 ```bash
 npx vitest run src/plugins/manager.test.ts
 ```
 Expected: 5 个用例 PASS。
 
-- [ ] **Step 5: 提交并回填施工日志（M1-S4）**
+- [x] **Step 5: 提交并回填施工日志（M1-S4）**
 
 ```bash
 git add src/plugins/manager.ts src/plugins/manager.test.ts
@@ -1088,7 +1089,7 @@ git commit -m "M1-S4 docs(plugins): 施工日志回填 M1-S4"
 **Interfaces:**
 - Produces: `IPC.PLUGINS_LIST` / `IPC.PLUGINS_SET_ENABLED` 常量；`src/plugins/**/*.ts` 参与 tsc 与 vitest；`dist/main/plugins/**/manifest.json` 随构建拷贝。
 
-- [ ] **Step 1: 追加 IPC 常量（`src/shared/ipc-channels.ts`，`export const IPC = {` 内末尾）**
+- [x] **Step 1: 追加 IPC 常量（`src/shared/ipc-channels.ts`，`export const IPC = {` 内末尾）**
 
 ```ts
   // plugin system
@@ -1096,13 +1097,13 @@ git commit -m "M1-S4 docs(plugins): 施工日志回填 M1-S4"
   PLUGINS_SET_ENABLED: "plugins:set-enabled",
 ```
 
-- [ ] **Step 2: `tsconfig.main.json` include 追加 `src/plugins/**/*.ts`**
+- [x] **Step 2: `tsconfig.main.json` include 追加 `src/plugins/**/*.ts`**
 
 ```json
 "include": ["src/plugins/**/*.ts", "src/main/**/*.ts", "src/shared/**/*.ts"]
 ```
 
-- [ ] **Step 3: `vitest.config.ts` include 追加 `src/plugins/**/*.test.ts`**
+- [x] **Step 3: `vitest.config.ts` include 追加 `src/plugins/**/*.test.ts`**
 
 ```ts
 include: [
@@ -1116,20 +1117,20 @@ include: [
 ]
 ```
 
-- [ ] **Step 4: `package.json` 的 build:main 追加 manifest 拷贝（保留原有 cline bridge 拷贝）**
+- [x] **Step 4: `package.json` 的 build:main 追加 manifest 拷贝（保留原有 cline bridge 拷贝）**
 
 ```json
 "build:main": "tsc -p tsconfig.main.json && node -e \"require('fs').cpSync('src/main/orchestrator/code/cline-esm-bridge.mjs','dist/main/main/orchestrator/code/cline-esm-bridge.mjs')\" && node -e \"const fs=require('fs');fs.cpSync('src/plugins','dist/main/plugins',{recursive:true,filter:s=>fs.statSync(s).isDirectory()||s.endsWith('manifest.json')})\""
 ```
 
-- [ ] **Step 5: 验证构建配置**
+- [x] **Step 5: 验证构建配置**
 
 ```bash
 npm run build:main
 ```
 Expected: tsc 通过，`dist/main/plugins/` 生成（此时无 manifest 也会生成空骨架目录），无报错。
 
-- [ ] **Step 6: 提交并回填施工日志（M2-S1）**
+- [x] **Step 6: 提交并回填施工日志（M2-S1）**
 
 ```bash
 git add src/shared/ipc-channels.ts tsconfig.main.json vitest.config.ts package.json package-lock.json
@@ -1148,20 +1149,20 @@ git commit -m "M2-S1 docs(plugins): 施工日志回填 M2-S1"
 **Interfaces:**
 - Produces: `GeneralSettings.plugins: Record<string, boolean>`，默认 `{}`，读写走现有 `loadGeneralSettings/saveGeneralSettings`（`app-settings.json`）。
 
-- [ ] **Step 1: `interface GeneralSettings`（index.ts @680）追加字段**
+- [x] **Step 1: `interface GeneralSettings`（index.ts @680）追加字段**
 
 ```ts
   /** 插件开关表：pluginId -> enabled */
   plugins: Record<string, boolean>;
 ```
 
-- [ ] **Step 2: 默认值对象（`petVisible: true` 附近 @~946）追加**
+- [x] **Step 2: 默认值对象（`petVisible: true` 附近 @~946）追加**
 
 ```ts
   plugins: {},
 ```
 
-- [ ] **Step 3: 新增归一化函数（放在 `loadGeneralSettings0` 之前）并接入 load 逻辑**
+- [x] **Step 3: 新增归一化函数（放在 `loadGeneralSettings0` 之前）并接入 load 逻辑**
 
 ```ts
 function normalizePluginsEnabled(value: unknown): Record<string, boolean> {
@@ -1186,14 +1187,14 @@ function normalizePluginsEnabled(value: unknown): Record<string, boolean> {
     plugins,
 ```
 
-- [ ] **Step 4: 验证**
+- [x] **Step 4: 验证**
 
 ```bash
 npm run build:main
 ```
 Expected: tsc 通过。
 
-- [ ] **Step 5: 提交并回填施工日志（M2-S2）**
+- [x] **Step 5: 提交并回填施工日志（M2-S2）**
 
 ```bash
 git add src/main/index.ts
@@ -1213,19 +1214,19 @@ git commit -m "M2-S2 docs(plugins): 施工日志回填 M2-S2"
 - Consumes: M1-S4 `PluginManager`、M2-S1 常量、M2-S2 `GeneralSettings.plugins`。
 - Produces: 应用启动即加载插件；退出前 `pluginManager.stop()`。
 
-- [ ] **Step 1: 顶部 import 追加**
+- [x] **Step 1: 顶部 import 追加**
 
 ```ts
 import { PluginManager } from "../plugins/manager";
 ```
 
-- [ ] **Step 2: 模块级变量（`let mainWindow` 声明区附近）**
+- [x] **Step 2: 模块级变量（`let mainWindow` 声明区附近）**
 
 ```ts
 let pluginManager: PluginManager | null = null;
 ```
 
-- [ ] **Step 3: whenReady 流程中 `initSkills()` 之后、`initChannels()` 之前插入**
+- [x] **Step 3: whenReady 流程中 `initSkills()` 之后、`initChannels()` 之前插入**
 
 ```ts
     pluginManager = new PluginManager({
@@ -1255,20 +1256,20 @@ let pluginManager: PluginManager | null = null;
 
 > 注意：确认 `toolRegistry` 与 `channelManager` 单例已在 index.ts 可访问（`tool-registry.ts` 导出 `toolRegistry`，`channels/manager.ts` 导出 `channelManager`；若 index.ts 未 import 则补 import）。
 
-- [ ] **Step 4: before-quit 处追加（若已有 `app.on("before-quit")` 则在其中追加一行）**
+- [x] **Step 4: before-quit 处追加（若已有 `app.on("before-quit")` 则在其中追加一行）**
 
 ```ts
     void pluginManager?.stop();
 ```
 
-- [ ] **Step 5: 验证**
+- [x] **Step 5: 验证**
 
 ```bash
 npm run build:main
 ```
 Expected: tsc 通过，无类型错误。
 
-- [ ] **Step 6: 提交并回填施工日志（M2-S3）**
+- [x] **Step 6: 提交并回填施工日志（M2-S3）**
 
 ```bash
 git add src/main/index.ts
@@ -1289,7 +1290,7 @@ git commit -m "M2-S3 docs(plugins): 施工日志回填 M2-S3"
 - Produces: `window.plugins.list(): Promise<PluginListEntry[]>`、`window.plugins.setEnabled(id, enabled): Promise<{ok, error?}>`。
 - Consumed by: M3-S2 设置面板。
 
-- [ ] **Step 1: preload 新增 pluginsApi**
+- [x] **Step 1: preload 新增 pluginsApi**
 
 ```ts
 const pluginsApi = {
@@ -1299,13 +1300,13 @@ const pluginsApi = {
 };
 ```
 
-- [ ] **Step 2: preload 暴露（settingsApi 的 expose 附近）**
+- [x] **Step 2: preload 暴露（settingsApi 的 expose 附近）**
 
 ```ts
 contextBridge.exposeInMainWorld("plugins", pluginsApi);
 ```
 
-- [ ] **Step 3: settings.ts `interface Window`（@521）追加类型**
+- [x] **Step 3: settings.ts `interface Window`（@521）追加类型**
 
 ```ts
     plugins: {
@@ -1326,14 +1327,14 @@ contextBridge.exposeInMainWorld("plugins", pluginsApi);
     };
 ```
 
-- [ ] **Step 4: 验证**
+- [x] **Step 4: 验证**
 
 ```bash
 npm run build:main && npm run build:renderer
 ```
 Expected: 均通过。
 
-- [ ] **Step 5: 提交并回填施工日志（M2-S4）**
+- [x] **Step 5: 提交并回填施工日志（M2-S4）**
 
 ```bash
 git add src/preload/index.ts src/renderer/settings/settings.ts
@@ -1352,13 +1353,13 @@ git commit -m "M2-S4 docs(plugins): 施工日志回填 M2-S4"
 **Interfaces:**
 - Produces: `data-section="feature-plugins"` 导航项 + `<section id="feature-plugins-panel" hidden>` 容器 `<div id="feature-plugins-list">`。
 
-- [ ] **Step 1: 导航区（`data-section="plugins"` 按钮之后）追加**
+- [x] **Step 1: 导航区（`data-section="plugins"` 按钮之后）追加**
 
 ```html
 <button type="button" class="nav-item" data-section="feature-plugins"><span><svg class="nav-item__icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span>功能插件</button>
 ```
 
-- [ ] **Step 2: 在 MCP 插件区块（`plugins-panel`）之后追加区块**
+- [x] **Step 2: 在 MCP 插件区块（`plugins-panel`）之后追加区块**
 
 ```html
 <section class="settings-section" id="feature-plugins-panel" hidden>
@@ -1372,7 +1373,7 @@ git commit -m "M2-S4 docs(plugins): 施工日志回填 M2-S4"
 
 > 区块外层结构若与现有 section 包装不同，以 `plugins-panel` 所在父容器结构为准调整 class。
 
-- [ ] **Step 3: 提交并回填施工日志（M3-S1）**
+- [x] **Step 3: 提交并回填施工日志（M3-S1）**
 
 ```bash
 git add src/renderer/settings/index.html
@@ -1392,7 +1393,7 @@ git commit -m "M3-S1 docs(plugins): 施工日志回填 M3-S1"
 - Consumes: M2-S4 `window.plugins`、M3-S1 区块。
 - Produces: 面板打开时渲染插件卡片（名称/版本/描述/作者/开关/打开按钮预留），开关失败回滚。
 
-- [ ] **Step 1: NAV_LABELS（@926）追加**
+- [x] **Step 1: NAV_LABELS（@926）追加**
 
 ```ts
   "feature-plugins": {
@@ -1402,14 +1403,14 @@ git commit -m "M3-S1 docs(plugins): 施工日志回填 M3-S1"
   },
 ```
 
-- [ ] **Step 2: 面板元素引用（`pluginsPanel` 引用附近）**
+- [x] **Step 2: 面板元素引用（`pluginsPanel` 引用附近）**
 
 ```ts
 const featurePluginsPanel = document.getElementById("feature-plugins-panel") as HTMLElement;
 const featurePluginsList = document.getElementById("feature-plugins-list") as HTMLElement;
 ```
 
-- [ ] **Step 3: 新增渲染函数（放在其他 render 函数附近）**
+- [x] **Step 3: 新增渲染函数（放在其他 render 函数附近）**
 
 ```ts
 async function renderFeaturePlugins(): Promise<void> {
@@ -1443,7 +1444,7 @@ async function renderFeaturePlugins(): Promise<void> {
 }
 ```
 
-- [ ] **Step 4: 挂载渲染触发（导航点击/切换 section 的统一处理处 @~3397，与其它面板同位置）**
+- [x] **Step 4: 挂载渲染触发（导航点击/切换 section 的统一处理处 @~3397，与其它面板同位置）**
 
 ```ts
   if (section === "feature-plugins") {
@@ -1451,14 +1452,14 @@ async function renderFeaturePlugins(): Promise<void> {
   }
 ```
 
-- [ ] **Step 5: 验证**
+- [x] **Step 5: 验证**
 
 ```bash
 npm run build:renderer
 ```
 Expected: vite 构建通过。
 
-- [ ] **Step 6: 提交并回填施工日志（M3-S2）**
+- [x] **Step 6: 提交并回填施工日志（M3-S2）**
 
 ```bash
 git add src/renderer/settings/settings.ts
@@ -1479,7 +1480,7 @@ git commit -m "M3-S2 docs(plugins): 施工日志回填 M3-S2"
 - Produces: `channelManager.unregister(id): Promise<boolean>`（停用并移除）、`channelManager.startOne(id): Promise<void>`（运行时启用单个渠道）。
 - Consumed by: M1-S3 `context.ts` 的渠道注册/注销。
 
-- [ ] **Step 1: 写失败测试 `src/main/channels/manager.test.ts`**
+- [x] **Step 1: 写失败测试 `src/main/channels/manager.test.ts`**
 
 ```ts
 import { describe, expect, it } from "vitest";
@@ -1526,13 +1527,13 @@ describe("ChannelManager", () => {
 });
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 ```bash
 npx vitest run src/main/channels/manager.test.ts
 ```
 
-- [ ] **Step 3: 实现（`startAll` 之后追加两个方法）**
+- [x] **Step 3: 实现（`startAll` 之后追加两个方法）**
 
 ```ts
   /** 注销 adapter：若已启动先 stop，再移除（运行时禁用插件渠道用） */
@@ -1565,14 +1566,14 @@ npx vitest run src/main/channels/manager.test.ts
   }
 ```
 
-- [ ] **Step 4: 运行测试，确认通过**
+- [x] **Step 4: 运行测试，确认通过**
 
 ```bash
 npx vitest run src/main/channels/manager.test.ts
 ```
 Expected: 2 个用例 PASS。
 
-- [ ] **Step 5: 提交并回填施工日志（M4-S1）**
+- [x] **Step 5: 提交并回填施工日志（M4-S1）**
 
 ```bash
 git add src/main/channels/manager.ts src/main/channels/manager.test.ts
@@ -1593,7 +1594,7 @@ git commit -m "M4-S1 docs(plugins): 施工日志回填 M4-S1"
 - Consumes: M1-S1 契约。
 - Produces: 内置插件 `demo`（注册工具 `demo_hello` + IPC `plugin:demo:ping`），用于验证构建产物被 PluginManager 正常加载。
 
-- [ ] **Step 1: 写 manifest（`src/plugins/demo/manifest.json`）**
+- [x] **Step 1: 写 manifest（`src/plugins/demo/manifest.json`）**
 
 ```json
 {
@@ -1607,7 +1608,7 @@ git commit -m "M4-S1 docs(plugins): 施工日志回填 M4-S1"
 }
 ```
 
-- [ ] **Step 2: 写入口（`src/plugins/demo/index.ts`）**
+- [x] **Step 2: 写入口（`src/plugins/demo/index.ts`）**
 
 ```ts
 import type { CyrenePlugin } from "../types";
@@ -1633,14 +1634,14 @@ export const demoPlugin: CyrenePlugin = {
 export default demoPlugin;
 ```
 
-- [ ] **Step 3: 构建并核对产物**
+- [x] **Step 3: 构建并核对产物**
 
 ```bash
 npm run build:main
 ```
 Expected: `dist/main/plugins/demo/index.js` 与 `dist/main/plugins/demo/manifest.json` 均存在。
 
-- [ ] **Step 4: 提交并回填施工日志（M4-S2）**
+- [x] **Step 4: 提交并回填施工日志（M4-S2）**
 
 ```bash
 git add src/plugins/demo/manifest.json src/plugins/demo/index.ts
@@ -1661,7 +1662,7 @@ git commit -m "M4-S2 docs(plugins): 施工日志回填 M4-S2"
 - Consumes: M1-M2 全部框架 + M3 设置面板。
 - Produces: 「放文件即用」端到端证据：`plugins:list` 出现 demo-dropin，启用后工具/IPC 生效。
 
-- [ ] **Step 1: 创建 drop-in 插件文件（`%APPDATA%/live2d-cyrene/plugins/demo-dropin/`）**
+- [x] **Step 1: 创建 drop-in 插件文件（`%APPDATA%/live2d-cyrene/plugins/demo-dropin/`）**
 
 `manifest.json`：
 
@@ -1700,7 +1701,7 @@ module.exports = {
 };
 ```
 
-- [ ] **Step 2: 启动应用做端到端验证**
+- [x] **Step 2: 启动应用做端到端验证**
 
 ```bash
 npm run build && node dist/cli/index.js run
@@ -1712,7 +1713,7 @@ Expected:
 - 切换开关可启用/停用，UI 状态随动；
 - （可选）在聊天中调用工具 `demo_dropin_echo` 验证 LLM 侧可见。
 
-- [ ] **Step 3: 提交并回填施工日志（M4-S3）**
+- [x] **Step 3: 提交并回填施工日志（M4-S3）**
 
 ```bash
 git add docs/superpowers/plans/2026-08-06-cyrene-plugin-system.md
@@ -1729,9 +1730,9 @@ git commit -m "M4-S3 docs(plugins): drop-in 插件端到端验证通过"
 **Interfaces:**
 - Produces: 第三方插件作者文档（manifest 字段、入口约定、ctx API、示例）。
 
-- [ ] **Step 1: 编写 `docs/plugins/plugin-authoring.md`**（内容：§2 契约、目录结构、CJS/ESM 两种写法示例、可用能力清单 Tool/IPC/Channel、安全边界声明）
+- [x] **Step 1: 编写 `docs/plugins/plugin-authoring.md`**（内容：§2 契约、目录结构、CJS/ESM 两种写法示例、可用能力清单 Tool/IPC/Channel、安全边界声明）
 
-- [ ] **Step 2: 提交并回填施工日志（M5-S1）**
+- [x] **Step 2: 提交并回填施工日志（M5-S1）**
 
 ```bash
 git add docs/plugins/plugin-authoring.md
@@ -1747,21 +1748,21 @@ git commit -m "M5-S1 docs(plugins): 施工日志回填 M5-S1"
 **Files:**
 - 无新增文件。
 
-- [ ] **Step 1: 全量测试**
+- [x] **Step 1: 全量测试**
 
 ```bash
 npm test
 ```
 Expected: 全部 PASS（含新增 src/plugins 与 channels 测试）。
 
-- [ ] **Step 2: 全量构建**
+- [x] **Step 2: 全量构建**
 
 ```bash
 npm run build
 ```
 Expected: skills/main/preload/cli/renderer 全绿。
 
-- [ ] **Step 3: 提交并回填施工日志（M5-S2）**
+- [x] **Step 3: 提交并回填施工日志（M5-S2）**
 
 ```bash
 git add docs/superpowers/plans/2026-08-06-cyrene-plugin-system.md
@@ -1775,14 +1776,14 @@ git commit -m "M5-S2 docs(plugins): 全量回归通过（test/build 全绿）"
 **Files:**
 - 无代码改动。
 
-- [ ] **Step 1: 拉取上游最新并对比基线**
+- [x] **Step 1: 拉取上游最新并对比基线**
 
 ```bash
 git fetch origin
 git merge-base --is-ancestor origin/master HEAD && echo "master 是当前分支祖先（可安全合并）"
 ```
 
-- [ ] **Step 2: 核对冲突面收敛清单**（以下文件允许与上游冲突，其余上游文件不应出现冲突）
+- [x] **Step 2: 核对冲突面收敛清单**（以下文件允许与上游冲突，其余上游文件不应出现冲突）
 
 ```text
 src/main/index.ts
@@ -1795,7 +1796,7 @@ vitest.config.ts
 package.json
 ```
 
-- [ ] **Step 3: 提交并回填施工日志（M5-S3）**
+- [x] **Step 3: 提交并回填施工日志（M5-S3）**
 
 ```bash
 git add docs/superpowers/plans/2026-08-06-cyrene-plugin-system.md
@@ -1809,9 +1810,9 @@ git commit -m "M5-S3 docs(plugins): 上游合并演练完成，冲突面收敛�
 **Files:**
 - Modify: 本文档（全部施工日志行回填完成）
 
-- [ ] **Step 1: 核对施工日志表**——每个 M0-M5 步骤都有「已完成」状态与 commit hash，且 hash 与 `git log --oneline` 一一对应。
+- [x] **Step 1: 核对施工日志表**——每个 M0-M5 步骤都有「已完成」状态与 commit hash，且 hash 与 `git log --oneline` 一一对应。
 
-- [ ] **Step 2: 风险核对**
+- [x] **Step 2: 风险核对**
 
 ```text
 [ ] userData/plugins 插件在主进程执行任意代码——文档已声明信任边界，插件目录仅限本机 user
@@ -1820,7 +1821,7 @@ git commit -m "M5-S3 docs(plugins): 上游合并演练完成，冲突面收敛�
 [ ] 上游文件改动收敛——M5-S3 已核对清单
 ```
 
-- [ ] **Step 3: 最终提交**
+- [x] **Step 3: 最终提交**
 
 ```bash
 git add docs/superpowers/plans/2026-08-06-cyrene-plugin-system.md
