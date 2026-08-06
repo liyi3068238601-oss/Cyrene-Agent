@@ -41,7 +41,7 @@
 | M4-S1 | - | ChannelManager 追加 unregister/startOne + 单测 | 待执行 | - |
 | M4-S2 | - | 内置 TS 演示插件 src/plugins/demo/ | 待执行 | - |
 | M4-S3 | - | drop-in JS 插件端到端验证（放文件即用） | 待执行 | - |
-| M5-S1 | - | docs/plugins/plugin-authoring.md 编写 | 待执行 | - |
+| M5-S1 | 2026-08-06 | docs/plugins/plugin-authoring.md 编写（提前完成） | 已完成 | 4c93439 |
 | M5-S2 | - | 全量回归 npm test + npm run build | 待执行 | - |
 | M5-S3 | - | 上游合并演练与冲突面收敛核对 | 待执行 | - |
 | M5-S4 | - | 施工日志完结 + 风险清单核对 | 待执行 | - |
