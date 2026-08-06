@@ -13,7 +13,7 @@
 - 分支：所有施工与提交只在本地分支 `liyi-Cyrene-v2` 上进行；不推送远端（除非用户另行要求）。
 - 提交规范：每个步骤结束后立即本地提交，message 以 `M<里程碑>-S<步骤>` 开头，例如 `M1-S4 feat(plugins): PluginManager 启停与开关持久化`。
 - 施工痕迹：本文档顶部「施工日志」必须随每个步骤更新（时间 / 状态 / commit hash），日志更新以独立 `docs` 提交落库，保证痕迹在文档与 git 历史中同时可见。
-- 上游文件改动收敛清单（除下列文件外，不改动任何上游文件）：`src/main/index.ts`（挂载行）、`src/shared/ipc-channels.ts`（追加 2 个常量）、`src/renderer/settings/index.html`（新增导航项与区块）、`src/renderer/settings/settings.ts`（导航标签与渲染逻辑）、`src/main/channels/manager.ts`（追加 unregister/startOne）、`tsconfig.main.json`（include 追加）、`vitest.config.ts`（include 追加）、`package.json`（build:main 追加 manifest 拷贝）。
+- 上游文件改动收敛清单（除下列文件外，不改动任何上游文件）：`src/main/index.ts`（挂载行）、`src/shared/ipc-channels.ts`（追加 2 个常量）、`src/renderer/settings/index.html`（新增导航项与区块）、`src/renderer/settings/settings.ts`（导航标签与渲染逻辑）、`src/main/channels/manager.ts`（追加 unregister/startOne）、`tsconfig.main.json`（include 追加）、`vitest.config.ts`（include 追加）、`package.json`（build:main 追加 manifest 拷贝）、`vite.config.ts`（renderer 页面插件追加入口——由 NovelAI 插件计划扩展，见 2026-08-06-novelai-plugin.md）。
 - 测试：TDD，功能先写失败测试再实现；测试用 Vitest（node 环境），`npm test` 全量通过；`npm run build` 全绿。
 - 依赖：不新增任何运行时/开发依赖；Node >=24 <25。
 - 插件安全边界：`userData/plugins/` 中的插件在主进程执行任意代码，视为完全信任；文档在 M5 明确风险。
