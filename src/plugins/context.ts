@@ -1,7 +1,13 @@
 import type { ChannelAdapter } from "../main/channels/adapters/base";
 import type { ToolDefinition } from "../main/orchestrator/tool-registry";
 import { createPluginStorage } from "./storage";
-import type { ChannelManagerLike, PluginContext, PluginDeps, PluginManifest } from "./types";
+import type {
+  ChannelManagerLike,
+  LlmDeps,
+  PluginContext,
+  PluginDeps,
+  PluginManifest,
+} from "./types";
 
 export interface PluginRuntime {
   toolRegistry: {
@@ -17,6 +23,7 @@ export interface PluginRuntime {
     on(evt: "before-quit", cb: () => void): void;
     off?(evt: "before-quit", cb: () => void): void;
   };
+  llm?: LlmDeps;
 }
 
 interface DisposableContext extends PluginContext {
@@ -39,6 +46,9 @@ export function createContext(
   const deps: PluginDeps = {};
   if (declaredDeps?.includes("channels")) {
     deps.channels = { channelManager: runtime.channelManager };
+  }
+  if (declaredDeps?.includes("llm") && runtime.llm) {
+    deps.llm = runtime.llm;
   }
 
   const ctx: PluginContext = {

@@ -5,7 +5,7 @@ import type { CyrenePlugin, PluginManifest, PluginRecord } from "./types";
 
 const MANIFEST_FILE = "manifest.json";
 const ID_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
-const DEPS_ALLOWED = new Set(["channels"]);
+const DEPS_ALLOWED = new Set(["channels", "llm"]);
 
 /** 读取并校验 manifest；不合法返回 null（调用方跳过并留痕日志） */
 export function readManifest(dir: string): PluginManifest | null {
@@ -31,7 +31,10 @@ export function readManifest(dir: string): PluginManifest | null {
       entry: raw.entry,
       defaultEnabled: raw.defaultEnabled !== false,
       deps: Array.isArray(raw.deps)
-        ? raw.deps.filter((d): d is "channels" => typeof d === "string" && DEPS_ALLOWED.has(d))
+        ? raw.deps.filter(
+            (d): d is "channels" | "llm" =>
+              typeof d === "string" && DEPS_ALLOWED.has(d),
+          )
         : undefined,
     };
   } catch {

@@ -13,8 +13,8 @@ export interface PluginManifest {
   /** 相对插件目录的入口文件，如 "index.cjs" / "index.mjs" / "index.js" */
   entry: string;
   defaultEnabled: boolean;
-  /** 需要注入的主程序内部依赖白名单（v1 仅 "channels"） */
-  deps?: Array<"channels">;
+  /** 需要注入的主程序内部依赖白名单 */
+  deps?: Array<"channels" | "llm">;
 }
 
 /** ChannelManager 的结构子集：运行时注入用，插件只允许使用这些方法 */
@@ -26,6 +26,14 @@ export interface ChannelManagerLike {
 
 export interface PluginDeps {
   channels?: { channelManager: ChannelManagerLike };
+  llm?: LlmDeps;
+}
+
+export interface LlmDeps {
+  /** 用主聊天模型完成一次非流式文本请求 */
+  translateText(
+    messages: Array<{ role: "system" | "user"; content: string }>,
+  ): Promise<string>;
 }
 
 export interface PluginStorage {

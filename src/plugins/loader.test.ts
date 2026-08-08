@@ -63,10 +63,10 @@ describe("readManifest", () => {
 
   it("非法 deps 值被过滤，仅保留白名单项", () => {
     const dir = fixture("bad-deps", {
-      "manifest.json": JSON.stringify({ ...validManifest, deps: ["channels", "nope"] }),
+      "manifest.json": JSON.stringify({ ...validManifest, deps: ["channels", "llm", "nope"] }),
       "index.cjs": `module.exports = { register() {} };`,
     });
-    expect(readManifest(dir)?.deps).toEqual(["channels"]);
+    expect(readManifest(dir)?.deps).toEqual(["channels", "llm"]);
   });
 });
 

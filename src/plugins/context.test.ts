@@ -92,6 +92,28 @@ describe("createContext", () => {
     expect(withDeps.deps.channels?.channelManager).toBeDefined();
   });
 
+  it("只有 manifest 声明 llm 时才注入 translateText", async () => {
+    tmp = mkdtempSync(path.join(os.tmpdir(), "cyrene-ctx-test-"));
+    const rt = runtime();
+    const calls: string[] = [];
+    rt.llm = {
+      translateText: async (messages) => {
+        calls.push(messages.map((message) => message.content).join("|"));
+        return "翻译结果";
+      },
+    };
+
+    const without = createContext("demo", tmp, rt);
+    expect(without.deps.llm).toBeUndefined();
+
+    const withDeps = createContext("demo", tmp, rt, ["llm"]);
+    const result = await withDeps.deps.llm?.translateText([
+      { role: "user", content: "你好" },
+    ]);
+    expect(result).toBe("翻译结果");
+    expect(calls).toEqual(["你好"]);
+  });
+
   it("dispose 返回 Promise 并等待渠道注销完成", async () => {
     tmp = mkdtempSync(path.join(os.tmpdir(), "cyrene-ctx-test-"));
     const rt = runtime();
