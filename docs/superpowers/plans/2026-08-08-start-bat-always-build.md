@@ -138,10 +138,18 @@ Expected: 全量测试无失败；数量以实际输出为准。
 
 在原一键启动计划末尾追加“启动前自动构建改造”小节，记录 RED、GREEN、完整构建、NovelAI 产物、全量测试与实现提交 hash；同时勾选本计划全部步骤。
 
-- [ ] **Step 4: 提交文档并推送**
+- [x] **Step 4: 提交文档并推送**
 
 ```bash
 git add docs/superpowers/plans/2026-08-08-one-click-start-bat.md docs/superpowers/plans/2026-08-08-start-bat-always-build.md
 git commit -m "docs(startup): 记录启动前自动构建施工结果"
 git push fork liyi-Cyrene-v2
 ```
+
+## 执行记录
+
+- RED：旧 BAT 上 2 个断言按预期失败，分别证明旧流程仍检查历史 `dist`，且没有执行 `npm.cmd run build`。
+- GREEN：BAT 专项测试 4/4 通过；实现提交 `28d2995`。
+- 完整构建：exit 0，NovelAI 三个关键产物全部存在；本次隔离环境实测约 37 秒。
+- 全量回归：265 个测试文件通过、1 个跳过；2350 个测试通过、12 个跳过，0 失败。
+- 施工记录提交：`6aa4f2c`。
