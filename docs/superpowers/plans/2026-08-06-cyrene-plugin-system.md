@@ -56,6 +56,7 @@
 | M5-S6 | 2026-08-06 | 审查文档修正（验收记录如实化/方案决策记录/规范同步） | 已完成 | 57c86d4 |
 | M5-S7 | 2026-08-06 | 复核审查建议完整入档（19 项 + 范围观察，含采纳/处置/施工记录） | 已完成 | a115c04 |
 | M5-S8 | 2026-08-06 | 任务步骤全部勾选（81 个 - [x]），施工状态与复选框一致 | 已完成 | 6f747cc |
+| M5-S9 | 2026-08-08 | 修复插件运行状态误报与渠道异步卸载竞态 | 已完成 | 15a4de8 |
 
 ---
 
@@ -1898,6 +1899,17 @@ git commit -m "M5-S4 docs(plugins): 施工日志完结，插件系统 v1 交付"
 - 上游文件改动：全部落在收敛清单内（含 `vite.config.ts` 的 NovelAI 扩展说明）✅
 
 > **审查后勘误（M5-S6）**：`npm test` 的 0 failed 以「对 `%USERPROFILE%\.cline\data` 可写」为前提；在受限环境（如沙箱只读）下，`scripts/cline-poc/poc2-session-reconstruction.test.ts` 两例会以 `readonly database` 失败（对应 2311 passed / 2 failed），该文件相对 `origin/master` 零改动，属既有环境依赖，非本分支回归。审查修复后实测：2318 passed / 12 skipped / 0 failed（完整权限）。
+
+### M5-S9 跟进修复记录（2026-08-08）
+
+- 根因 1：`PluginManager.list()` 从持久化开关读取 `enabled`，插件实际启动失败后仍会向设置页报告“已启用”；`setEnabled()` 也会因为配置值已经是 `true` 而跳过重试。
+- 修复 1：`instances` 成为实际运行状态来源；启动失败显示停用，再次启用会重新执行 `activate()`。
+- 根因 2：`PluginContext.dispose()` 丢弃 `channelManager.unregister()` 的 Promise，禁用操作可能在渠道停止完成前返回。
+- 修复 2：`dispose()` 改为 `Promise<void>`；注册失败回滚、禁用和 manager stop 路径全部等待渠道注销完成。
+- TDD RED：新增测试在旧实现上分别得到 `expected true to be false`、`expected undefined to be an instance of Promise`。
+- TDD GREEN：目标测试 12/12 通过；插件专项 22/22 通过；渠道测试 88/88 通过。
+- 构建：`npm.cmd run build:main` 与 `npm.cmd run build` 均退出码 0；完整构建仅保留既有 Vite chunk size 警告。
+- 代码提交：`15a4de8 M5-S9 fix(plugins): 修正运行状态与异步渠道卸载`。
 
 ## 风险与缓解
 

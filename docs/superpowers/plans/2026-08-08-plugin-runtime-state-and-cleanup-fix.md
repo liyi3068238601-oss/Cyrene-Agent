@@ -27,7 +27,7 @@
 - Consumes: `PluginManager.list()`、`PluginManager.setEnabled()`、`createContext()`。
 - Produces: 两个可重复运行的回归测试。
 
-- [ ] **Step 1: 写启动失败与重试测试**
+- [x] **Step 1: 写启动失败与重试测试**
 
 在 `manager.test.ts` 把 Vitest import 增加 `vi`，并让 `afterEach` 调用 `vi.restoreAllMocks()`。新增测试：
 
@@ -57,7 +57,7 @@ it("启动失败后显示停用；再次启用会重试", async () => {
 });
 ```
 
-- [ ] **Step 2: 写异步卸载测试**
+- [x] **Step 2: 写异步卸载测试**
 
 在 `context.test.ts` 导入 `ChannelAdapter` 类型并新增测试：
 
@@ -98,7 +98,7 @@ it("dispose 返回 Promise 并等待渠道注销完成", async () => {
 });
 ```
 
-- [ ] **Step 3: 运行测试确认 RED**
+- [x] **Step 3: 运行测试确认 RED**
 
 Run: `npm.cmd test -- src/plugins/manager.test.ts src/plugins/context.test.ts`
 
@@ -116,7 +116,7 @@ Expected: 状态测试得到 `true` 而不是 `false`；卸载测试得到 `unde
 - Consumes: `instances: Map<string, CyrenePlugin>`。
 - Produces: `list().enabled` 表示插件是否真实运行；失败插件可通过 `setEnabled(id, true)` 重试。
 
-- [ ] **Step 1: 修改列表状态来源**
+- [x] **Step 1: 修改列表状态来源**
 
 将列表字段改为：
 
@@ -124,7 +124,7 @@ Expected: 状态测试得到 `true` 而不是 `false`；卸载测试得到 `unde
 enabled: this.instances.has(r.manifest.id),
 ```
 
-- [ ] **Step 2: 修改开关的幂等判断**
+- [x] **Step 2: 修改开关的幂等判断**
 
 用真实运行状态判断是否需要启停，仅在目标状态和运行状态一致时直接返回：
 
@@ -135,7 +135,7 @@ if (running === enabled) return { ok: true };
 
 启停成功后仍写入 `enabledMap`，保持重启偏好。
 
-- [ ] **Step 3: 运行管理器测试确认 GREEN**
+- [x] **Step 3: 运行管理器测试确认 GREEN**
 
 Run: `npm.cmd test -- src/plugins/manager.test.ts`
 
@@ -154,7 +154,7 @@ Expected: 全部通过。
 - Produces: `dispose(): Promise<void>`。
 - Consumed by: `activate()` 的失败回滚、`deactivate()`、`stop()`。
 
-- [ ] **Step 1: 把 dispose 改为异步**
+- [x] **Step 1: 把 dispose 改为异步**
 
 ```ts
 interface DisposableContext extends PluginContext {
@@ -170,17 +170,17 @@ registeredAdapters.clear();
 await Promise.all(adapterIds.map((adapterId) => runtime.channelManager.unregister(adapterId)));
 ```
 
-- [ ] **Step 2: 等待所有清理调用**
+- [x] **Step 2: 等待所有清理调用**
 
 `activate()` 捕获注册异常时使用 `await ctx.dispose()`；`deactivate()` 的 `finally` 中先取得 context，再 `await context?.dispose()`，之后删除实例和上下文。
 
-- [ ] **Step 3: 运行上下文和管理器测试确认 GREEN**
+- [x] **Step 3: 运行上下文和管理器测试确认 GREEN**
 
 Run: `npm.cmd test -- src/plugins/context.test.ts src/plugins/manager.test.ts`
 
 Expected: 全部通过。
 
-- [ ] **Step 4: 提交代码**
+- [x] **Step 4: 提交代码**
 
 ```bash
 git add src/plugins/context.ts src/plugins/context.test.ts src/plugins/manager.ts src/plugins/manager.test.ts
@@ -198,19 +198,19 @@ git commit -m "M5-S9 fix(plugins): 修正运行状态与异步渠道卸载"
 **Interfaces:**
 - Produces: 当前验证证据和可追溯提交记录。
 
-- [ ] **Step 1: 运行插件专项测试**
+- [x] **Step 1: 运行插件专项测试**
 
 Run: `npm.cmd test -- src/plugins`
 
 Expected: 全部通过。
 
-- [ ] **Step 2: 运行渠道相关测试**
+- [x] **Step 2: 运行渠道相关测试**
 
 Run: `npm.cmd test -- src/main/channels`
 
 Expected: 全部通过。
 
-- [ ] **Step 3: 运行构建**
+- [x] **Step 3: 运行构建**
 
 Run separately:
 
@@ -221,13 +221,20 @@ npm.cmd run build
 
 Expected: 两条命令退出码均为 0。
 
-- [ ] **Step 4: 更新施工日志**
+- [x] **Step 4: 更新施工日志**
 
 在原插件系统施工日志追加 M5-S9，记录两个根因、测试 RED/GREEN 证据、验证结果和代码提交 hash；勾选本计划的全部步骤。
 
-- [ ] **Step 5: 提交施工日志**
+- [x] **Step 5: 提交施工日志**
 
 ```bash
 git add docs/superpowers/plans/2026-08-06-cyrene-plugin-system.md docs/superpowers/plans/2026-08-08-plugin-runtime-state-and-cleanup-fix.md
 git commit -m "M5-S9 docs(plugins): 回填运行状态与卸载修复记录"
 ```
+
+## 执行记录
+
+- RED（旧实现）：2 个新增测试失败，失败原因分别为运行状态误报和 `dispose()` 未返回 Promise。
+- GREEN（修复后）：目标测试 12/12、插件专项 22/22、渠道测试 88/88 通过。
+- 构建：`build:main` 与完整 `build` 均通过。
+- 代码提交：`15a4de8`。
