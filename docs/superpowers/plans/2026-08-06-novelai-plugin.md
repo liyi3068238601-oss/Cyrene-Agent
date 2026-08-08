@@ -51,7 +51,7 @@
 | 步骤 | 日期时间 | 内容 | 状态 | 提交 |
 |---|---|---|---|---|
 | M0-S1 | 2026-08-06 | 计划文档创建并落库（施工日志初始化） | 已完成 | 92f9596 |
-| M0-S2 | - | 从 fork/liyi-Cyrene 提取 NovelAI 源码（main + renderer） | 待执行 | - |
+| M0-S2 | 2026-08-08 | 从 fork/liyi-Cyrene 提取 NovelAI 源码（main + renderer） | 已完成，迁移测试 16/16 通过 | 9467be1 |
 | M1-S1 | - | 框架扩展：PluginDeps 增加 llm（translateText 注入）+ 单测 | 待执行 | - |
 | M1-S2 | - | 插件骨架：manifest.json + channels.ts + index.ts（可加载/可停用）+ manifest 测试 | 待执行 | - |
 | M1-S3 | - | 插件打开能力：设置页“打开”按钮 + 受控 IPC + 单测 | 待执行 | - |
