@@ -56,7 +56,7 @@
 | M1-S2 | 2026-08-08 | 插件骨架：manifest.json + channels.ts + index.ts（可加载/可停用）+ manifest 测试 | 已完成，插件测试 40/40 通过 | 41eedde |
 | M1-S3 | 2026-08-08 | 插件打开能力：设置页“打开”按钮 + 受控 IPC + 单测 | 已完成，22 个框架测试及 preload/renderer 构建通过 | f41b7d5 |
 | M2-S1 | 2026-08-08 | 纯逻辑模块适配：types/providers/prompt-profile/task-queue 去除上游内部依赖 | 已完成，无需改码；仅有插件内相对类型导入，测试 16/16 通过 | 无代码提交 |
-| M2-S2 | - | service.ts 改造：IPC/工具/配置/翻译全部走 ctx | 待执行 | - |
+| M2-S2 | 2026-08-08 | service.ts 改造：IPC/工具/配置/翻译全部走 ctx | 已完成，插件测试 42/42 与 main 类型检查通过 | f188ef7 |
 | M2-S3 | - | workbench.ts 窗口管理 + index.ts 最终版 | 待执行 | - |
 | M3-S1 | - | renderer 入口（vite.config.ts）+ 插件 preload.ts | 待执行 | - |
 | M4-S1 | - | 主程序接线：plugin-llm.ts + index.ts 注入 llm.translateText | 待执行 | - |
