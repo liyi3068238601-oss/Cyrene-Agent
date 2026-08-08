@@ -99,6 +99,7 @@ import type { ToolRiskLevel } from "./permission";
 import { loadChannelsSettings } from "./channels/settings-store";
 import { channelManager } from "./channels/manager";
 import { PluginManager } from "../plugins/manager";
+import { pluginTranslateText } from "./plugin-llm";
 import { canStartProactiveChannelDelivery, sendProactiveChannelMessage } from "./channels/proactive-delivery";
 // 触发 built-in-tools 的副作用注册（fetch_url / run_shell / install_mcp_server）
 import "./orchestrator/built-in-tools";
@@ -5222,6 +5223,10 @@ app.whenReady().then(async () => {
       appEvents: {
         on: (evt, cb) => app.on(evt, cb),
         off: (evt, cb) => app.removeListener(evt, cb),
+      },
+      llm: {
+        translateText: (messages) =>
+          pluginTranslateText(messages, loadModelSettings()),
       },
     },
     loadEnabledMap: () => loadGeneralSettings().plugins,
