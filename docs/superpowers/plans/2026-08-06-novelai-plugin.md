@@ -62,7 +62,7 @@
 | M4-S1 | 2026-08-08 | 主程序接线：plugin-llm.ts + index.ts 注入 llm.translateText | 已完成，LLM/NAI 测试 23/23 与 main 类型检查通过 | 11d2ede |
 | M5-S1 | 2026-08-08 | 测试迁移（prompt-profile/providers/task-queue）+ 插件级集成测试 | 已完成，NAI 与 LLM 专项测试 23/23 通过 | 测试随各功能提交 |
 | M6-S1 | 2026-08-08 | 全量回归 + 构建 + 构建产物运行时冒烟验证（加载/工具/IPC/卸载） | 已完成：265 个测试文件通过、2349 个测试通过；全量构建通过；5 个必需产物齐全；运行时启用后注册 6 个工具和 28 个 IPC，卸载后均为 0 | 00016fb |
-| M7-S1 | - | 上游合并演练 + 文档收尾 + 施工日志完结 | 待执行 | - |
+| M7-S1 | 2026-08-08 | 上游合并演练 + 文档收尾 + 施工日志完结 | 已完成：可直接合入开发基线 `liyi-Cyrene-v2`；最新 `origin/master@196b0b8` 与基线已分叉，直接合并存在冲突，需另开上游同步任务处理 | 待提交 |
 
 ---
 
@@ -1163,16 +1163,23 @@ git commit -m "M6-S1 docs(plugins): NovelAI 插件端到端验证通过"
 **Files:**
 - 无代码改动。
 
-- [ ] **Step 1: 合并演练**
+- [x] **Step 1: 合并演练**
 
 ```bash
 git fetch origin
 git merge-base --is-ancestor origin/master HEAD && echo "可安全合并"
 ```
 
-- [ ] **Step 2: 核对冲突面收敛清单**（NovelAI 全部新增于 `src/plugins/novelai/` 与 `src/renderer/novelai/`；与上游可能冲突的仅有：`vite.config.ts`、`src/main/index.ts`、`src/plugins/types.ts`、`src/plugins/context.ts`）
+演练结果（2026-08-08）：
 
-- [ ] **Step 3: 核对规范一致性**（`docs/plugins/plugin-authoring.md` 已把 NovelAI 作为带窗口插件范例；插件符合自检清单 §10）
+- `liyi-Cyrene-v2` 是当前分支祖先，功能分支可直接合回该开发基线；
+- fetch 后最新上游为 `origin/master@196b0b8`，双方共同基点为 `0de38dd`，上游已不是当前分支祖先；
+- `git merge-tree` 只读演练确认直接同步官方上游会在 `package.json`、`src/main/index.ts`、preload、设置页、IPC、vitest 配置等既有集成热点产生冲突；这属于开发基线与官方上游的整体分叉，不在本次 NovelAI 插件迁移中强行解决；
+- 后续如需同步官方上游，应单独建立同步分支，逐项保留两边功能并重新跑全量验收。
+
+- [x] **Step 2: 核对冲突面收敛清单**（相对 `liyi-Cyrene-v2` 共 37 个文件：NovelAI 源码集中在 `src/plugins/novelai/` 与 `src/renderer/novelai/`；其余改动均落在 Global Constraints 已列出的框架接线、测试和文档文件中）
+
+- [x] **Step 3: 核对规范一致性**（`docs/plugins/plugin-authoring.md` 已补齐 `llm` 白名单、受控 `open()` 和 NovelAI 窗口范例；静态检查确认 NovelAI 插件没有直接 import `src/main/**` 或 `src/shared/**`）
 
 - [ ] **Step 4: 施工日志全部回填，最终提交**
 
