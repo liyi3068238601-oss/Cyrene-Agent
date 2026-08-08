@@ -162,6 +162,7 @@ export interface RunFinishedEffects {
 export type OnRunFinishedFn = (
   result: CyreneRunResult,
   latestUserText: string,
+  conversationId?: string,
 ) => Promise<void | RunFinishedEffects> | void | RunFinishedEffects;
 
 /** 调用方注入：拿聊天窗口（广播副作用用，可空）。 */
@@ -294,9 +295,6 @@ export function registerAgUiIpc(
     }, (settlement) => {
       send({ type: "CUSTOM", name: "cyrene.choice.dismiss", value: settlement, threadId, runId });
     }, { runId, revision: 1 });
-    if (mode === "daily" || mode === "learn") {
-      options.optimizeFirstRound = true;
-    }
 
     // Learn 模式：配置 Obsidian Vault 并注册工具
     if (mode === "learn" && session.workspaceBinding?.workspaceRoot) {
@@ -461,7 +459,7 @@ export function registerAgUiIpc(
         try {
           if (agent.lastResult) {
             const lastResult = agent.lastResult;
-            const effects = await perf.track("on_run_finished", async () => onFinished(lastResult, latestUserText));
+            const effects = await perf.track("on_run_finished", async () => onFinished(lastResult, latestUserText, sessionId));
             if (effects?.sticker !== undefined) {
               send({
                 type: "CUSTOM",

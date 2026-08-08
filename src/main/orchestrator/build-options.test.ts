@@ -36,7 +36,6 @@ function createBuildDeps(): BuildOptionsDeps {
     readStylePrompt: (styleId) => `STYLE_PROMPT:${styleId}`,
     resolveSoulSampling: () => ({}),
     toolRegistry: { getEnabled: () => [] },
-    logWorldbookInjection: () => {},
     normalizeChatMessages: (raw) => raw as never,
     chatRequestTimeoutMs: 1000,
     loadActionGateSystemPrompt: () => "",
@@ -611,7 +610,7 @@ describe("build-options", () => {
 
     await onAgentRunFinished({ reply: "总结好了", toolResults: [] }, latestUserText, deps)
 
-    expect(scheduleMemoryWrite).toHaveBeenCalledWith("帮我总结这个 md", "总结好了")
+    expect(scheduleMemoryWrite).toHaveBeenCalledWith("帮我总结这个 md", "总结好了", undefined)
     expect(matchSticker).toHaveBeenCalledWith(
       "总结好了\n帮我总结这个 md",
       expect.anything(),

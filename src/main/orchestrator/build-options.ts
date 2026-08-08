@@ -12,7 +12,7 @@
 //   loadModelSettings / loadUserProfile / buildEnvironmentContext
 //   buildSkillCatalog / skillRegistry / resolveSlashActivation
 //   buildToneInjection / sceneEmbeddingIndex / getSceneEmbeddingProvider
-//   buildSystemPrompt / logWorldbookInjection / CHAT_REQUEST_TIMEOUT_MS
+//   buildSystemPrompt / CHAT_REQUEST_TIMEOUT_MS
 //   normalizeChatMessages / buildAlwaysOnContext / ToolDefinition
 //   scheduleMemoryWrite / inferRuntimeState / runtimeState / feelingToExpression
 //   matchSticker / stickerEmbeddingIndex / getEmbeddingProvider / loadStickerSettings
@@ -96,7 +96,6 @@ export interface BuildOptionsDeps {
   }) => ApprovedStyleSampling;
   /** 第一期：注入 toolRegistry（用于 buildToolSystemPrompt 自动生成目录）。 */
   toolRegistry: { getEnabled(): ReadonlyArray<unknown> };
-  logWorldbookInjection: (alwaysOnContext: string, systemContent: string) => void;
   normalizeChatMessages: (raw: ReadonlyArray<unknown>) => ChatMessage[];
   chatRequestTimeoutMs: number;
   captionImageForFallback?: (filePath: string) => Promise<{ ok: boolean; caption?: string; error?: string }>;
@@ -137,7 +136,7 @@ export interface BuildOptionsDeps {
 /** onRunFinished 副作用所需的 deps（与 BuildOptionsDeps 部分重叠） */
 export interface OnRunFinishedDeps {
   loadModelSettings: () => ModelSettingsLite;
-  scheduleMemoryWrite: (userText: string, reply: string) => void;
+  scheduleMemoryWrite: (userText: string, reply: string, conversationId?: string) => void;
   scheduleSocialAtomExtraction?: (input: SocialExtractionInput) => void;
   inferRuntimeState: (userText: string, reply: string, flag: boolean) => { status: string };
   runtimeState: {
@@ -179,7 +178,6 @@ export interface ModelSettingsLite {
   runtimeSync?: string;
   stickerEnabled?: boolean;
   stickerSimilarityThreshold?: number;
-  optimizeFirstRound?: boolean;
   /** 上下文窗口大小（Token）。来自 ModelSettings.contextWindowTokens。 */
   contextWindowTokens?: number;
 }
@@ -590,13 +588,7 @@ export async function buildAgentRunOptions(
     + (resolvedWorkspaceRoot
       ? `\n\n[当前项目工作区]\n可信根目录：${resolvedWorkspaceRoot}\n所有本地文件的读取、创建与生成都必须以此目录为根；不得写入桌面、下载目录或其他目录。`
       : "");
-  const toolSystemContentOptimizedForFirstRound = deps.buildToolSystemPrompt(runTools, true)
-    + (skillCatalog ? "\n\n---\n\n" + skillCatalog : "")
-    + (autoInjectedSkillContext ? "\n\n---\n\n" + autoInjectedSkillContext : "")
-    + (citaContextBlock ? "\n\n" + citaContextBlock : "")
-    + (resolvedWorkspaceRoot
-      ? `\n\n[当前项目工作区]\n可信根目录：${resolvedWorkspaceRoot}\n所有本地文件的读取、创建与生成都必须以此目录为根；不得写入桌面、下载目录或其他目录。`
-      : "");
+
 
   // Soul 阶段基础 system：人设 + 环境/记忆/关系/附件/渠道（这些是"表达"所需）。
   // FC 循环在 Soul 阶段追加通用 ToolExecutionContext，并保留 role:tool 协议消息。
@@ -633,8 +625,6 @@ export async function buildAgentRunOptions(
     ...(profile.nickname?.trim() ? { nickname: profile.nickname.trim() } : {}),
     gender: profileGender,
   };
-
-  deps.logWorldbookInjection(alwaysOnContext, systemContent);
 
   // 第一期：原始 messages 不再携带 system。FC 循环按阶段动态注入。
   const fcMessages: ChatMessage[] = withDirectImageAttachments(llmMessages as unknown as ChatMessage[], input);
@@ -675,7 +665,6 @@ export async function buildAgentRunOptions(
       actionGateSystemPrompt,
       timeoutMs: deps.chatRequestTimeoutMs,
       toolSystemContent,
-      toolSystemContentOptimizedForFirstRound,
       soulSystemBaseContent,
       soulSampling,
       ...(socialContextEnabled && input.userTurnId && input.assistantTurnId ? {
@@ -692,7 +681,6 @@ export async function buildAgentRunOptions(
       ...(isChatMode ? { tools: runTools as ToolDefinition[] } : {}),
       ...(availableSkills.length > 0 ? { availableSkills } : {}),
       agentRuntime: "langgraph",
-      optimizeFirstRound: settings.optimizeFirstRound,
       resolvedWorkspaceRoot,
     },
     latestUserText,
@@ -714,6 +702,7 @@ export async function onAgentRunFinished(
   latestUserText: string,
   deps: OnRunFinishedDeps,
   channel?: "wechat" | "feishu",
+  conversationId?: string,
 ): Promise<{ sticker: string | null }> {
   const chatContent = result.reply;
   const sideEffectUserText = stripTurnModelContextForSideEffects(latestUserText);
@@ -738,7 +727,7 @@ export async function onAgentRunFinished(
       now: socialContext.now,
     });
   } else {
-    deps.scheduleMemoryWrite(sideEffectUserText, chatContent);
+    deps.scheduleMemoryWrite(sideEffectUserText, chatContent, conversationId);
   }
 
   const settings = deps.loadModelSettings();
