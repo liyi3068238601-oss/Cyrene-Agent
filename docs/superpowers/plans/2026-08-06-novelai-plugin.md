@@ -53,7 +53,7 @@
 | M0-S1 | 2026-08-06 | 计划文档创建并落库（施工日志初始化） | 已完成 | 92f9596 |
 | M0-S2 | 2026-08-08 | 从 fork/liyi-Cyrene 提取 NovelAI 源码（main + renderer） | 已完成，迁移测试 16/16 通过 | 9467be1 |
 | M1-S1 | 2026-08-08 | 框架扩展：PluginDeps 增加 llm（translateText 注入）+ 单测 | 已完成，权限正反测试 15/15 通过 | 1a51910 |
-| M1-S2 | - | 插件骨架：manifest.json + channels.ts + index.ts（可加载/可停用）+ manifest 测试 | 待执行 | - |
+| M1-S2 | 2026-08-08 | 插件骨架：manifest.json + channels.ts + index.ts（可加载/可停用）+ manifest 测试 | 已完成，插件测试 40/40 通过 | 41eedde |
 | M1-S3 | - | 插件打开能力：设置页“打开”按钮 + 受控 IPC + 单测 | 待执行 | - |
 | M2-S1 | - | 纯逻辑模块适配：types/providers/prompt-profile/task-queue 去除上游内部依赖 | 待执行 | - |
 | M2-S2 | - | service.ts 改造：IPC/工具/配置/翻译全部走 ctx | 待执行 | - |
