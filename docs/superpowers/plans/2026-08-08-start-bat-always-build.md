@@ -29,7 +29,7 @@
 - Consumes: 根目录 `start.bat` 文本。
 - Produces: 构建命令顺序与构建失败处理的静态契约。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 在现有 `describe("start.bat")` 中追加：
 
@@ -46,7 +46,7 @@ it("每次启动前先完整构建，构建失败时不启动旧产物", () => {
 });
 ```
 
-- [ ] **Step 2: 运行测试并确认 RED**
+- [x] **Step 2: 运行测试并确认 RED**
 
 Run: `npm.cmd test -- src/shared/start-bat.test.ts`
 
@@ -64,7 +64,7 @@ Expected: 新测试 FAIL，明确报告旧 BAT 不包含 `call npm.cmd run build
 - Consumes: 已安装的 `npm.cmd` 与项目 `node_modules`。
 - Produces: 构建成功才执行 `npm.cmd start` 的双击启动流程。
 
-- [ ] **Step 1: 写最小 BAT 实现**
+- [x] **Step 1: 写最小 BAT 实现**
 
 在依赖检查后、启动命令前执行：
 
@@ -91,13 +91,13 @@ exit /b %CYRENE_BUILD_EXIT_CODE%
 
 删除旧的 `dist\main\main\index.js` 存在性检查及 `:build_missing` 分支，因为完整构建会创建产物，并直接报告真实构建错误。
 
-- [ ] **Step 2: 运行专项测试并确认 GREEN**
+- [x] **Step 2: 运行专项测试并确认 GREEN**
 
 Run: `npm.cmd test -- src/shared/start-bat.test.ts`
 
 Expected: 4 个测试全部 PASS，CRLF 约束仍通过。
 
-- [ ] **Step 3: 提交实现**
+- [x] **Step 3: 提交实现**
 
 ```bash
 git add start.bat src/shared/start-bat.test.ts
@@ -116,7 +116,7 @@ git commit -m "feat(startup): 启动前自动完整构建"
 - Consumes: Task 2 的新启动流程。
 - Produces: NovelAI 构建产物、全量回归证据与可追溯施工记录。
 
-- [ ] **Step 1: 运行完整构建并核对 NovelAI 产物**
+- [x] **Step 1: 运行完整构建并核对 NovelAI 产物**
 
 Run: `npm.cmd run build`
 
@@ -128,13 +128,13 @@ dist/main/plugins/novelai/index.js
 dist/renderer/novelai/index.html
 ```
 
-- [ ] **Step 2: 运行全量测试**
+- [x] **Step 2: 运行全量测试**
 
 Run: `npm.cmd test`
 
 Expected: 全量测试无失败；数量以实际输出为准。
 
-- [ ] **Step 3: 回填施工记录**
+- [x] **Step 3: 回填施工记录**
 
 在原一键启动计划末尾追加“启动前自动构建改造”小节，记录 RED、GREEN、完整构建、NovelAI 产物、全量测试与实现提交 hash；同时勾选本计划全部步骤。
 

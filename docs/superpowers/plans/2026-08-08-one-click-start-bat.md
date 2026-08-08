@@ -165,3 +165,13 @@ git commit -m "docs(startup): 回填一键启动 BAT 施工记录"
 - GREEN：BAT 测试 3/3 通过；BAT + 插件相关回归 25/25 通过。
 - 手工模拟：缺少依赖和缺少构建产物两条路径均显示正确中文提示并以错误码 1 退出。
 - 实现提交：`6303af7 feat(startup): 添加新手友好的一键启动 BAT`。
+
+## 2026-08-08 启动前自动构建改造
+
+- 设计：每次双击 `start.bat` 都先执行 `npm.cmd run build`，构建成功后才执行 `npm.cmd start`；不做时间戳判断，不自动安装依赖。
+- RED：新增“先构建、后启动、构建失败不启动旧产物”契约；旧 BAT 缺少构建命令且仍依赖旧 `dist` 检查，专项测试按预期 2 项失败。
+- GREEN：删除旧 `dist/main/main/index.js` 存在性检查，增加独立构建错误码与 `:build_failed` 分支；BAT 专项测试 4/4 通过，CRLF 约束继续通过。
+- 完整构建：`npm.cmd run build` exit 0；`dist/main/plugins/novelai/manifest.json`、`dist/main/plugins/novelai/index.js`、`dist/renderer/novelai/index.html` 均已生成。
+- 全量回归：265 个测试文件通过、1 个跳过；2350 个测试通过、12 个跳过，0 失败。
+- 实现提交：`28d2995 feat(startup): 启动前自动完整构建`。
+- 详细计划：`docs/superpowers/plans/2026-08-08-start-bat-always-build.md`。
