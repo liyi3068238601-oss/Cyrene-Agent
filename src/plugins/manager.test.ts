@@ -26,7 +26,7 @@ function fixturePlugin(id: string, manifestId: string = id): string {
   );
   writeFileSync(
     path.join(dir, "index.cjs"),
-    `module.exports = { register(ctx) {
+    `module.exports = { open() {}, register(ctx) {
       ctx.registerIpc("ping", () => "pong");
       ctx.registerTool({ id: "${id}_tool", name: "t", description: "d", enabled: true, inputSchema: { type: "object", properties: {}, required: [] }, execute: async () => "ok" });
     }, unregister() {} };`,
@@ -84,6 +84,19 @@ describe("PluginManager", () => {
     expect(h.ipc.has("plugins:list")).toBe(true);
     expect(h.ipc.has("plugins:set-enabled")).toBe(true);
     expect(h.ipc.has("plugin:demo:ping")).toBe(true);
+  });
+
+  it("只允许打开已启用且声明 open 的插件", async () => {
+    const h = harness();
+    const mgr = new PluginManager(h.options);
+    await mgr.start();
+
+    expect(mgr.list()[0].canOpen).toBe(true);
+    expect(h.ipc.has("plugins:open")).toBe(true);
+    await expect(h.ipc.get("plugins:open")?.("demo")).resolves.toEqual({ ok: true });
+
+    await mgr.setEnabled("demo", false);
+    await expect(h.ipc.get("plugins:open")?.("demo")).resolves.toMatchObject({ ok: false });
   });
 
   it("开关关闭的插件不激活", async () => {

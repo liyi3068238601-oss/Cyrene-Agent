@@ -14,6 +14,7 @@ export interface PluginListEntry {
   defaultEnabled: boolean;
   enabled: boolean;
   hasUnregister: boolean;
+  canOpen: boolean;
 }
 
 export interface PluginManagerOptions {
@@ -53,6 +54,7 @@ export class PluginManager {
         defaultEnabled: r.manifest.defaultEnabled,
         enabled: this.instances.has(r.manifest.id),
         hasUnregister: typeof plugin?.unregister === "function",
+        canOpen: typeof plugin?.open === "function",
       };
     });
   }
@@ -83,6 +85,7 @@ export class PluginManager {
       }
       return this.setEnabled(String(id), enabled);
     });
+    this.opts.runtime.registerIpc(IPC.PLUGINS_OPEN, (id: unknown) => this.open(String(id)));
     this.opts.onListChanged?.();
   }
 
@@ -106,12 +109,25 @@ export class PluginManager {
     }
   }
 
+  async open(id: string): Promise<{ ok: boolean; error?: string }> {
+    const plugin = this.instances.get(id);
+    if (!plugin) return { ok: false, error: `插件未启用: ${id}` };
+    if (!plugin.open) return { ok: false, error: `插件不支持打开窗口: ${id}` };
+    try {
+      await plugin.open();
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
   async stop(): Promise<void> {
     for (const id of Array.from(this.instances.keys())) {
       await this.deactivate(id);
     }
     this.opts.runtime.unregisterIpc(IPC.PLUGINS_LIST);
     this.opts.runtime.unregisterIpc(IPC.PLUGINS_SET_ENABLED);
+    this.opts.runtime.unregisterIpc(IPC.PLUGINS_OPEN);
     this.records.clear();
   }
 

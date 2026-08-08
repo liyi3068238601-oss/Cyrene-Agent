@@ -535,9 +535,11 @@ declare global {
           defaultEnabled: boolean;
           enabled: boolean;
           hasUnregister: boolean;
+          canOpen: boolean;
         }>
       >;
       setEnabled(id: string, enabled: boolean): Promise<{ ok: boolean; error?: string }>;
+      open(id: string): Promise<{ ok: boolean; error?: string }>;
     };
   }
 }
@@ -3369,7 +3371,29 @@ async function renderFeaturePlugins(): Promise<void> {
       }
       await renderFeaturePlugins();
     });
-    row.append(info, toggle);
+    const actions = document.createElement("div");
+    actions.style.display = "flex";
+    actions.style.gap = "8px";
+    if (item.enabled && item.canOpen) {
+      const open = document.createElement("button");
+      open.type = "button";
+      open.className = "save-btn save-btn--ghost";
+      open.textContent = "打开";
+      open.addEventListener("click", async () => {
+        const res = await window.plugins?.open(item.id);
+        if (!res?.ok) {
+          const err = document.createElement("span");
+          err.textContent = `打开失败：${res?.error ?? "未知错误"}`;
+          err.style.color = "#e5484d";
+          err.style.fontSize = "12px";
+          row.appendChild(err);
+          setTimeout(() => err.remove(), 4000);
+        }
+      });
+      actions.appendChild(open);
+    }
+    actions.appendChild(toggle);
+    row.append(info, actions);
     featurePluginsList.appendChild(row);
   }
 }

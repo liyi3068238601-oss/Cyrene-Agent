@@ -352,5 +352,6 @@ export const IPC = {
   // plugin system
   PLUGINS_LIST: "plugins:list",
   PLUGINS_SET_ENABLED: "plugins:set-enabled",
+  PLUGINS_OPEN: "plugins:open",
 } as const;
 

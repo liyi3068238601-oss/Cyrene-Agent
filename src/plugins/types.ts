@@ -58,6 +58,8 @@ export interface PluginContext {
 }
 
 export interface CyrenePlugin {
+  /** 可选的用户可见入口，例如打开插件工作台窗口 */
+  open?(): void | Promise<void>;
   register(ctx: PluginContext): void | Promise<void>;
   unregister?(): void | Promise<void>;
 }
