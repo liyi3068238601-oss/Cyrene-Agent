@@ -21,7 +21,7 @@ export interface PluginRuntime {
 
 interface DisposableContext extends PluginContext {
   /** 框架内部：卸载插件时统一清理已注册资源 */
-  dispose(): void;
+  dispose(): Promise<void>;
 }
 
 export function createContext(
@@ -97,16 +97,17 @@ export function createContext(
   runtime.appEvents.on("before-quit", onBeforeQuit);
 
   return Object.assign(ctx, {
-    dispose() {
+    async dispose() {
       runtime.appEvents.off?.("before-quit", onBeforeQuit);
       for (const toolId of registeredTools) runtime.toolRegistry.unregister(toolId);
       registeredTools.clear();
       for (const channel of registeredIpc) runtime.unregisterIpc(channel);
       registeredIpc.clear();
-      for (const adapterId of registeredAdapters) {
-        void runtime.channelManager.unregister(adapterId);
-      }
+      const adapterIds = Array.from(registeredAdapters);
       registeredAdapters.clear();
+      await Promise.all(
+        adapterIds.map((adapterId) => runtime.channelManager.unregister(adapterId)),
+      );
     },
   });
 }

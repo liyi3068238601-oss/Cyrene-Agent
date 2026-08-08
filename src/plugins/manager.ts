@@ -28,7 +28,7 @@ export interface PluginManagerOptions {
   onListChanged?: () => void;
 }
 
-type DisposableContext = PluginContext & { dispose(): void };
+type DisposableContext = PluginContext & { dispose(): Promise<void> };
 
 export class PluginManager {
   private records = new Map<string, PluginRecord>();
@@ -51,7 +51,7 @@ export class PluginManager {
         author: r.manifest.author,
         entry: r.manifest.entry,
         defaultEnabled: r.manifest.defaultEnabled,
-        enabled: this.enabledMap[r.manifest.id] ?? r.manifest.defaultEnabled,
+        enabled: this.instances.has(r.manifest.id),
         hasUnregister: typeof plugin?.unregister === "function",
       };
     });
@@ -92,8 +92,8 @@ export class PluginManager {
   ): Promise<{ ok: boolean; error?: string }> {
     const record = this.records.get(id);
     if (!record) return { ok: false, error: `插件不存在: ${id}` };
-    const current = this.enabledMap[id] ?? record.manifest.defaultEnabled;
-    if (current === enabled) return { ok: true };
+    const running = this.instances.has(id);
+    if (running === enabled) return { ok: true };
     try {
       if (enabled) await this.activate(id);
       else await this.deactivate(id);
@@ -129,7 +129,7 @@ export class PluginManager {
       await plugin.register(ctx);
     } catch (err) {
       // register 抛错时立即释放已注册资源，避免泄漏
-      ctx.dispose();
+      await ctx.dispose();
       throw err;
     }
     this.instances.set(id, plugin);
@@ -143,9 +143,12 @@ export class PluginManager {
       if (plugin?.unregister) await plugin.unregister();
     } finally {
       // unregister 抛错也不能跳过清理与状态更新，避免“半卸载”悬挂
-      this.contexts.get(id)?.dispose();
-      this.instances.delete(id);
-      this.contexts.delete(id);
+      try {
+        await this.contexts.get(id)?.dispose();
+      } finally {
+        this.instances.delete(id);
+        this.contexts.delete(id);
+      }
     }
     console.log(`[plugins] 已禁用 ${id}`);
   }

@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import type { ChannelAdapter } from "../main/channels/adapters/base";
 import { createContext, type PluginRuntime } from "./context";
 
 let tmp: string;
@@ -43,7 +44,7 @@ describe("createContext", () => {
     expect(rt.ipc.has("plugin:demo:ping")).toBe(true);
   });
 
-  it("dispose 清理已注册工具与 IPC", () => {
+  it("dispose 清理已注册工具与 IPC", async () => {
     tmp = mkdtempSync(path.join(os.tmpdir(), "cyrene-ctx-test-"));
     const rt = runtime();
     const ctx = createContext("demo", tmp, rt);
@@ -56,7 +57,7 @@ describe("createContext", () => {
       execute: async () => "ok",
     });
     ctx.registerIpc("ping", () => "pong");
-    (ctx as unknown as { dispose(): void }).dispose();
+    await ctx.dispose();
     expect(rt.tools).toEqual([]);
     expect(rt.ipc.has("plugin:demo:ping")).toBe(false);
   });
@@ -89,5 +90,48 @@ describe("createContext", () => {
     expect(without.deps.channels).toBeUndefined();
     const withDeps = createContext("demo", tmp, runtime(), ["channels"]);
     expect(withDeps.deps.channels?.channelManager).toBeDefined();
+  });
+
+  it("dispose 返回 Promise 并等待渠道注销完成", async () => {
+    tmp = mkdtempSync(path.join(os.tmpdir(), "cyrene-ctx-test-"));
+    const rt = runtime();
+    let releaseUnregister!: () => void;
+    let unregisterFinished = false;
+    rt.channelManager.unregister = async () => {
+      await new Promise<void>((resolve) => {
+        releaseUnregister = resolve;
+      });
+      unregisterFinished = true;
+      return true;
+    };
+    const adapter: ChannelAdapter = {
+      id: "wechat",
+      displayName: "test",
+      capability: {
+        text: true,
+        image: false,
+        audio: false,
+        file: false,
+        video: false,
+        markdown: false,
+        card: false,
+        sticker: false,
+        maxTextLength: 100,
+      },
+      start: async () => {},
+      stop: async () => {},
+      onMessage: null,
+      send: async () => ({ ok: true }),
+      getStatus: () => ({ enabled: true, phase: "running" }),
+    };
+    const ctx = createContext("demo", tmp, rt, ["channels"]);
+    await ctx.registerChannelAdapter(adapter);
+
+    const disposing = ctx.dispose();
+    expect(disposing).toBeInstanceOf(Promise);
+    expect(unregisterFinished).toBe(false);
+    releaseUnregister();
+    await disposing;
+    expect(unregisterFinished).toBe(true);
   });
 });

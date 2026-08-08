@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { PluginManager, type PluginManagerOptions } from "./manager";
 import type { PluginRuntime } from "./context";
 
@@ -36,6 +36,7 @@ function fixturePlugin(id: string, manifestId: string = id): string {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   if (tmp) {
     rmSync(tmp, { recursive: true, force: true });
     tmp = "";
@@ -129,5 +130,29 @@ describe("PluginManager", () => {
     await mgr.start();
     const res = await mgr.setEnabled("nope", true);
     expect(res.ok).toBe(false);
+  });
+
+  it("启动失败后显示停用；再次启用会重试", async () => {
+    const h = harness();
+    writeFileSync(
+      path.join(tmp, "demo", "index.cjs"),
+      `let attempts = 0;
+      module.exports = { register(ctx) {
+        attempts += 1;
+        if (attempts === 1) throw new Error("first start failed");
+        ctx.registerIpc("ping", () => "pong");
+      } };`,
+      "utf8",
+    );
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const mgr = new PluginManager(h.options);
+
+    await mgr.start();
+    expect(mgr.list()[0].enabled).toBe(false);
+
+    const retried = await mgr.setEnabled("demo", true);
+    expect(retried.ok).toBe(true);
+    expect(mgr.list()[0].enabled).toBe(true);
+    expect(h.ipc.has("plugin:demo:ping")).toBe(true);
   });
 });
