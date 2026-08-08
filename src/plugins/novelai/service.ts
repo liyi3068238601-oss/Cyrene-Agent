@@ -1,62 +1,26 @@
-import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell } from "electron";
+import { BrowserWindow, dialog, safeStorage, shell } from "electron";
 import * as fs from "fs";
 import * as path from "path";
-import { IPC } from "../../shared/ipc-channels";
-import { toolRegistry } from "../orchestrator/tool-registry";
-import { getAdapterForConfig } from "../orchestrator/vendors";
-import type { VendorConfig } from "../orchestrator/vendors/types";
+import type { PluginContext } from "../types";
+import { NOVELAI } from "./channels";
 import { getImageProvider, getProviderCapabilities, upscaleWithGateway } from "./providers";
 import { compileVisualPrompt, getAgentCharacter, normalizeCharacters, normalizeOutfits, resolveDrawingCharacterId } from "./prompt-profile";
 import { ImageTaskQueue, type ImageTask } from "./task-queue";
 import type { CharacterComposition, DrawingSubject, ImageProviderKind, NovelAiConfig, VisualMode } from "./types";
 export type { NovelAiConfig } from "./types";
 
-/** 读取用户在设置页保存的 LLM 模型配置（与 memory-judge/resolver 共用同一份 model-settings.json） */
-function loadChatModelSettings(): { provider: string; baseUrl: string; model: string; apiKey: string; explicitTransport?: "openai" | "anthropic" | "auto" } {
-  const defaults = { provider: "DeepSeek（深度求索）", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-pro", apiKey: "" };
-  try {
-    const filePath = path.join(app.getPath("userData"), "model-settings.json");
-    if (!fs.existsSync(filePath)) return defaults;
-    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as Record<string, unknown>;
-    return {
-      provider: typeof parsed.provider === "string" && parsed.provider.trim() ? parsed.provider.trim() : defaults.provider,
-      baseUrl: typeof parsed.baseUrl === "string" && parsed.baseUrl.trim() ? parsed.baseUrl.trim() : defaults.baseUrl,
-      model: typeof parsed.model === "string" && parsed.model.trim() ? parsed.model.trim() : defaults.model,
-      apiKey: typeof parsed.apiKey === "string" ? parsed.apiKey.trim() : "",
-      explicitTransport: parsed.explicitTransport === "openai" || parsed.explicitTransport === "anthropic" || parsed.explicitTransport === "auto" ? parsed.explicitTransport : undefined,
-    };
-  } catch {
-    return defaults;
-  }
+let pluginContext: PluginContext | undefined;
+
+function requireContext(): PluginContext {
+  if (!pluginContext) throw new Error("NovelAI 插件尚未注册");
+  return pluginContext;
 }
 
 /** 用主聊天模型做一次简单翻译调用（非流式），返回纯文本 */
 async function translatePromptWithLLM(messages: Array<{ role: "system" | "user"; content: string }>): Promise<string> {
-  const settings = loadChatModelSettings();
-  if (!settings.apiKey) throw new Error("未配置 API Key，请先在设置页配置模型");
-  const cfg: VendorConfig = {
-    provider: settings.provider,
-    baseUrl: settings.baseUrl,
-    model: settings.model,
-    apiKey: settings.apiKey,
-    explicitTransport: settings.explicitTransport,
-  };
-  const adapter = getAdapterForConfig(cfg);
-  const http = adapter.buildRequest({
-    model: cfg.model,
-    messages: messages as Array<{ role: "system" | "user" | "assistant"; content: string }>,
-    maxTokens: 1024,
-    stream: false,
-  }, cfg);
-  const response = await fetch(http.url, {
-    method: "POST",
-    headers: http.headers,
-    body: http.body,
-  });
-  if (!response.ok) throw new Error(`翻译请求失败: HTTP ${response.status}`);
-  const data = await response.json();
-  const parsed = adapter.parseResponse(data);
-  return parsed.text ?? "";
+  const llm = requireContext().deps.llm;
+  if (!llm) throw new Error("NovelAI 插件未获得 llm 权限");
+  return llm.translateText(messages);
 }
 
 interface StoredConfig extends Omit<NovelAiConfig, "apiKey"> { encryptedApiKey?: string; apiKeyPlain?: string }
@@ -86,8 +50,7 @@ const defaults: NovelAiConfig = {
   outfitTemplates:[],
 };
 
-function rootDir(): string { return path.join(app.getPath("userData"), "novelai"); }
-function configPath(): string { return path.join(rootDir(), "config.json"); }
+function rootDir(): string { return requireContext().storage.rootDir(); }
 function outputDir(): string { return path.join(rootDir(), "images"); }
 function assetsDir(): string { return path.join(rootDir(), "assets"); }
 function ensureDirs(): void { fs.mkdirSync(outputDir(), { recursive: true }); fs.mkdirSync(assetsDir(), { recursive: true }); }
@@ -100,7 +63,8 @@ function cleanUrl(value: unknown): string {
 export function loadNovelAiConfig(): NovelAiConfig {
   ensureDirs();
   try {
-    const stored = JSON.parse(fs.readFileSync(configPath(), "utf8")) as StoredConfig;
+    const stored = requireContext().storage.get<StoredConfig>("config");
+    if (!stored) return { ...defaults };
     let apiKey = stored.apiKeyPlain || "";
     if (stored.encryptedApiKey && safeStorage.isEncryptionAvailable()) {
       apiKey = safeStorage.decryptString(Buffer.from(stored.encryptedApiKey, "base64"));
@@ -151,7 +115,7 @@ export function saveNovelAiConfig(raw: Partial<NovelAiConfig>): NovelAiConfig {
     else stored.apiKeyPlain = next.apiKey;
   }
   ensureDirs();
-  fs.writeFileSync(configPath(), JSON.stringify(stored, null, 2), "utf8");
+  requireContext().storage.set("config", stored);
   return next;
 }
 
@@ -190,14 +154,14 @@ async function performNovelAiImage(raw: Record<string, unknown>, isCancelled: ()
   const requestedAssetIds=Array.isArray(raw.referenceAssetIds)?raw.referenceAssetIds.map((id)=>String(id||"").trim()).filter(Boolean).slice(0,4):[];
   const assetMap=new Map(loadAssetCatalog().map((asset)=>[asset.id,asset]));
   const missingAssetIds=requestedAssetIds.filter((id)=>!assetMap.has(id));
-  if(missingAssetIds.length)throw new Error(`未找到参考素材：${missingAssetIds.join("、")}。请先调用 inspect_drawing_context 获取可用素材。`);
+  if(missingAssetIds.length)throw new Error(`未找到参考素材：${missingAssetIds.join("、")}。请先调用 novelai_inspect_drawing_context 获取可用素材。`);
   const assetReferenceImages=requestedAssetIds.flatMap((id)=>{const asset=assetMap.get(id);if(!asset)return[];try{const image=fs.readFileSync(path.join(assetsDir(),path.basename(asset.file))).toString("base64");return[{image,strength:Math.max(0,Math.min(1,Number(raw.referenceStrength)||0.7)),informationExtracted:Math.max(0,Math.min(1,Number(raw.referenceInformationExtracted)||1))}]}catch{return[]}});
   const referenceImages=[...inlineReferenceImages,...assetReferenceImages];
   const referenceImage=String(raw.referenceImage||"").replace(/^data:image\/[^;]+;base64,/,"")||assetReferenceImages[0]?.image;
   const referenceModeValue=String(raw.referenceMode||"none");
   const referenceMode=["img2img","inpaint","outpaint","vibe","director-character","director-style","director-both"].includes(referenceModeValue)?referenceModeValue:"none";
   const requiredCapability=referenceMode==="img2img"?provider.capabilities.img2img:["inpaint","outpaint"].includes(referenceMode)?provider.capabilities.inpaint:referenceMode==="vibe"?provider.capabilities.vibe:referenceMode.startsWith("director-")?provider.capabilities.directorReference:true;
-  if(!requiredCapability)throw new Error(`当前绘图供应商不支持 ${referenceMode} 参考模式。请调用 inspect_drawing_context 查看可用能力。`);
+  if(!requiredCapability)throw new Error(`当前绘图供应商不支持 ${referenceMode} 参考模式。请调用 novelai_inspect_drawing_context 查看可用能力。`);
   if(referenceMode!=="none"&&!referenceImage&&!referenceImages.length)throw new Error(`${referenceMode} 参考模式需要 referenceAssetIds。请先从素材库选择参考图片。`);
   const result = await provider.generate(config, {
     prompt: compiled.prompt, negativePrompt: compiled.negativePrompt, model, width, height,
@@ -242,7 +206,10 @@ async function performNovelAiImage(raw: Record<string, unknown>, isCancelled: ()
 
 function broadcastTasks(tasks: ImageTask[]): void {
   for (const win of BrowserWindow.getAllWindows()) {
-    if (!win.isDestroyed()) win.webContents.send(IPC.NOVELAI_TASKS_CHANGED, tasks.map(({ input: _input, ...task }) => task));
+    if (!win.isDestroyed()) win.webContents.send(
+      `plugin:novelai:${NOVELAI.TASKS_CHANGED}`,
+      tasks.map(({ input: _input, ...task }) => task),
+    );
   }
 }
 
@@ -264,7 +231,7 @@ function broadcastGeneratedImage(result: Record<string, unknown>): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (win.isDestroyed()) continue;
     try {
-      win.webContents.send(IPC.AGUI_EVENT, { type: "CUSTOM", name: "cyrene.novelai-image", value: payload });
+      win.webContents.send("agui:event", { type: "CUSTOM", name: "cyrene.novelai-image", value: payload });
     } catch { /* window may be closing */ }
   }
 }
@@ -322,28 +289,26 @@ async function importAsset():Promise<ImageAsset|null>{
   return{...meta,dataUrl:`data:${mimeType};base64,${fs.readFileSync(path.join(assetsDir(),file)).toString("base64")}`};
 }
 
-export function registerNovelAiIpc(openWindow: () => void, minimizeWindow: () => void, closeWindow: () => void): void {
-  ipcMain.on(IPC.NOVELAI_OPEN, openWindow);
-  ipcMain.on(IPC.NOVELAI_MINIMIZE, minimizeWindow);
-  ipcMain.on(IPC.NOVELAI_CLOSE, closeWindow);
-  ipcMain.handle(IPC.NOVELAI_LOAD_CONFIG, () => loadNovelAiConfig());
-  ipcMain.handle(IPC.NOVELAI_SAVE_CONFIG, (_event, config) => saveNovelAiConfig(config || {}));
-  ipcMain.handle(IPC.NOVELAI_TEST, async (_event, config) => {
+export function registerNovelAi(ctx: PluginContext): void {
+  pluginContext = ctx;
+  ctx.registerIpc(NOVELAI.LOAD_CONFIG, () => loadNovelAiConfig());
+  ctx.registerIpc(NOVELAI.SAVE_CONFIG, (config) => saveNovelAiConfig(config || {}));
+  ctx.registerIpc(NOVELAI.TEST, async (config) => {
     const merged = { ...loadNovelAiConfig(), ...(config || {}) };
     const provider = getImageProvider(merged.providerMode);
     await provider.test(merged);
     return { ok: true, capabilities: provider.capabilities };
   });
-  ipcMain.handle(IPC.NOVELAI_CAPABILITIES, (_event, kind: ImageProviderKind) => getProviderCapabilities(kind));
-  ipcMain.handle(IPC.NOVELAI_MODELS, (_event, config) => listNovelAiModels(config || undefined));
-  ipcMain.handle(IPC.NOVELAI_GENERATE, (_event, input) => generateNovelAiImage(input || {}));
-  ipcMain.handle(IPC.NOVELAI_TASKS, () => imageQueue.list().map(({ input: _input, ...task }) => task));
-  ipcMain.handle(IPC.NOVELAI_TASK_CANCEL, (_event, id) => imageQueue.cancel(String(id || "")));
-  ipcMain.handle(IPC.NOVELAI_TASK_RETRY, async (_event, id) => imageQueue.retry(String(id || "")));
-  ipcMain.handle(IPC.NOVELAI_HISTORY, (_event,offset,limit) => loadHistory(offset,limit));
-  ipcMain.handle(IPC.NOVELAI_GET_IMAGE, (_event, id) => loadImageById(id));
-  ipcMain.handle(IPC.NOVELAI_OPEN_OUTPUT, () => shell.openPath(outputDir()));
-  ipcMain.handle(IPC.NOVELAI_PICK_IMAGE, async () => {
+  ctx.registerIpc(NOVELAI.CAPABILITIES, (kind) => getProviderCapabilities(kind as ImageProviderKind));
+  ctx.registerIpc(NOVELAI.MODELS, (config) => listNovelAiModels(config || undefined));
+  ctx.registerIpc(NOVELAI.GENERATE, (input) => generateNovelAiImage((input || {}) as Record<string, unknown>));
+  ctx.registerIpc(NOVELAI.TASKS, () => imageQueue.list().map(({ input: _input, ...task }) => task));
+  ctx.registerIpc(NOVELAI.TASK_CANCEL, (id) => imageQueue.cancel(String(id || "")));
+  ctx.registerIpc(NOVELAI.TASK_RETRY, (id) => imageQueue.retry(String(id || "")));
+  ctx.registerIpc(NOVELAI.HISTORY, (offset, limit) => loadHistory(offset, limit));
+  ctx.registerIpc(NOVELAI.GET_IMAGE, (id) => loadImageById(id));
+  ctx.registerIpc(NOVELAI.OPEN_OUTPUT, () => shell.openPath(outputDir()));
+  ctx.registerIpc(NOVELAI.PICK_IMAGE, async () => {
     const result = await dialog.showOpenDialog({ properties: ["openFile"], filters: [{ name: "图片", extensions: ["png", "jpg", "jpeg", "webp"] }] });
     if (result.canceled || !result.filePaths[0]) return null;
     const filePath = result.filePaths[0];
@@ -352,20 +317,19 @@ export function registerNovelAiIpc(openWindow: () => void, minimizeWindow: () =>
     const mimeType = ext === ".webp" ? "image/webp" : ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" : "image/png";
     return { name: path.basename(filePath), dataUrl: `data:${mimeType};base64,${bytes.toString("base64")}` };
   });
-  ipcMain.handle(IPC.NOVELAI_ASSETS, () => loadAssets());
-  ipcMain.handle(IPC.NOVELAI_ASSET_IMPORT, () => importAsset());
-  ipcMain.handle(IPC.NOVELAI_ASSET_DELETE, (_event, id) => deleteAsset(id));
-  ipcMain.handle(IPC.NOVELAI_UPSCALE, (_event, id, scale) => upscaleImageById(id, scale));
-  ipcMain.handle(IPC.NOVELAI_ASSET_UPDATE, (_event,id,patch) => updateAsset(id,patch));
-  ipcMain.handle(IPC.NOVELAI_HISTORY_UPDATE, (_event,id,patch) => updateHistoryMeta(id,patch));
-  ipcMain.handle(IPC.NOVELAI_HISTORY_DELETE, (_event,id) => deleteHistoryItem(id));
-  ipcMain.handle(IPC.NOVELAI_TRANSLATE_PROMPT, async (_event, messages: Array<{ role: "system" | "user"; content: string }>) => {
-    return translatePromptWithLLM(messages);
+  ctx.registerIpc(NOVELAI.ASSETS, () => loadAssets());
+  ctx.registerIpc(NOVELAI.ASSET_IMPORT, () => importAsset());
+  ctx.registerIpc(NOVELAI.ASSET_DELETE, (id) => deleteAsset(id));
+  ctx.registerIpc(NOVELAI.UPSCALE, (id, scale) => upscaleImageById(id, scale));
+  ctx.registerIpc(NOVELAI.ASSET_UPDATE, (id, patch) => updateAsset(id, patch));
+  ctx.registerIpc(NOVELAI.HISTORY_UPDATE, (id, patch) => updateHistoryMeta(id, patch));
+  ctx.registerIpc(NOVELAI.HISTORY_DELETE, (id) => deleteHistoryItem(id));
+  ctx.registerIpc(NOVELAI.TRANSLATE_PROMPT, (messages) => {
+    return translatePromptWithLLM(messages as Array<{ role: "system" | "user"; content: string }>);
   });
-}
 
-toolRegistry.register({
-  id: "inspect_drawing_context",
+  ctx.registerTool({
+  id: "novelai_inspect_drawing_context",
   name: "查看绘图上下文",
   description: "读取当前绘图工作台可用的角色档案、各角色衣柜、参考素材和供应商能力。需要选择角色、服装、参考图，或不确定当前绘图能力时先调用；返回内容不包含 API Key 和图片数据。",
   enabled: true,
@@ -391,10 +355,10 @@ toolRegistry.register({
   },
 });
 
-toolRegistry.register({
-  id: "generate_novelai_image",
+  ctx.registerTool({
+  id: "novelai_generate_image",
   name: "AI 绘图",
-  description: "生成图片并直接分享到聊天。必须明确 subject：画 Cyrene/昔涟本人、自拍或她自己的照片一律用 self，后端会强制注入完整本体角色标签；画档案中的其他角色用 character；原创人物或不绑定角色用 none。需要角色、衣柜、素材 ID 或能力信息时先调用 inspect_drawing_context。",
+  description: "生成图片并直接分享到聊天。必须明确 subject：画 Cyrene/昔涟本人、自拍或她自己的照片一律用 self，后端会强制注入完整本体角色标签；画档案中的其他角色用 character；原创人物或不绑定角色用 none。需要角色、衣柜、素材 ID 或能力信息时先调用 novelai_inspect_drawing_context。",
   enabled: true,
   risk: "network",
   inputSchema: {
@@ -413,7 +377,7 @@ toolRegistry.register({
       characterId:{type:"string",description:"subject=character 时必填的角色档案 ID；subject=self 时会被忽略并强制使用 Agent 本体。"},
       outfitId: { type: "string", description: "可选服装预设 ID；留空使用当前选择，传 __none__ 则不注入服装。" },
       characters: { type: "array", description: "可选的多角色构图，坐标范围 0 到 1。", items: { type: "object", properties: { name:{type:"string"}, prompt:{type:"string"}, negativePrompt:{type:"string"}, x:{type:"number"}, y:{type:"number"} }, required:["prompt","x","y"] } },
-      referenceMode:{type:"string",enum:["none","img2img","vibe","director-character","director-style","director-both"],description:"参考素材用途。使用前通过 inspect_drawing_context 确认当前供应商支持。"},
+      referenceMode:{type:"string",enum:["none","img2img","vibe","director-character","director-style","director-both"],description:"参考素材用途。使用前通过 novelai_inspect_drawing_context 确认当前供应商支持。"},
       referenceAssetIds:{type:"array",description:"素材库中的参考图片 ID，最多 4 个。",items:{type:"string"}},
       referenceStrength:{type:"number",description:"参考强度，0 到 1，默认 0.7。"},
       referenceInformationExtracted:{type:"number",description:"参考图信息提取量，0 到 1，默认 1。"},
@@ -432,10 +396,10 @@ toolRegistry.register({
   },
 });
 
-toolRegistry.register({
-  id: "change_visual_outfit",
+  ctx.registerTool({
+  id: "novelai_change_visual_outfit",
   name: "切换绘图穿搭",
-  description: "切换后续绘图使用的角色服装预设。给 Cyrene/昔涟本人换装时使用 subject=self，避免修改工作台当前选中的其他角色；不知道服装 ID 时先调用 inspect_drawing_context。",
+  description: "切换后续绘图使用的角色服装预设。给 Cyrene/昔涟本人换装时使用 subject=self，避免修改工作台当前选中的其他角色；不知道服装 ID 时先调用 novelai_inspect_drawing_context。",
   enabled: true,
   inputSchema: {
     type: "object",
@@ -463,7 +427,7 @@ toolRegistry.register({
   },
 });
 
-toolRegistry.register({id:"change_drawing_character",name:"切换绘图角色",description:"切换后续 AI 绘图的画面主体；不会改变 Agent 自身身份。",enabled:true,inputSchema:{type:"object",properties:{characterId:{type:"string",description:"角色档案 ID，传 __none__ 不注入角色"},characterName:{type:"string",description:"角色名称"}}},execute:async(args)=>{const config=loadNovelAiConfig();const id=String(args.characterId||"").trim(),name=String(args.characterName||"").trim().toLowerCase();if(id==="__none__"||name==="不指定角色"){saveNovelAiConfig({...config,activeCharacterId:"__none__"});return"[ok] 后续绘图不注入固定角色。"}const character=config.characters.find((item)=>item.id===id)||config.characters.find((item)=>item.name.toLowerCase().includes(name)&&name);if(!character)return`[error] 未找到绘图角色。可用角色：${config.characters.map((item)=>`${item.name}(${item.id})`).join("、")||"无"}`;saveNovelAiConfig({...config,activeCharacterId:character.id});return`[ok] 后续绘图主体已切换为“${character.name}”。`}});
+  ctx.registerTool({id:"novelai_change_drawing_character",name:"切换绘图角色",description:"切换后续 AI 绘图的画面主体；不会改变 Agent 自身身份。",enabled:true,inputSchema:{type:"object",properties:{characterId:{type:"string",description:"角色档案 ID，传 __none__ 不注入角色"},characterName:{type:"string",description:"角色名称"}}},execute:async(args)=>{const config=loadNovelAiConfig();const id=String(args.characterId||"").trim(),name=String(args.characterName||"").trim().toLowerCase();if(id==="__none__"||name==="不指定角色"){saveNovelAiConfig({...config,activeCharacterId:"__none__"});return"[ok] 后续绘图不注入固定角色。"}const character=config.characters.find((item)=>item.id===id)||config.characters.find((item)=>item.name.toLowerCase().includes(name)&&name);if(!character)return`[error] 未找到绘图角色。可用角色：${config.characters.map((item)=>`${item.name}(${item.id})`).join("、")||"无"}`;saveNovelAiConfig({...config,activeCharacterId:character.id});return`[ok] 后续绘图主体已切换为“${character.name}”。`}});
 
 // ── 历史作品查阅工具 ──────────────────────────────────────
 
@@ -511,8 +475,8 @@ function summarizeHistoryMeta(meta: Record<string, unknown>): Record<string, unk
   };
 }
 
-toolRegistry.register({
-  id: "list_drawing_history",
+  ctx.registerTool({
+  id: "novelai_list_drawing_history",
   name: "查看绘图历史",
   description:
     "列出已生成的绘图历史作品，支持按关键词检索提示词/编译提示词/负面词/角色名/服装名，返回每张作品的 ID、提示词、编译后提示词（节选）、负面词、角色、服装、尺寸、采样参数与创建时间。\n\n" +
@@ -521,8 +485,8 @@ toolRegistry.register({
     "- 需要按主题/角色/服装检索旧图\n" +
     "- 用户想复用某张图的参数或提示词（先列出拿到 ID，再看详情）\n\n" +
     "不要用于：\n" +
-    "- 查看单张作品的完整参数和图片本身（那是 get_drawing_detail）\n" +
-    "- 生成新图（那是 generate_novelai_image）\n\n" +
+    "- 查看单张作品的完整参数和图片本身（那是 novelai_get_drawing_detail）\n" +
+    "- 生成新图（那是 novelai_generate_image）\n\n" +
     "参数：query (可选，关键词，不区分大小写)，offset (可选，默认0)，limit (可选，默认10，最大40)，favoriteOnly (可选，只看收藏)。",
   enabled: true,
   inputSchema: {
@@ -560,8 +524,8 @@ toolRegistry.register({
   },
 });
 
-toolRegistry.register({
-  id: "get_drawing_detail",
+  ctx.registerTool({
+  id: "novelai_get_drawing_detail",
   name: "查看绘图作品详情",
   description:
     "按 ID 查看绘图作品的完整元数据（含完整提示词、编译后提示词、负面词、角色/服装、参考模式、全部采样参数与种子），并把图片直接显示到当前聊天里。支持一次查看多张：传 ids 数组可同时取出多张作品并全部显示在聊天中。\n\n" +
@@ -571,8 +535,8 @@ toolRegistry.register({
     "- 用户想一次看多张图（传 ids 数组，最多 8 张）\n" +
     "- 需要复用某张图的完整参数重新生成\n\n" +
     "不要用于：\n" +
-    "- 列出多张作品的摘要（那是 list_drawing_history，先列出拿到 ID 再看详情）\n" +
-    "- 生成新图（那是 generate_novelai_image）\n\n" +
+    "- 列出多张作品的摘要（那是 novelai_list_drawing_history，先列出拿到 ID 再看详情）\n" +
+    "- 生成新图（那是 novelai_generate_image）\n\n" +
     "参数：id (单个作品 ID) 或 ids (多个作品 ID 数组，最多 8 个)。二选一，ids 优先。",
   enabled: true,
   inputSchema: {
@@ -588,7 +552,7 @@ toolRegistry.register({
       ? args.ids.map(String)
       : (args.id ? [String(args.id)] : []);
     const ids = rawIds.map(s => s.trim()).filter(s => /^[a-zA-Z0-9-]+$/.test(s)).slice(0, 8);
-    if (ids.length === 0) return "[错误] 未提供合法的作品 ID。请先调用 list_drawing_history 查看可用作品。";
+    if (ids.length === 0) return "[错误] 未提供合法的作品 ID。请先调用 novelai_list_drawing_history 查看可用作品。";
     const found: Record<string, unknown>[] = [];
     const missing: string[] = [];
     for (const id of ids) {
@@ -601,7 +565,7 @@ toolRegistry.register({
       }
     }
     if (found.length === 0) {
-      return `[错误] 未找到任何作品。请求的 ID：${ids.join("、")}。请先调用 list_drawing_history 查看可用作品。`;
+      return `[错误] 未找到任何作品。请求的 ID：${ids.join("、")}。请先调用 novelai_list_drawing_history 查看可用作品。`;
     }
     const metas = found.map((image) => {
       const { dataUrl: _dataUrl, ...meta } = image;
@@ -612,8 +576,13 @@ toolRegistry.register({
       "```json",
       JSON.stringify(metas.length === 1 ? metas[0] : metas, null, 2),
       "```",
-      "如需复用这些参数重新生成，可直接调用 generate_novelai_image 并传入对应字段。",
+      "如需复用这些参数重新生成，可直接调用 novelai_generate_image 并传入对应字段。",
     ];
     return lines.join("\n");
   },
 });
+}
+
+export function unregisterNovelAi(): void {
+  pluginContext = undefined;
+}
