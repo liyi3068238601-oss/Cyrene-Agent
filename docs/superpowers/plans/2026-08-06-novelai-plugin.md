@@ -62,7 +62,7 @@
 | M4-S1 | 2026-08-08 | 主程序接线：plugin-llm.ts + index.ts 注入 llm.translateText | 已完成，LLM/NAI 测试 23/23 与 main 类型检查通过 | 11d2ede |
 | M5-S1 | 2026-08-08 | 测试迁移（prompt-profile/providers/task-queue）+ 插件级集成测试 | 已完成，NAI 与 LLM 专项测试 23/23 通过 | 测试随各功能提交 |
 | M6-S1 | 2026-08-08 | 全量回归 + 构建 + 构建产物运行时冒烟验证（加载/工具/IPC/卸载） | 已完成：265 个测试文件通过、2349 个测试通过；全量构建通过；5 个必需产物齐全；运行时启用后注册 6 个工具和 28 个 IPC，卸载后均为 0 | 00016fb |
-| M7-S1 | 2026-08-08 | 上游合并演练 + 文档收尾 + 施工日志完结 | 已完成：可直接合入开发基线 `liyi-Cyrene-v2`；最新 `origin/master@196b0b8` 与基线已分叉，直接合并存在冲突，需另开上游同步任务处理 | 待提交 |
+| M7-S1 | 2026-08-08 | 上游合并演练 + 文档收尾 + 施工日志完结 | 已完成：可直接合入开发基线 `liyi-Cyrene-v2`；最新 `origin/master@196b0b8` 与基线已分叉，直接合并存在冲突，需另开上游同步任务处理 | 72be2a8 |
 
 ---
 
@@ -1181,7 +1181,7 @@ git merge-base --is-ancestor origin/master HEAD && echo "可安全合并"
 
 - [x] **Step 3: 核对规范一致性**（`docs/plugins/plugin-authoring.md` 已补齐 `llm` 白名单、受控 `open()` 和 NovelAI 窗口范例；静态检查确认 NovelAI 插件没有直接 import `src/main/**` 或 `src/shared/**`）
 
-- [ ] **Step 4: 施工日志全部回填，最终提交**
+- [x] **Step 4: 施工日志全部回填，最终提交**
 
 ```bash
 git add docs/superpowers/plans/2026-08-06-novelai-plugin.md
