@@ -1,0 +1,10 @@
+{
+  "id": "novelai",
+  "name": "NovelAI 绘图",
+  "version": "0.1.0",
+  "description": "NovelAI 绘图工作台（本地网关模式）",
+  "author": "liyi",
+  "entry": "index.js",
+  "defaultEnabled": true,
+  "deps": ["channels", "llm"]
+}
