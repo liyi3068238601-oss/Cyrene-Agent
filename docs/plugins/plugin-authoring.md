@@ -33,7 +33,7 @@ userData/plugins/<id>/
 | `author` | string | 是 | 作者 |
 | `entry` | string | 是 | 插件目录内的**裸文件名**（不允许 `../` 或子目录路径），必须存在 |
 | `defaultEnabled` | boolean | 否 | 默认是否启用，缺省视为 `true` |
-| `deps` | string[] | 否 | 需要注入的主程序内部依赖白名单，v1 仅支持 `"channels"` |
+| `deps` | string[] | 否 | 需要注入的主程序内部依赖白名单，v1 支持 `"channels"`、`"llm"` |
 
 最小示例：
 
@@ -51,7 +51,7 @@ userData/plugins/<id>/
 
 ## 3. 入口契约
 
-入口文件必须导出 `register(ctx)`，可选导出 `unregister()`。`register` 在插件启用时调用一次；`unregister` 在插件禁用/退出前调用。
+入口文件必须导出 `register(ctx)`，可选导出 `unregister()` 和 `open()`。`register` 在插件启用时调用一次；`unregister` 在插件禁用/退出前调用；`open` 供主程序通过受控入口打开插件窗口。
 
 ### 3.1 CJS（推荐，`index.cjs`）
 
@@ -188,10 +188,19 @@ ctx.storage.rootDir(); // userData/plugins/<id>
 
 - 通过 manifest `deps` 白名单声明；
 - 由框架在 `register` 前注入到 `ctx.deps`；
-- **白名单生效**：未在 `manifest.deps` 声明的依赖不会被注入（`ctx.deps.channels` 为 undefined）。
-- v1 支持：`deps: ["channels"]` → `ctx.deps.channels.channelManager`（仅 `register/unregister/startOne` 三个方法）。
+- **白名单生效**：未在 `manifest.deps` 声明的依赖不会被注入；例如未声明 `"llm"` 时，`ctx.deps.llm` 为 `undefined`。
+- `deps: ["channels"]` → `ctx.deps.channels.channelManager`（仅 `register/unregister/startOne` 三个方法）。
+- `deps: ["llm"]` → `ctx.deps.llm.translateText(messages)`，使用主程序当前配置的聊天模型完成一次非流式文本请求。
 
-其余能力（如 LLM 翻译）按需扩展白名单，例如 `deps.llm.translateText`。
+```json
+{
+  "id": "novelai",
+  "deps": ["channels", "llm"],
+  "entry": "index.js"
+}
+```
+
+> 插件应在调用前判断依赖是否存在，并给用户可理解的错误提示；不要绕过依赖白名单直接 import 主程序的模型实现。
 
 ### 4.6 日志 `ctx.log(...args)`
 
@@ -221,9 +230,10 @@ ctx.storage.rootDir(); // userData/plugins/<id>
 插件系统 v1 不提供 `rendererEntry` 机制，带 UI 的插件按以下模式实现（NovelAI 即范例）：
 
 1. 渲染页面源码放 `src/renderer/<plugin-id>/`，在 `vite.config.ts` 的 `rollupOptions.input` 追加入口（属于主程序收敛清单内的允许改动）。
-2. 插件在 `register(ctx)` 中注册打开窗口的 IPC（如 `plugin:novelai:open-workbench`）。
-3. 插件自己在主进程创建 `BrowserWindow`，`webPreferences.preload` 指向插件自带 preload（编译到 `dist/main/plugins/<id>/preload.js`），由 preload 用 `ipcRenderer` 桥接 `window.<插件名>` API 与 `plugin:<id>:*` 通道。
-4. 窗口生命周期（创建/关闭/防重复）由插件自行管理，`unregister()` 中关闭窗口。
+2. 插件入口导出可选的 `open()`；主程序只允许通过 `plugins:open` 打开已启用且确实提供 `open()` 的插件。设置页会为这类插件显示“打开”按钮。
+3. 插件在 `register(ctx)` 中注册窗口内部需要的 IPC（如 `plugin:novelai:open-workbench`）。
+4. 插件自己在主进程创建 `BrowserWindow`，`webPreferences.preload` 指向插件自带 preload（编译到 `dist/main/plugins/<id>/preload.js`），由 preload 用 `ipcRenderer` 桥接 `window.<插件名>` API 与 `plugin:<id>:*` 通道。
+5. 窗口生命周期（创建/关闭/防重复）由插件自行管理，`unregister()` 中关闭窗口。
 
 插件代码运行在主进程，允许直接使用 Node 内置模块与 Electron 模块（`BrowserWindow`、`dialog`、`shell`、`safeStorage` 等）；约束仅限于「不直接 import 主程序内部业务模块」。
 
@@ -252,7 +262,7 @@ node dist/cli/index.js run
 - 设置面板「功能插件」页出现该插件，开关可启停；
 - 工具生效：`registerTool` 后 LLM 工具列表可见；
 - IPC 生效：`ipcRenderer.invoke("plugin:<id>:<channel>")` 有响应；
-- 禁用后上述通道/工具消失。
+- 提供 `open()` 的插件可从设置页打开；禁用后窗口关闭，上述通道/工具消失。
 
 ## 9. 安全边界
 
@@ -271,7 +281,8 @@ node dist/cli/index.js run
 4. 工具 id 以 `<插件id>_` 开头，`inputSchema` 与 `execute` 匹配。
 5. IPC 通道不重复注册；统一用 `ctx.registerIpc`（自动前缀）。
 6. 渠道插件声明 `deps: ["channels"]`，并确认主程序 `ChannelId` 已包含对应渠道。
-7. 不直接 import `src/main/**`、`src/shared/**` 内部模块；需要的能力走 `deps` 白名单。
+7. 不直接 import `src/main/**`、`src/shared/**` 内部模块；需要的能力走 `deps` 白名单；使用主模型时声明 `deps: ["llm"]`。
 8. 数据写入 `ctx.storage`，不散落到其他 userData 位置。
 9. `unregister()` 关闭窗口/停止后台任务；框架 dispose 会兜底清理工具与 IPC。
-10. 按 §8 完成验证：加载日志、设置面板开关、工具/IPC 生效、禁用后清理。
+10. 带窗口插件导出 `open()`，并确认设置页只在插件启用时提供“打开”。
+11. 按 §8 完成验证：加载日志、设置面板开关、工具/IPC 生效、禁用后清理。

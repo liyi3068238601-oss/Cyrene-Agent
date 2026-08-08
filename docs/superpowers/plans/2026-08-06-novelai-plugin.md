@@ -61,7 +61,7 @@
 | M3-S1 | 2026-08-08 | renderer 入口（vite.config.ts）+ 插件 preload.ts | 已完成，preload 测试、main 类型检查与 renderer 构建通过 | 93fafc0 |
 | M4-S1 | 2026-08-08 | 主程序接线：plugin-llm.ts + index.ts 注入 llm.translateText | 已完成，LLM/NAI 测试 23/23 与 main 类型检查通过 | 11d2ede |
 | M5-S1 | 2026-08-08 | 测试迁移（prompt-profile/providers/task-queue）+ 插件级集成测试 | 已完成，NAI 与 LLM 专项测试 23/23 通过 | 测试随各功能提交 |
-| M6-S1 | - | 全量回归 + 构建 + 端到端验证（加载/工作台/IPC/开关） | 待执行 | - |
+| M6-S1 | 2026-08-08 | 全量回归 + 构建 + 构建产物运行时冒烟验证（加载/工具/IPC/卸载） | 已完成：265 个测试文件通过、2349 个测试通过；全量构建通过；5 个必需产物齐全；运行时启用后注册 6 个工具和 28 个 IPC，卸载后均为 0 | 待提交 |
 | M7-S1 | - | 上游合并演练 + 文档收尾 + 施工日志完结 | 待执行 | - |
 
 ---
@@ -1111,14 +1111,14 @@ git commit -m "M5-S1 docs(plugins): 施工日志回填 M5-S1"
 **Files:**
 - 无新增文件。
 
-- [ ] **Step 1: 全量测试**
+- [x] **Step 1: 全量测试**
 
 ```bash
 npm test
 ```
 Expected: 全部 PASS。
 
-- [ ] **Step 2: 全量构建**
+- [x] **Step 2: 全量构建**
 
 ```bash
 npm run build
@@ -1133,7 +1133,7 @@ dist/main/plugins/novelai/service.js
 dist/renderer/novelai/index.html
 ```
 
-- [ ] **Step 3: 启动端到端验证**
+- [x] **Step 3: 启动端到端验证**
 
 ```bash
 node dist/cli/index.js run
@@ -1146,6 +1146,8 @@ Expected:
 - 打开工作台窗口（`plugin:novelai:open-workbench`），窗口标题「昔涟 · NovelAI 绘图」，`window.novelai` 可用；
 - 禁用插件后工作台窗口关闭、IPC 通道消失；
 - 生成/放大等动作依赖本地 NovelAI Gateway（`http://127.0.0.1:31555`）运行，未启动时接口报错但插件与 UI 正常。
+
+本次采用构建产物运行时冒烟替代可见 GUI 人工点击：直接从 `dist/main/plugins` 启动 `PluginManager`，确认 `novelai@0.1.0` 已启用、`canOpen=true`、6 个 `novelai_*` 工具和 28 个 IPC 已注册；调用 `stop()` 后工具与 IPC 均清零。窗口创建、防重复、preload API 与设置页“打开”按钮由对应自动化测试覆盖。实际出图仍需用户本机另行启动 NovelAI Gateway。
 
 - [ ] **Step 4: 提交并回填施工日志（M6-S1）**
 
