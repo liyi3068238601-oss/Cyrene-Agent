@@ -8,9 +8,12 @@ if errorlevel 1 goto npm_missing
 
 if not exist "node_modules\" goto dependencies_missing
 
-if not exist "dist\main\main\index.js" goto build_missing
+echo [Cyrene] 正在重新构建，请稍候...
+call npm.cmd run build
+set "CYRENE_BUILD_EXIT_CODE=%ERRORLEVEL%"
+if not "%CYRENE_BUILD_EXIT_CODE%"=="0" goto build_failed
 
-echo [Cyrene] 正在启动...
+echo [Cyrene] 构建完成，正在启动...
 call npm.cmd start
 set "CYRENE_EXIT_CODE=%ERRORLEVEL%"
 if not "%CYRENE_EXIT_CODE%"=="0" goto start_failed
@@ -28,11 +31,12 @@ echo 请先双击 setup.bat 完成初始化，然后再运行 start.bat。
 pause
 exit /b 1
 
-:build_missing
-echo [提示] 项目尚未构建。
-echo 请先双击 setup.bat 完成初始化，然后再运行 start.bat。
+:build_failed
+echo.
+echo [错误] Cyrene 构建失败，错误码：%CYRENE_BUILD_EXIT_CODE%
+echo 请根据上方错误信息修复后，再重新双击 start.bat。
 pause
-exit /b 1
+exit /b %CYRENE_BUILD_EXIT_CODE%
 
 :start_failed
 echo.
