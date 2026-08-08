@@ -59,7 +59,7 @@
 | M2-S2 | 2026-08-08 | service.ts 改造：IPC/工具/配置/翻译全部走 ctx | 已完成，插件测试 42/42 与 main 类型检查通过 | f188ef7 |
 | M2-S3 | 2026-08-08 | workbench.ts 窗口管理 + index.ts 最终版 | 已完成，窗口/入口测试及插件测试 44/44 通过 | 1a084a0 |
 | M3-S1 | 2026-08-08 | renderer 入口（vite.config.ts）+ 插件 preload.ts | 已完成，preload 测试、main 类型检查与 renderer 构建通过 | 93fafc0 |
-| M4-S1 | - | 主程序接线：plugin-llm.ts + index.ts 注入 llm.translateText | 待执行 | - |
+| M4-S1 | 2026-08-08 | 主程序接线：plugin-llm.ts + index.ts 注入 llm.translateText | 已完成，LLM/NAI 测试 23/23 与 main 类型检查通过 | 11d2ede |
 | M5-S1 | - | 测试迁移（prompt-profile/providers/task-queue）+ 插件级集成测试 | 待执行 | - |
 | M6-S1 | - | 全量回归 + 构建 + 端到端验证（加载/工作台/IPC/开关） | 待执行 | - |
 | M7-S1 | - | 上游合并演练 + 文档收尾 + 施工日志完结 | 待执行 | - |
