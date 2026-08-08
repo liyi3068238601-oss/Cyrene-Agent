@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createContext, type PluginRuntime } from "../context";
 import { NOVELAI } from "./channels";
+import { novelaiPlugin } from "./index";
 import { registerNovelAi } from "./service";
 
 vi.mock("electron", () => ({
@@ -83,5 +84,17 @@ describe("NovelAI 插件服务", () => {
 
     await ctx.dispose();
     expect(tools).toEqual([]);
+  });
+
+  it("插件入口接通服务并提供工作台打开能力", async () => {
+    const { ctx, ipc, tools } = harness();
+    await novelaiPlugin.register(ctx);
+
+    expect(typeof novelaiPlugin.open).toBe("function");
+    expect(ipc.has(`plugin:novelai:${NOVELAI.GENERATE}`)).toBe(true);
+    expect(tools.length).toBeGreaterThan(0);
+
+    await novelaiPlugin.unregister?.();
+    await ctx.dispose();
   });
 });
