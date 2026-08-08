@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- 分支：所有施工与提交只在本地分支 `liyi-Cyrene-v2`；不推送远端（除非用户另行要求）。
+- 分支：从 `liyi-Cyrene-v2` 创建隔离工作树分支 `feat/novelai-plugin`；施工与提交只在该隔离分支进行，不推送远端（除非用户另行要求）。
 - 前置：插件系统 v1 必须已完成并通过验收（`docs/superpowers/plans/2026-08-06-cyrene-plugin-system.md` 的 M1-M4）。
 - 提交规范：`M<里程碑>-S<步骤> <type>(plugins): <描述>`，每步结束立即提交。
 - 施工痕迹：本文档「施工日志」随每步回填（时间 / 状态 / commit hash），日志更新独立 `docs` 提交。
@@ -18,13 +18,31 @@
 - 上游文件改动收敛清单（除下列外不改动任何上游文件）：
   - `src/plugins/**`（全部新增，含 `novelai/`）
   - `src/renderer/novelai/**`（新增，从分支取回）
-  - `src/plugins/types.ts`（`PluginDeps` 追加 `llm`）
-  - `src/plugins/context.ts`（deps 组装 `llm`）
+  - `src/plugins/types.ts`（`PluginDeps` 追加 `llm`，`CyrenePlugin` 追加可选 `open`）
+  - `src/plugins/context.ts`（按 manifest 白名单组装 `llm`）
+  - `src/plugins/loader.ts`（manifest 依赖白名单追加 `llm`）
+  - `src/plugins/manager.ts`（提供受控的插件打开入口）
+  - `src/shared/ipc-channels.ts`、`src/preload/index.ts`（插件打开 IPC 链路）
+  - `src/renderer/settings/settings.ts`（功能插件列表显示“打开”按钮）
   - `vite.config.ts`（`rollupOptions.input` 追加 `novelai` 入口）
   - `src/main/plugin-llm.ts`（新增：翻译注入实现）
   - `src/main/index.ts`（插件 runtime 追加 `llm.translateText`）
 - 零新增 npm 依赖；Node >=24 <25。
 - 测试：TDD；`npm test` 全量通过；`npm run build` 全绿。
+- 权限边界：只有 manifest 明确声明 `deps: ["llm"]` 的插件才能获得 `ctx.deps.llm`；未声明时必须为 `undefined`。
+- 易用性：支持打开窗口的插件在“设置 → 功能插件”中显示“打开”按钮；不向 renderer 暴露任意插件 IPC 调用能力。
+
+### 2026-08-08 执行前修订
+
+本节记录插件系统 v1 修复完成后的差异，以下规则覆盖本文后续旧代码片段中的冲突内容：
+
+1. `PluginManifest.deps` 与 loader 白名单同时扩展为 `"channels" | "llm"`；不能只扩展 `PluginDeps`。
+2. `createContext` 必须分别按 `declaredDeps.includes("channels")` 和 `declaredDeps.includes("llm")` 注入，禁止无条件注入。
+3. `createContext` 的 LLM 测试必须传入 `["llm"]`，并补充“未声明时不注入”的反向测试。
+4. `dispose()` 现为异步函数；测试和卸载流程必须 `await ctx.dispose()`。
+5. 保留旧 renderer 的 `translatePrompt(description: string)` 接口；由插件 preload 在内部组装 LLM messages，避免 UI 调用签名断裂。
+6. 新增通用、受控的 `CyrenePlugin.open?()` 链路，让设置页可以打开 NAI 工作台；不得新增可调用任意 `plugin:*` 通道的通用 renderer API。
+7. 所有测试数量以实际运行结果为准，不再使用旧计划中的固定数量断言。
 
 ---
 
@@ -36,6 +54,7 @@
 | M0-S2 | - | 从 fork/liyi-Cyrene 提取 NovelAI 源码（main + renderer） | 待执行 | - |
 | M1-S1 | - | 框架扩展：PluginDeps 增加 llm（translateText 注入）+ 单测 | 待执行 | - |
 | M1-S2 | - | 插件骨架：manifest.json + channels.ts + index.ts（可加载/可停用）+ manifest 测试 | 待执行 | - |
+| M1-S3 | - | 插件打开能力：设置页“打开”按钮 + 受控 IPC + 单测 | 待执行 | - |
 | M2-S1 | - | 纯逻辑模块适配：types/providers/prompt-profile/task-queue 去除上游内部依赖 | 待执行 | - |
 | M2-S2 | - | service.ts 改造：IPC/工具/配置/翻译全部走 ctx | 待执行 | - |
 | M2-S3 | - | workbench.ts 窗口管理 + index.ts 最终版 | 待执行 | - |
@@ -118,7 +137,7 @@ Expected: `c946a0d`（或更新的 fork 远端值，若已重新 fetch）
 - [ ] **Step 2: 提取主进程模块到工作区**
 
 ```bash
-git checkout fork/liyi-Cyrene -- src/main/novelai
+git restore --source fork/liyi-Cyrene -- src/main/novelai
 ```
 
 - [ ] **Step 3: 移入插件目录（先建目录，再逐文件 git mv）**
@@ -132,7 +151,7 @@ Remove-Item -LiteralPath src/main/novelai -Force
 - [ ] **Step 4: 提取 renderer 工作台**
 
 ```bash
-git checkout fork/liyi-Cyrene -- src/renderer/novelai
+git restore --source fork/liyi-Cyrene -- src/renderer/novelai
 ```
 
 - [ ] **Step 5: 核对文件清单**
@@ -156,12 +175,13 @@ git commit -m "M0-S2 docs(plugins): 施工日志回填 M0-S2"
 ### Task M1-S1: 框架扩展 PluginDeps.llm
 
 **Files:**
-- Modify: `src/plugins/types.ts`（`PluginDeps` 追加 `llm`）
+- Modify: `src/plugins/types.ts`（manifest 依赖类型与 `PluginDeps` 追加 `llm`）
+- Modify: `src/plugins/loader.ts`（依赖白名单追加 `llm`）
 - Modify: `src/plugins/context.ts`（runtime 增加 `llm`，deps 组装）
-- Test: `src/plugins/context.test.ts`（追加用例）
+- Test: `src/plugins/context.test.ts`、`src/plugins/loader.test.ts`（追加正反用例）
 
 **Interfaces:**
-- Produces: `LlmDeps.translateText(messages): Promise<string>`；`ctx.deps.llm` 在 runtime 提供时注入。
+- Produces: `LlmDeps.translateText(messages): Promise<string>`；只有 manifest 声明 `llm` 且 runtime 提供实现时才注入 `ctx.deps.llm`。
 - Consumed by: M2-S2 service 翻译功能、M4-S1 主程序注入。
 
 - [ ] **Step 1: 写失败测试（`context.test.ts` 追加）**
@@ -177,12 +197,20 @@ it("runtime 提供 llm 时注入 ctx.deps.llm.translateText", async () => {
       return "翻译结果";
     },
   };
-  const ctx = createContext("demo", tmp, rt);
+  const ctx = createContext("demo", tmp, rt, ["llm"]);
   const out = await ctx.deps.llm?.translateText([
     { role: "user", content: "你好" },
   ]);
   expect(out).toBe("翻译结果");
   expect(calls).toEqual(["你好"]);
+});
+
+it("manifest 未声明 llm 时不注入 runtime.llm", () => {
+  tmp = mkdtempSync(path.join(os.tmpdir(), "cyrene-ctx-test-"));
+  const rt = runtime();
+  rt.llm = { translateText: async () => "不应被调用" };
+  const ctx = createContext("demo", tmp, rt);
+  expect(ctx.deps.llm).toBeUndefined();
 });
 ```
 
@@ -191,7 +219,7 @@ it("runtime 提供 llm 时注入 ctx.deps.llm.translateText", async () => {
 - [ ] **Step 2: 运行测试，确认失败**
 
 ```bash
-npx vitest run src/plugins/context.test.ts
+npx vitest run src/plugins/context.test.ts src/plugins/loader.test.ts
 ```
 
 - [ ] **Step 3: `types.ts` 追加**
@@ -211,6 +239,27 @@ export interface LlmDeps {
   llm?: LlmDeps;
 ```
 
+`PluginManifest.deps` 改为：
+
+```ts
+  deps?: Array<"channels" | "llm">;
+```
+
+`loader.ts` 的白名单与类型守卫改为：
+
+```ts
+const DEPS_ALLOWED = new Set(["channels", "llm"]);
+
+deps: Array.isArray(raw.deps)
+  ? raw.deps.filter(
+      (d): d is "channels" | "llm" =>
+        typeof d === "string" && DEPS_ALLOWED.has(d),
+    )
+  : undefined,
+```
+
+并在 `loader.test.ts` 将合法依赖断言改为同时保留 `channels`、`llm`，仍过滤未知值 `nope`。
+
 - [ ] **Step 4: `context.ts` 追加**
 
 `PluginRuntime` 追加：
@@ -222,10 +271,13 @@ export interface LlmDeps {
 `createContext` 内 deps 组装改为：
 
 ```ts
-  const deps: PluginDeps = {
-    channels: { channelManager: runtime.channelManager },
-    llm: runtime.llm,
-  };
+  const deps: PluginDeps = {};
+  if (declaredDeps?.includes("channels")) {
+    deps.channels = { channelManager: runtime.channelManager };
+  }
+  if (declaredDeps?.includes("llm") && runtime.llm) {
+    deps.llm = runtime.llm;
+  }
 ```
 
 （并同步 `import type { LlmDeps } from "./types"`）
@@ -233,14 +285,14 @@ export interface LlmDeps {
 - [ ] **Step 5: 运行测试，确认通过**
 
 ```bash
-npx vitest run src/plugins/context.test.ts
+npx vitest run src/plugins/context.test.ts src/plugins/loader.test.ts
 ```
-Expected: 4 个用例 PASS。
+Expected: `context.test.ts` 与 `loader.test.ts` 全部 PASS；具体数量以当前分支实际输出为准。
 
 - [ ] **Step 6: 提交并回填施工日志（M1-S1）**
 
 ```bash
-git add src/plugins/types.ts src/plugins/context.ts src/plugins/context.test.ts
+git add src/plugins/types.ts src/plugins/loader.ts src/plugins/context.ts src/plugins/context.test.ts src/plugins/loader.test.ts
 git commit -m "M1-S1 feat(plugins): PluginDeps 扩展 llm（translateText 注入）"
 git add docs/superpowers/plans/2026-08-06-novelai-plugin.md
 git commit -m "M1-S1 docs(plugins): 施工日志回填 M1-S1"
@@ -368,6 +420,101 @@ git add src/plugins/novelai/manifest.json src/plugins/novelai/channels.ts src/pl
 git commit -m "M1-S2 feat(plugins): NovelAI 插件骨架（manifest/channels/index）"
 git add docs/superpowers/plans/2026-08-06-novelai-plugin.md
 git commit -m "M1-S2 docs(plugins): 施工日志回填 M1-S2"
+```
+
+---
+
+### Task M1-S3: 通用插件打开能力（设置页“打开”按钮）
+
+**Files:**
+- Modify: `src/plugins/types.ts`
+- Modify: `src/plugins/manager.ts`
+- Modify: `src/shared/ipc-channels.ts`
+- Modify: `src/preload/index.ts`
+- Modify: `src/renderer/settings/settings.ts`
+- Test: `src/plugins/manager.test.ts`
+
+**Interfaces:**
+- Produces: `CyrenePlugin.open?(): void | Promise<void>`、列表字段 `canOpen: boolean`、受控 IPC `plugins:open`。
+- Consumed by: M2-S3 的 NovelAI 工作台窗口、设置页“打开”按钮。
+
+- [ ] **Step 1: 写失败测试**
+
+在 `manager.test.ts` 的 fixture 插件入口中加入 `open() {}`，并追加：
+
+```ts
+it("只允许打开已启用且声明 open 的插件", async () => {
+  const h = harness();
+  const mgr = new PluginManager(h.options);
+  await mgr.start();
+
+  expect(mgr.list()[0].canOpen).toBe(true);
+  expect(h.ipc.has("plugins:open")).toBe(true);
+  await expect(h.ipc.get("plugins:open")?.("demo")).resolves.toEqual({ ok: true });
+
+  await mgr.setEnabled("demo", false);
+  await expect(h.ipc.get("plugins:open")?.("demo")).resolves.toMatchObject({ ok: false });
+});
+```
+
+- [ ] **Step 2: 运行测试，确认因 `canOpen` / `plugins:open` 尚不存在而失败**
+
+Run: `npx vitest run src/plugins/manager.test.ts`
+
+- [ ] **Step 3: 实现最小主进程契约**
+
+`CyrenePlugin` 追加：
+
+```ts
+open?(): void | Promise<void>;
+```
+
+`PluginListEntry` 追加 `canOpen: boolean`，`list()` 返回：
+
+```ts
+canOpen: typeof plugin?.open === "function",
+```
+
+`PluginManager` 追加：
+
+```ts
+async open(id: string): Promise<{ ok: boolean; error?: string }> {
+  const plugin = this.instances.get(id);
+  if (!plugin) return { ok: false, error: `插件未启用: ${id}` };
+  if (!plugin.open) return { ok: false, error: `插件不支持打开窗口: ${id}` };
+  try {
+    await plugin.open();
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+```
+
+在 `start()` 注册 `IPC.PLUGINS_OPEN`，在 `stop()` 注销；`ipc-channels.ts` 追加：
+
+```ts
+PLUGINS_OPEN: "plugins:open",
+```
+
+- [ ] **Step 4: 实现 renderer 的受控按钮**
+
+`src/preload/index.ts` 的 `pluginsApi` 追加：
+
+```ts
+open: (id: string) => ipcRenderer.invoke(IPC.PLUGINS_OPEN, id),
+```
+
+设置页 `window.plugins` 类型追加 `canOpen` 与 `open(id)`；`renderFeaturePlugins()` 在启用且 `canOpen` 时创建“打开”按钮，点击后调用 `window.plugins.open(item.id)`，失败时沿用现有红色错误提示样式。
+
+- [ ] **Step 5: 运行插件测试并提交**
+
+```bash
+npx vitest run src/plugins
+git add src/plugins/types.ts src/plugins/manager.ts src/plugins/manager.test.ts src/shared/ipc-channels.ts src/preload/index.ts src/renderer/settings/settings.ts
+git commit -m "M1-S3 feat(plugins): 增加受控的插件打开入口"
+git add docs/superpowers/plans/2026-08-06-novelai-plugin.md
+git commit -m "M1-S3 docs(plugins): 施工日志回填 M1-S3"
 ```
 
 ---
@@ -614,8 +761,12 @@ import { registerNovelAi } from "./service";
 import { closeWorkbenchWindow, createWorkbenchWindow, minimizeWorkbenchWindow } from "./workbench";
 
 export const novelaiPlugin: CyrenePlugin = {
+  open() {
+    createWorkbenchWindow();
+  },
   register(ctx) {
     ctx.log("NovelAI 插件注册");
+    ctx.registerIpc("status", () => ({ id: "novelai", version: "0.1.0", ok: true }));
     ctx.registerIpc(NOVELAI.OPEN_WORKBENCH, () => {
       createWorkbenchWindow();
       return { ok: true };
@@ -703,8 +854,14 @@ const novelaiApi = {
   upscale: (id: string, scale: number) => ipcRenderer.invoke(prefix(NOVELAI.UPSCALE), id, scale),
   updateHistory: (id: string, patch: unknown) => ipcRenderer.invoke(prefix(NOVELAI.HISTORY_UPDATE), id, patch),
   deleteHistory: (id: string) => ipcRenderer.invoke(prefix(NOVELAI.HISTORY_DELETE), id),
-  translatePrompt: (messages: Array<{ role: "system" | "user"; content: string }>) =>
-    ipcRenderer.invoke(prefix(NOVELAI.TRANSLATE_PROMPT), messages),
+  translatePrompt: (description: string) =>
+    ipcRenderer.invoke(prefix(NOVELAI.TRANSLATE_PROMPT), [
+      {
+        role: "system",
+        content: "Convert the user's Chinese image description into concise NovelAI English comma-separated tags. Preserve subject, appearance, clothing, pose, expression, composition, environment, lighting and style. Output tags only; no explanation, Markdown, quotes, or roleplay.",
+      },
+      { role: "user", content: description },
+    ]),
   onTasksChanged: (cb: (tasks: unknown[]) => void) => {
     const listener = (_event: unknown, tasks: unknown[]) => cb(tasks);
     ipcRenderer.on(prefix(NOVELAI.TASKS_CHANGED), listener);
@@ -903,7 +1060,7 @@ function harness() {
     },
   };
   tmp = mkdtempSync(path.join(os.tmpdir(), "cyrene-novelai-test-"));
-  return { ctx: createContext("novelai", tmp, runtime), ipc, tools };
+  return { ctx: createContext("novelai", tmp, runtime, ["llm"]), ipc, tools };
 }
 
 describe("novelai plugin service", () => {
