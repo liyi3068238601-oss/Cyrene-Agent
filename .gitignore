@@ -117,6 +117,9 @@ opener-pack/*
 # Playwright MCP 运行时产物
 .playwright-mcp/
 
+# Local isolated Git worktrees
+.worktrees/
+
 # Private design docs — not published
 docs/
 !docs/
