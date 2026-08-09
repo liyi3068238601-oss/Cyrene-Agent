@@ -20,6 +20,36 @@ export function setActivityDrawer(open: boolean, root: ParentNode = document): v
   drawer.toggleAttribute("hidden", !open);
 }
 
+export function reportAssetStatus(text: string, error = false, detail?: unknown, root: ParentNode = document): void {
+  const status = root.querySelector<HTMLElement>("#asset-status");
+  const details = root.querySelector<HTMLDetailsElement>("#asset-status-details");
+  const technical = root.querySelector<HTMLPreElement>("#asset-status-technical");
+  if (!status || !details || !technical) return;
+  status.textContent = text;
+  status.classList.toggle("is-error", error);
+  technical.textContent = detail instanceof Error ? detail.stack || detail.message : detail ? String(detail) : "";
+  details.hidden = !technical.textContent;
+  if (details.hidden) details.open = false;
+}
+
+interface AssetActionOptions {
+  errorMessage: string;
+  clearOnSuccess?: boolean;
+  root?: ParentNode;
+}
+
+export async function runAssetAction<T>(action: () => Promise<T>, options: AssetActionOptions): Promise<T | undefined> {
+  const root = options.root || document;
+  try {
+    const result = await action();
+    if (options.clearOnSuccess) reportAssetStatus("", false, undefined, root);
+    return result;
+  } catch (error) {
+    reportAssetStatus(options.errorMessage, true, error, root);
+    return undefined;
+  }
+}
+
 export function bindNovelAiUi(root: ParentNode = document): () => void {
   const cleanups: Array<() => void> = [];
   root.querySelectorAll<HTMLButtonElement>("[data-nai-route]").forEach((button) => {

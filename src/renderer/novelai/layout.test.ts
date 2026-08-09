@@ -41,6 +41,12 @@ describe("NovelAI beginner layout", () => {
     expect(html).toContain('id="status-technical"');
   });
 
+  it("provides an independent accessible asset status region", () => {
+    expect(html).toContain('id="asset-status" class="asset-status" role="status" aria-live="polite"');
+    expect(html).toContain('id="asset-status-details" hidden');
+    expect(html).toContain('id="asset-status-technical"');
+  });
+
   it("preserves critical integration ids", () => {
     for (const id of ["connection-badge", "generate", "status", "preview", "task-list", "history", "test", "save", "asset-library", "profile-character-select", "outfit-editor"]) {
       expect(html).toContain(`id="${id}"`);

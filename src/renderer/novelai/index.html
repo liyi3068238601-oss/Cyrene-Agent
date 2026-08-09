@@ -116,6 +116,8 @@
         </details>
         <details class="settings" open>
           <summary>参考素材库</summary>
+          <div id="asset-status" class="asset-status" role="status" aria-live="polite"></div>
+          <details id="asset-status-details" hidden><summary>查看技术详情</summary><pre id="asset-status-technical"></pre></details>
           <div class="library-filter"><input id="asset-search" placeholder="搜索素材" /><select id="asset-category"><option value="all">全部分类</option><option value="character">角色</option><option value="outfit">服装</option><option value="pose">姿势</option><option value="style">画风</option><option value="other">其他</option><option value="favorite">收藏</option></select></div>
           <div class="composition-actions"><button id="add-character" type="button">添加构图角色</button><button id="layout-characters" type="button">均匀排列</button></div><div id="composition-board" class="composition-board"><span>拖动角色标记调整位置</span></div><div id="character-editor" class="character-editor"></div>
           <div class="asset-actions"><button id="import-asset" type="button">导入参考图</button><span id="asset-count">0 张</span></div>

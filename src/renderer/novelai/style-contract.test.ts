@@ -22,6 +22,11 @@ describe("NovelAI warm studio styles", () => {
     expect(css).toMatch(/#activity-summary\.is-error\s*\{[^}]*color:\s*var\(--nai-danger\)/s);
   });
 
+  it("keeps asset errors visible and technical details collapsed by default", () => {
+    expect(css).toMatch(/#asset-status\.is-error\s*\{[^}]*color:\s*var\(--nai-danger\)/s);
+    expect(css).toMatch(/#asset-status-details\[hidden\]\s*\{[^}]*display:\s*none/s);
+  });
+
   it("styles the download action without overriding its hidden state", () => {
     expect(wardrobe).toMatch(/#download-result\.result-action\s*\{[^}]*border:[^}]*background:[^}]*text-decoration:\s*none/s);
     expect(wardrobe).toMatch(/#download-result\.result-action:focus-visible\s*\{[^}]*outline:/s);

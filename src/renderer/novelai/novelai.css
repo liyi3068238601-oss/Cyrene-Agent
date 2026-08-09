@@ -95,6 +95,11 @@ input::placeholder, textarea::placeholder { color: var(--nai-muted); opacity: 1;
 #activity-summary.is-error { color: var(--nai-danger); font-weight: 700; }
 #activity-drawer { display: grid; grid-template-columns: minmax(260px, .7fr) minmax(0, 1.3fr); gap: 18px; max-height: min(48vh, 520px); padding: 18px 22px 22px; overflow: auto; border-top: 1px solid var(--nai-line); }
 #activity-toggle[aria-expanded="true"] #activity-chevron { transform: rotate(180deg); }
+.asset-status { min-height: 18px; margin-top: 10px; color: var(--nai-muted); font-size: 11px; line-height: 1.5; }
+#asset-status.is-error { color: var(--nai-danger); font-weight: 700; }
+#asset-status-details[hidden] { display: none; }
+#asset-status-details { margin-top: 6px; color: var(--nai-text); font-size: 11px; }
+#asset-status-technical { max-height: 150px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible { outline: 3px solid rgba(223, 133, 94, .32); outline-offset: 2px; }
 
