@@ -26,8 +26,10 @@ GREEN（实现后）：
 | `npx.cmd vitest run src/renderer/novelai/generation-flow.test.ts src/renderer/novelai/task-presentation.test.ts src/renderer/novelai/ui-state.test.ts src/renderer/novelai/layout.test.ts src/renderer/novelai/style-contract.test.ts` | 0 | 5 个测试文件、36 项测试通过。 |
 | `npx.cmd vitest run src/plugins/novelai src/renderer/novelai` | 0 | 12 个测试文件、57 项测试通过。 |
 | `npm.cmd run build:renderer` | 0 | Vite 转换 8624 个模块并完成构建；仅有既有的大 chunk 警告。 |
+| `npm.cmd test` | 0 | 控制器最终复审：281 个测试文件通过、1 个跳过；2475 项测试通过、12 项跳过；耗时 76.14 秒。 |
+| `npm.cmd run build` | 0 | 控制器最终复审：`build:skills`、`build:main`、`build:preload`、`build:cli`、`build:renderer` 全部成功；renderer 转换 8624 个模块。仅有既有 Vite >500 kB chunk 警告。 |
 
-最终提交前还会重新执行 NovelAI 聚焦测试、`npm.cmd run build:renderer` 与 `git diff --check`。按控制器要求，本代理不重复运行完整 `npm.cmd test`；由控制器在最终复审前统一执行。
+以上全量证据由控制器在实现提交 `10e73c9` 后实际执行并回传。实现代理此前执行的 NovelAI 聚焦测试、renderer 构建和 `git diff --check` 也均通过；全量验证没有新增失败或源代码改动。
 
 ## 行为测试覆盖
 
