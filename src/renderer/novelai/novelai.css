@@ -80,6 +80,7 @@ input::placeholder, textarea::placeholder { color: var(--nai-muted); opacity: 1;
 .history-item img { width: 100%; height: 100%; object-fit: cover; }
 .history-item div { position: absolute; inset: auto 0 0; padding: 26px 9px 8px; color: #fffdf9; background: linear-gradient(transparent, rgba(63, 55, 47, .78)); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .history-item:hover { border-color: var(--nai-accent); }
+.history-item:focus-visible { outline: 3px solid rgba(223, 133, 94, .48); outline-offset: 2px; }
 
 .utility-page { min-height: 0; margin: 20px; padding: 24px; overflow: auto; }
 .utility-page[hidden], [data-nai-page][hidden], #activity-drawer[hidden], .settings [hidden], [data-capability][hidden], [data-studio-panel][hidden] { display: none !important; }
@@ -98,7 +99,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 
 @media (max-width: 900px) {
   body { overflow: auto; }
-  .studio { min-height: 100vh; height: auto; }
+  .studio { min-height: 100vh; height: auto; grid-template-rows: auto minmax(0, 1fr) auto; }
   .titlebar { flex-wrap: wrap; height: auto; min-height: 72px; padding: 12px 16px; }
   .titlebar__tools { flex-wrap: wrap; }
   .create-page { grid-template-columns: 1fr; overflow: visible; padding: 14px; }

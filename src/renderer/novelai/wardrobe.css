@@ -18,7 +18,8 @@
 .history-item__replay { right: 7px; }
 .history-item__favorite { left: 7px; color: #9c6b27; }
 .history-item__delete { right: 46px; color: var(--nai-danger); }
-.history-item:hover .history-item__replay, .history-item:hover .history-item__favorite, .history-item:hover .history-item__delete { opacity: 1; }
+.history-item:hover .history-item__replay, .history-item:hover .history-item__favorite, .history-item:hover .history-item__delete,
+.history-item:focus-within .history-item__replay, .history-item:focus-within .history-item__favorite, .history-item:focus-within .history-item__delete { opacity: 1; }
 .field-hint { margin: 7px 0 0; color: var(--nai-muted); font-size: 11px; line-height: 1.5; }
 .result-summary { margin-top: 20px; padding: 14px 16px; }
 .result-summary__head, .asset-actions { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
@@ -62,6 +63,7 @@
 .upscale-dialog fieldset label > span { display: flex; flex-direction: column; gap: 5px; min-height: 70px; padding: 12px; border: 1px solid var(--nai-line); border-radius: 7px; background: var(--nai-surface-soft); font-size: 18px; font-weight: 700; }
 .upscale-dialog fieldset small { color: var(--nai-muted); font-size: 10px; font-weight: 400; }
 .upscale-dialog fieldset input:checked + span { border-color: var(--nai-accent); background: #fae9df; box-shadow: 0 0 0 2px rgba(223, 133, 94, .18); }
+.upscale-dialog fieldset input:focus-visible + span { outline: 3px solid rgba(223, 133, 94, .48); outline-offset: 2px; }
 .dialog-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 16px; }
 .dialog-actions button { height: 40px; }
 .dialog-actions .dialog-primary { border: 0; color: #fffdf9; background: var(--nai-accent); }

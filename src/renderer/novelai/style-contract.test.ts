@@ -23,6 +23,19 @@ describe("NovelAI warm studio styles", () => {
     expect(css).toContain(":focus-visible");
   });
 
+  it("lets the wrapped narrow titlebar grow beyond the desktop row", () => {
+    expect(css).toMatch(/@media\s*\(max-width:\s*900px\)\s*\{[\s\S]*?\.studio\s*\{[^}]*grid-template-rows:\s*auto\s+minmax\(0,\s*1fr\)\s+auto/s);
+  });
+
+  it("keeps history card actions visible for keyboard users", () => {
+    expect(css).toMatch(/\.history-item:focus-visible\s*\{[^}]*outline:/s);
+    expect(wardrobe).toMatch(/\.history-item:focus-within\s+\.history-item__replay,\s*\.history-item:focus-within\s+\.history-item__favorite,\s*\.history-item:focus-within\s+\.history-item__delete\s*\{[^}]*opacity:\s*1/s);
+  });
+
+  it("shows focus on hidden upscale radio choices", () => {
+    expect(wardrobe).toMatch(/\.upscale-dialog\s+fieldset\s+input:focus-visible\s*\+\s*span\s*\{[^}]*(?:outline|box-shadow):/s);
+  });
+
   it("removes old dark wardrobe colors", () => {
     expect(wardrobe).not.toContain("#100d20");
     expect(wardrobe).not.toContain("#171326");
