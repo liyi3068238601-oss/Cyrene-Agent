@@ -81,6 +81,7 @@ describe("NovelAI warm studio styles", () => {
 
   it("keeps desktop work panels independently scrollable in short windows", () => {
     expect(css).toMatch(/\.studio\s*\{[^}]*height:\s*100vh/s);
+    expect(css).toMatch(/\.create-page\s*\{[^}]*min-height:\s*0/s);
     expect(css).toMatch(
       /\.creation-panel,\s*\.canvas-area\s*\{[^}]*min-height:\s*0[^}]*overflow-y:\s*auto[^}]*overscroll-behavior:\s*contain/s,
     );

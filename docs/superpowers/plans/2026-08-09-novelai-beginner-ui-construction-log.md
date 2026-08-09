@@ -63,7 +63,7 @@ GREEN（实现后）：
 
 根因：桌面布局的 `.studio` 没有将中间工作区约束在视口高度内，且左侧 `.creation-panel` 与右侧 `.canvas-area` 缺少明确的最小高度和垂直滚动约束；短窗口会让内容参与页面整体高度计算，而不是形成两个独立滚动面板。
 
-- 桌面（宽度大于 900px）：`.studio` 使用 `height: 100vh` 和 `min-height: 0`；两个工作面板使用 `min-height: 0`、`overflow-y: auto`、`overscroll-behavior: contain`。在真实浏览器 1200 × 620 下，左/右面板滚动范围分别为 479px/318px；将左侧设为 `scrollTop = 240` 后右侧仍为 0，将右侧设为 240 后左侧仍为 240，证明滚动相互独立。
+- 桌面（宽度大于 900px）：`.studio` 使用 `height: 100vh` 和 `min-height: 0`；两个工作面板使用 `min-height: 0`、`overflow-y: auto`、`overscroll-behavior: contain`。在真实浏览器 1200 × 620 下，左/右面板初始滚动范围分别为 479px/318px；将左侧设为 `scrollTop = 240` 后右侧仍为 0，将右侧设为 240 后左侧仍为 240。烟测再注入本地 data URL 的代表性 768 × 1024 生成图（实际高 384px）及其后的内容：图片可完整带入右侧面板视口，滚动到末尾时后续内容可见，右侧滚动范围为 434px，左侧仍为 240，证明滚动相互独立且结果内容可达。
 - 窄窗口（宽度不大于 900px）：media query 恢复 `min-height: auto`、`overflow: visible` 和 `overscroll-behavior: auto`，由文档自然滚动。浏览器 820 × 620 断言得到 `body overflow = auto`、左右面板 `overflow = visible`，没有嵌套滚动条。
 - 生成结果图片规则未改动；既有 `object-fit: contain` 行为保持不变。
 
@@ -71,7 +71,7 @@ RED/GREEN（Task 1 的实际实现证据）：
 
 | 阶段 | 命令 | 退出码与结果 |
 | --- | --- | --- |
-| RED | `npm.cmd test -- src/renderer/novelai/style-contract.test.ts` | 1；1 个测试文件失败，新增契约因面板缺少 `min-height: 0`、`overflow-y: auto`、`overscroll-behavior: contain` 而失败。 |
+| RED | `npm.cmd test -- src/renderer/novelai/style-contract.test.ts` | 1；1 个测试文件失败；桌面 `.studio` 缺少 `height: 100vh`，且 `.creation-panel, .canvas-area` 缺少配对的 `min-height: 0`、`overflow-y: auto`、`overscroll-behavior: contain` 声明。 |
 | GREEN | `npm.cmd test -- src/renderer/novelai/style-contract.test.ts src/renderer/novelai/layout.test.ts` | 0；2 个测试文件、21 个测试通过。 |
 
 本轮实际验证：
