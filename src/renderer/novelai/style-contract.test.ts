@@ -79,6 +79,19 @@ describe("NovelAI warm studio styles", () => {
     expect(css).toMatch(/@media\s*\(max-width:\s*900px\)\s*\{[\s\S]*?\.studio\s*\{[^}]*grid-template-rows:\s*auto\s+minmax\(0,\s*1fr\)\s+auto/s);
   });
 
+  it("keeps desktop work panels independently scrollable in short windows", () => {
+    expect(css).toMatch(/\.studio\s*\{[^}]*height:\s*100vh/s);
+    expect(css).toMatch(
+      /\.creation-panel,\s*\.canvas-area\s*\{[^}]*min-height:\s*0[^}]*overflow-y:\s*auto[^}]*overscroll-behavior:\s*contain/s,
+    );
+    expect(css).toMatch(
+      /@media\s*\(max-width:\s*900px\)\s*\{[\s\S]*?\.studio\s*\{[^}]*height:\s*auto/s,
+    );
+    expect(css).toMatch(
+      /@media\s*\(max-width:\s*900px\)\s*\{[\s\S]*?\.creation-panel,\s*\.canvas-area\s*\{[^}]*min-height:\s*auto[^}]*overflow:\s*visible[^}]*overscroll-behavior:\s*auto/s,
+    );
+  });
+
   it("keeps history card actions visible for keyboard users", () => {
     expect(css).toMatch(/\.history-item:focus-visible\s*\{[^}]*outline:/s);
     expect(wardrobe).toMatch(/\.history-item:focus-within\s+\.history-item__replay,\s*\.history-item:focus-within\s+\.history-item__favorite,\s*\.history-item:focus-within\s+\.history-item__delete\s*\{[^}]*opacity:\s*1/s);
