@@ -2,45 +2,46 @@
 
 日期：2026-08-09
 
-## 完成内容
+## 本轮最终审查修复
 
-- 已完成 Task 1–4 交付的 NovelAI 初学者界面回归验证：结构、状态交互、视觉契约及全仓测试均已执行。
-- 本次未发现需要修正的源代码缺陷，因此没有修改 `src/renderer/novelai/` 下的实现或测试。
-- 构建产物 `dist/` 仅保留在工作区，未纳入提交范围。
+- 修复结果页“使用当前设置再次绘制”只载入参数、不提交生成的问题。普通生成和再次绘制现在共用 `bindGenerationFlow` 提交流程；再次绘制先载入当前结果参数，再执行本地校验、配置持久化和生成请求。重复绑定会先清理旧监听器。
+- 为素材库与设置页新增页面内 `aria-live` 状态区和默认折叠的技术详情。角色档案、衣柜、配置保存和连接测试的成功/失败都显示在当前页面；设置失败同步顶部连接 badge；创作页状态和独立素材错误状态不会被清空。
+- 任务状态栏优先显示运行中/排队任务；没有活动任务时只读取任务数组第 1 项。`ImageTaskQueue.enqueue()` 使用 `unshift`，因此该项是最新任务。失败摘要使用固定短文案，原始 `task.error` 只保留在展开后的任务行；Prompt 摘要按 Unicode 字符安全截断。
+- 将协议支持、参考图、mask 与 outpaint 准备/尺寸检查移到生成请求的错误处理之外。本地校验保留具体提示且不展开任务抽屉；配置持久化失败也不展开；只有生成请求拒绝和任务重试拒绝会展开抽屉并显示“绘图提交失败”及折叠技术详情。
+- 加深 muted、accent、accent-strong、success 色值；主按钮白字和 10–13px 辅助文字满足 WCAG AA。焦点环改为不透明高对比色，素材卡、历史卡、下载动作和隐藏 radio 都有清晰键盘焦点。
+- 页面标题增加 `tabindex="-1"`，素材库、设置和返回创作的路由点击后，焦点会移动到目标页标题。
 
-## 自动验证
+## TDD 与聚焦验证
+
+RED（实现前）：
+
+- `npx.cmd vitest run src/renderer/novelai/generation-flow.test.ts src/renderer/novelai/task-presentation.test.ts src/renderer/novelai/ui-state.test.ts src/renderer/novelai/layout.test.ts src/renderer/novelai/style-contract.test.ts`
+- 结果：退出码 1；5 个测试文件失败。失败覆盖缺少生成/任务呈现模块、再次绘制未生成、路由焦点仍在 `body`、utility status 不存在、旧色值对比度仅 3.87、无不透明 focus token。
+- 自查追加 RED：`npx.cmd vitest run src/renderer/novelai/generation-flow.test.ts` 退出码 1，证明旧 `.error` 类会污染后续状态；修复后 4 项通过。
+
+GREEN（实现后）：
 
 | 命令 | 退出码 | 实际结果 |
 | --- | ---: | --- |
-| `npx.cmd vitest run src/renderer/novelai/ui-state.test.ts src/renderer/novelai/layout.test.ts src/renderer/novelai/style-contract.test.ts` | 0 | 3 个测试文件通过；24 项测试通过。 |
-| `npm.cmd test` | 0 | 279 个测试文件通过、1 个跳过；2463 项测试通过、12 项跳过。执行过程另有既有 Git 路径提示及 `Skills name(other-name) != dir(real-id)` 警告，但未导致失败。 |
-| `npm.cmd run build` | 0 | `build:skills`、`build:main`、`build:preload`、`build:cli`、`build:renderer` 全部完成；Vite 转换 8622 个模块。 |
-| `git diff --check` | 0 | 无输出。 |
-| `git diff --cached --name-only` | 0 | 无输出；暂存区没有 `dist/` 路径。 |
-| `git status --short` | 0 | 仅输出 `M dist/renderer/react/index.html` 与 `?? dist/renderer/novelai/`；二者均为任务简报明确允许保留的工作区 `dist/` 项。 |
-| `git log --oneline -6` | 0 | `c78cf51 docs(novelai): record beginner UI verification`; `c02e96a fix(novelai): handle asset failure results`; `fb428b4 fix(novelai): isolate asset operation errors`; `7156105 fix(novelai): style result activity states`; `a0ea222 feat(novelai): wire beginner studio interactions`; `4f10c4f fix(novelai): restore responsive and keyboard focus`。 |
+| `npx.cmd vitest run src/renderer/novelai/generation-flow.test.ts src/renderer/novelai/task-presentation.test.ts src/renderer/novelai/ui-state.test.ts src/renderer/novelai/layout.test.ts src/renderer/novelai/style-contract.test.ts` | 0 | 5 个测试文件、36 项测试通过。 |
+| `npx.cmd vitest run src/plugins/novelai src/renderer/novelai` | 0 | 12 个测试文件、57 项测试通过。 |
+| `npm.cmd run build:renderer` | 0 | Vite 转换 8624 个模块并完成构建；仅有既有的大 chunk 警告。 |
 
-构建警告：Vite 报告超过 500 kB 的 chunk-size 提示（`renderer` 628.58 kB、`chat-react` 1385.53 kB、`index` 1598.24 kB，均为压缩前大小）。构建没有 TypeScript 或 Rollup 错误。
+最终提交前还会重新执行 NovelAI 聚焦测试、`npm.cmd run build:renderer` 与 `git diff --check`。按控制器要求，本代理不重复运行完整 `npm.cmd test`；由控制器在最终复审前统一执行。
 
-范围检查结论：`git diff --check` 无输出；`git status --short` 未显示任何源文件、测试文件或文档的未提交改动，只包含上述两项允许的 `dist/` 产物；`git log --oneline -6` 如表中所列。
+## 行为测试覆盖
 
-审查补充后的复查：再次运行 `git diff --check`，退出码 0。命令没有报告空白错误；Git 仅提示该施工记录下次由 Git 写入时会从 LF 转为 CRLF。
+- jsdom 点击“使用当前设置再次绘制”，验证顺序为载参 → 校验 → 保存 → generate → 完成回调；重复绑定只生成一次。
+- jsdom 本地校验失败，验证具体提示可见、generate 未调用、任务抽屉保持折叠且无技术详情泄露。
+- jsdom 生成请求拒绝，验证抽屉展开、固定失败摘要和原始错误详情。
+- 任务摘要验证“旧失败、最新成功”、活动任务优先、固定失败短文案和 Unicode 安全截断。
+- jsdom 验证素材库/设置页反馈在当前页可见、技术详情默认折叠、素材错误与创作状态独立、设置失败 badge 同步。
+- jsdom 真实路由点击后验证 `document.activeElement` 是目标页标题。
+- 样式测试解析 CSS 色值并计算相对亮度/对比度，不以变量名存在性代替 WCAG 验证。
 
-### 本地 Edge/Playwright 视觉与交互冒烟（补充证据）
+## 仍待实机确认
 
-- 证据截图：`.superpowers/sdd/nai-ui-desktop.png`、`.superpowers/sdd/nai-ui-narrow.png`、`.superpowers/sdd/nai-ui-result-smoke.png`。
-- 状态与交互：`createVisible=true`；抽屉初始 `hidden=true`；素材库可见；返回创作页后输入值保留；高级设置可展开（`open=true`）；模拟生成后下载入口和结果图均可见；任务抽屉可见；1280px 宽度无横向溢出。
-- 视觉检查：1440px 为正常双栏；820px 为正常单栏，未见明显遮挡。
-- 测试脚本通过 PowerShell 管道注入的中文值在该次浏览器脚本中显示为问号。这是脚本编码现象，**不是**页面字符集或产品缺陷。
-- 该证据是本地浏览器（Edge/Playwright）冒烟，不构成完整验收，也不等同于真实 Electron 运行。
-
-## 人工走查
-
-- 已执行 `npm.cmd start`，并将 `USERPROFILE` 指向工作区 `.superpowers/test-user-profile`；进程在 10 秒观察期内没有输出即时启动异常，之后由验证者主动停止。
-- 当前执行环境没有可用的 Windows GUI 自动化/截图接口，无法可靠观察或操作**真实 Electron 窗口**。后续本地 Edge/Playwright 冒烟已覆盖初始创作页、抽屉、素材库、跨页输入保留、高级设置、模拟生成结果、任务抽屉及 1440px/820px 响应式布局；但该覆盖不替代真实 Electron 走查。
-- 仍为**未验证，待用户实机确认**：真实 Electron 中的十项完整体验（特别是双语 Prompt 与角色/服装提示词的实际编辑、真实生成进度、真实任务重试/筛选/收藏/删除、约 900px 布局、Tab 焦点与状态文本），以及真实 NovelAI API 调用和系统文件对话框（下载、打开目录）。
-
-## 保留事项
-
-- 需要在具备可见并可操作 Electron 窗口、真实 NovelAI 凭据及系统文件对话框的环境中完成上述实机走查；本次不将自动化测试、浏览器冒烟或无异常启动等同于完整视觉或交互验收。
-- 除以上待实机确认项外，无。
+- 真实 Electron 中使用鼠标与完整 Tab 顺序走查三页切换、素材卡焦点、状态播报和 900px 左右窗口布局。
+- 使用真实 NovelAI 凭据确认生成、任务重试、连接失败响应、outpaint 解码/尺寸错误和系统文件对话框。
+- 核对深色系统主题或宿主主题覆盖下的最终视觉体感；本轮固定色值对暖白主题的计算对比度已自动验证。
+- `dist/renderer/react/index.html` 与 `dist/renderer/novelai/` 是本地构建产物，仅保留在工作区，不纳入提交。

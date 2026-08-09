@@ -1,4 +1,6 @@
-import { bindNovelAiUi, runAssetAction, setActivityDrawer } from "./ui-state";
+import { bindGenerationFlow } from "./generation-flow";
+import { renderTaskActivitySummary } from "./task-presentation";
+import { bindNovelAiUi, reportCreateStatus, reportUtilityStatus, runAssetAction, setActivityDrawer } from "./ui-state";
 
 type ProviderKind = "novelai-gateway" | "openai-images" | "chat-completions-image" | "novelai-native" | "async-task";
 interface Capabilities { negativePrompt:boolean; dimensions:boolean; steps:boolean; scale:boolean; sampler:boolean; seed:boolean; img2img:boolean; inpaint:boolean; vibe:boolean; directorReference:boolean; multiCharacter:boolean }
@@ -41,7 +43,6 @@ const model = $<HTMLInputElement>("model");
 const gateway = $<HTMLInputElement>("gateway-url");
 const apiKey = $<HTMLInputElement>("api-key");
 const providerMode = $<HTMLSelectElement>("provider-mode");
-const status = $("status");
 const badge = $("connection-badge");
 const preview = $("preview");
 const history = $("history");
@@ -70,12 +71,9 @@ const presets: Record<ProviderKind, Pick<NovelAiConfig,"gatewayUrl"|"modelsPath"
 };
 
 function setStatus(text:string,error=false,detail?:unknown):void {
-  status.textContent=text;status.classList.toggle("error",error);
-  const details=$<HTMLDetailsElement>("status-details");const technical=$<HTMLPreElement>("status-technical");
-  technical.textContent=detail instanceof Error?detail.stack||detail.message:detail?String(detail):"";
-  details.hidden=!technical.textContent;if(details.hidden)details.open=false;
+  reportCreateStatus(text,error,detail);
 }
-async function saveLocalConfig(buttonId:string,message:string):Promise<void>{const button=$<HTMLButtonElement>(buttonId);button.disabled=true;try{await window.novelai.saveConfig(configFromForm());setStatus(message)}catch(error){setStatus(error instanceof Error?error.message:String(error),true)}finally{button.disabled=false}}
+async function saveLocalConfig(buttonId:string,message:string):Promise<void>{const button=$<HTMLButtonElement>(buttonId);button.disabled=true;try{await window.novelai.saveConfig(configFromForm());reportUtilityStatus("library",message)}catch(error){reportUtilityStatus("library","素材库设置保存失败，请稍后重试。",true,error)}finally{button.disabled=false}}
 function getKind():ProviderKind { return providerMode.value as ProviderKind; }
 function configFromForm():Partial<NovelAiConfig> {
   syncProfileFromForm();const active=characterProfiles.find((item)=>item.id===activeCharacterId);
@@ -246,16 +244,7 @@ async function loadMoreHistory():Promise<void>{if(historyLoading||!historyHasMor
 function renderTasks(tasks:ImageTask[]):void{
   const list=$("task-list");list.replaceChildren();$("task-count").textContent=`${tasks.length} 项`;
   const activitySummary=$<HTMLElement>("activity-summary");
-  const activeTask=tasks.find((task)=>task.status==="running"||task.status==="queued");
-  const failedTask=tasks.find((task)=>task.status==="failed");
-  activitySummary.textContent=activeTask
-    ? `${activeTask.status==="running"?"正在生成":"等待生成"} · ${activeTask.prompt}`
-    : failedTask
-      ? `生成失败 · ${failedTask.error||"点击查看详情"}`
-      : tasks.length
-        ? `最近共有 ${tasks.length} 项任务`
-        : "暂无生成任务";
-  activitySummary.classList.toggle("is-error",Boolean(failedTask&&!activeTask));
+  renderTaskActivitySummary(activitySummary,tasks);
   if(!tasks.length){const empty=document.createElement("p");empty.className="task-empty";empty.textContent="暂无任务";list.appendChild(empty);return}
   const labels:Record<ImageTask["status"],string>={queued:"等待中",running:"生成中",completed:"已完成",failed:"失败",cancelled:"已取消"};
   for(const task of tasks.slice(0,8)){
@@ -263,7 +252,7 @@ function renderTasks(tasks:ImageTask[]):void{
     const text=document.createElement("div");const title=document.createElement("strong");title.textContent=task.prompt;const meta=document.createElement("small");meta.textContent=task.error||`${labels[task.status]} · ${new Date(task.createdAt).toLocaleTimeString()}`;text.append(title,meta);
     const action=document.createElement("button");action.type="button";
     if(task.status==="queued"||task.status==="running"){action.textContent="×";action.title="取消任务";action.onclick=()=>void window.novelai.cancelTask(task.id)}
-    else if(task.status==="failed"||task.status==="cancelled"){action.textContent="↻";action.title="重试任务";action.onclick=async()=>{action.disabled=true;try{const result=await window.novelai.retryTask(task.id);showResult(result);await refreshHistory()}catch(e){setStatus("任务重试失败，请稍后再试。",true,e);setActivityDrawer(true)}finally{action.disabled=false}}}
+    else if(task.status==="failed"||task.status==="cancelled"){action.textContent="↻";action.title="重试任务";action.onclick=async()=>{action.disabled=true;try{const result=await window.novelai.retryTask(task.id);showResult(result);await refreshHistory()}catch(e){setStatus("绘图提交失败，请检查设置后重试。",true,e);setActivityDrawer(true)}finally{action.disabled=false}}}
     else{action.textContent="✓";action.disabled=true;action.title="任务已完成"}
     row.append(text,action);list.appendChild(row);
   }
@@ -295,15 +284,15 @@ async function refreshAssets():Promise<void>{
 }
 
 async function testConnection():Promise<void>{
-  badge.textContent="检测中"; badge.classList.remove("ok");
+  badge.textContent="检测中"; badge.classList.remove("ok","error");
   try{
     const draft=configFromForm(); const result=await window.novelai.test(draft); await applyCapabilities(result.capabilities);
-    badge.textContent="已连接"; badge.classList.add("ok"); setStatus("接口连接正常。");
+    badge.textContent="已连接"; badge.classList.add("ok"); reportUtilityStatus("settings","接口连接正常。");
     try{
       const models=await window.novelai.models(draft); const options=$<HTMLDataListElement>("model-options"); options.replaceChildren();
       for(const id of models){const option=document.createElement("option");option.value=id;options.appendChild(option)}
-    }catch{setStatus("接口可用，但没有提供模型列表；请手动填写模型名。")}
-  }catch(e){badge.textContent="连接失败";setStatus("连接测试失败，请检查服务地址和密钥。",true,e)}
+    }catch{reportUtilityStatus("settings","接口可用，但没有提供模型列表；请手动填写模型名。")}
+  }catch(e){reportUtilityStatus("settings","连接测试失败，请检查服务地址和密钥。",true,e);badge.textContent="连接失败"}
 }
 
 async function init():Promise<void>{
@@ -324,11 +313,35 @@ async function init():Promise<void>{
   window.cyreneTheme?.onChanged?.((value)=>document.body.dataset.uiTheme=value);
 }
 
+async function validateAndPrepareGeneration():Promise<void>{
+  const referenceMode=$<HTMLSelectElement>("reference-mode").value;
+  if($<HTMLSelectElement>("reference-mode").selectedOptions[0]?.dataset.supported==="false")throw new Error("当前协议不支持所选参考模式，请先切换协议模板");
+  if(referenceMode!=="none"&&!referenceImages.length)throw new Error("请先选择参考图片");
+  if(referenceMode==="inpaint"&&!maskImageDataUrl)throw new Error("请先涂抹需要重绘的区域");
+  if(referenceMode==="outpaint")await prepareOutpaint();
+}
+
+function generationDraft():Record<string,unknown>{
+  const referenceMode=$<HTMLSelectElement>("reference-mode").value;
+  const strength=Number($<HTMLInputElement>("reference-strength").value);
+  const informationExtracted=Number($<HTMLInputElement>("reference-info").value);
+  const draft:Record<string,unknown>={prompt:prompt.value,negativePrompt:negative.value,model:model.value,characterId:activeCharacterId,outfitId:$<HTMLSelectElement>("outfit-select").value,width:referenceMode==="outpaint"?outpaintWidth:$<HTMLSelectElement>("width").value,height:referenceMode==="outpaint"?outpaintHeight:$<HTMLSelectElement>("height").value,steps:$<HTMLInputElement>("steps").value,scale:$<HTMLInputElement>("scale").value,sampler:$<HTMLSelectElement>("sampler").value,referenceMode,referenceImage:referenceMode==="outpaint"?outpaintImageDataUrl:referenceImages[0]?.dataUrl,maskImage:referenceMode==="outpaint"?outpaintMaskDataUrl:maskImageDataUrl,referenceImages:referenceImages.map((item)=>({image:item.dataUrl,strength,informationExtracted})),referenceStrength:strength,referenceInformationExtracted:informationExtracted,characters:characters.filter((item)=>item.prompt.trim())};
+  if(referenceImages[0]?.id.startsWith("history-"))draft.parentId=referenceImages[0].id.slice(8);
+  return draft;
+}
+
+async function generateBatch():Promise<{results:NovelAiResult[];count:number}>{
+  const draft=generationDraft();
+  const count=Math.max(1,Math.min(4,Number($<HTMLSelectElement>("variant-count").value)||1));
+  const requestedSeed=$<HTMLInputElement>("seed").value.trim();
+  const results=await Promise.all(Array.from({length:count},(_,index)=>window.novelai.generate({...draft,seed:requestedSeed?Number(requestedSeed)+index:""})));
+  return {results,count};
+}
+
 $("minimize").onclick=()=>window.novelai.minimize();
 $("close").onclick=()=>window.novelai.close();
 $("test").onclick=()=>void testConnection();
 $("open-output").onclick=()=>void window.novelai.openOutput();
-$("load-result-params").onclick=()=>{if(selectedResult)loadResultParams(selectedResult)};
 $("edit-result").onclick=()=>{if(selectedResult)editFromResult(selectedResult)};
 $<HTMLInputElement>("asset-search").oninput=()=>void refreshAssets();$<HTMLSelectElement>("asset-category").onchange=()=>void refreshAssets();$<HTMLInputElement>("history-search").oninput=applyHistoryFilter;$<HTMLInputElement>("history-favorites").onchange=applyHistoryFilter;
 document.querySelector<HTMLElement>(".history-panel")!.onscroll=(event)=>{const panel=event.currentTarget as HTMLElement;if(panel.scrollTop+panel.clientHeight>=panel.scrollHeight-120)void loadMoreHistory()};
@@ -364,19 +377,17 @@ $("save-wardrobe").onclick=()=>void saveLocalConfig("save-wardrobe","角色衣�
 providerMode.onchange=()=>{
   const preset=presets[getKind()]; gateway.value=preset.gatewayUrl; $<HTMLInputElement>("models-path").value=preset.modelsPath;
   $<HTMLInputElement>("generation-path").value=preset.generationPath; $<HTMLInputElement>("async-result-path").value=preset.asyncResultPath;
-  updateProviderLabels(); void applyCapabilities(); badge.textContent="未检测"; badge.classList.remove("ok");
+  updateProviderLabels(); void applyCapabilities(); badge.textContent="未检测"; badge.classList.remove("ok","error");
 };
-$("save").onclick=async()=>{try{await window.novelai.saveConfig(configFromForm());setStatus("配置已加密保存到本机。");await testConnection()}catch(e){setStatus(e instanceof Error?e.message:String(e),true)}};
-$("generate").onclick=async()=>{
-  const button=$<HTMLButtonElement>("generate");button.disabled=true;setStatus("正在提交绘图任务，请稍候...");
-  try{
-    await window.novelai.saveConfig(configFromForm());
-    const referenceMode=$<HTMLSelectElement>("reference-mode").value;if($<HTMLSelectElement>("reference-mode").selectedOptions[0]?.dataset.supported==="false")throw new Error("当前协议不支持所选参考模式，请先切换协议模板");if(referenceMode!=="none"&&!referenceImages.length)throw new Error("请先选择参考图片");if(referenceMode==="inpaint"&&!maskImageDataUrl)throw new Error("请先涂抹需要重绘的区域");if(referenceMode==="outpaint")await prepareOutpaint();
-    const strength=Number($<HTMLInputElement>("reference-strength").value);const informationExtracted=Number($<HTMLInputElement>("reference-info").value);
-    const draft={prompt:prompt.value,negativePrompt:negative.value,model:model.value,characterId:activeCharacterId,outfitId:$<HTMLSelectElement>("outfit-select").value,width:referenceMode==="outpaint"?outpaintWidth:$<HTMLSelectElement>("width").value,height:referenceMode==="outpaint"?outpaintHeight:$<HTMLSelectElement>("height").value,steps:$<HTMLInputElement>("steps").value,scale:$<HTMLInputElement>("scale").value,sampler:$<HTMLSelectElement>("sampler").value,referenceMode,referenceImage:referenceMode==="outpaint"?outpaintImageDataUrl:referenceImages[0]?.dataUrl,maskImage:referenceMode==="outpaint"?outpaintMaskDataUrl:maskImageDataUrl,referenceImages:referenceImages.map((item)=>({image:item.dataUrl,strength,informationExtracted})),referenceStrength:strength,referenceInformationExtracted:informationExtracted,characters:characters.filter((item)=>item.prompt.trim())};
-    if(referenceImages[0]?.id.startsWith("history-"))(draft as Record<string,unknown>).parentId=referenceImages[0].id.slice(8);const count=Math.max(1,Math.min(4,Number($<HTMLSelectElement>("variant-count").value)||1));const requestedSeed=$<HTMLInputElement>("seed").value.trim();const results=await Promise.all(Array.from({length:count},(_,index)=>window.novelai.generate({...draft,seed:requestedSeed?Number(requestedSeed)+index:""})));showResult(results[results.length-1]);await refreshHistory();setStatus(`${count} 张变体绘制完成，作品已保存。`);
-  }catch(e){setStatus("绘图提交失败，请检查设置后重试。",true,e);setActivityDrawer(true)}finally{button.disabled=false}
-};
+$("save").onclick=async()=>{const button=$<HTMLButtonElement>("save");button.disabled=true;try{await window.novelai.saveConfig(configFromForm());reportUtilityStatus("settings","配置已加密保存到本机。");await testConnection()}catch(e){reportUtilityStatus("settings","配置保存失败，请检查后重试。",true,e);badge.textContent="保存失败"}finally{button.disabled=false}};
+bindGenerationFlow({
+  getSelectedResult:()=>selectedResult,
+  loadResultParams,
+  validateAndPrepare:validateAndPrepareGeneration,
+  persistSettings:()=>window.novelai.saveConfig(configFromForm()).then(()=>undefined),
+  generate:generateBatch,
+  onGenerated:async({results,count})=>{showResult(results[results.length-1]);await refreshHistory();setStatus(`${count} 张变体绘制完成，作品已保存。`)},
+});
 bindNovelAiUi();
 renderInspector();
 void init();

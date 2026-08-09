@@ -47,6 +47,15 @@ describe("NovelAI beginner layout", () => {
     expect(html).toContain('id="asset-status-technical"');
   });
 
+  it("provides visible utility status regions and focusable page titles", () => {
+    for (const page of ["library", "settings"]) {
+      expect(html).toContain(`id="${page}-status"`);
+      expect(html).toContain(`id="${page}-status-details" hidden`);
+      expect(html).toContain(`id="${page}-status-technical"`);
+    }
+    expect(html.match(/data-nai-page-title tabindex="-1"/g)).toHaveLength(3);
+  });
+
   it("preserves critical integration ids", () => {
     for (const id of ["connection-badge", "generate", "status", "preview", "task-list", "history", "test", "save", "asset-library", "profile-character-select", "outfit-editor"]) {
       expect(html).toContain(`id="${id}"`);

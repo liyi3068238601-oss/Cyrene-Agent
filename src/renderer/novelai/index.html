@@ -72,7 +72,7 @@
         </section>
       </aside>
       <section class="canvas-area">
-        <div class="canvas-toolbar"><div><h1>画布</h1><p>生成结果会自动保存到本机</p></div></div>
+        <div class="canvas-toolbar"><div><h1 data-nai-page-title tabindex="-1">画布</h1><p>生成结果会自动保存到本机</p></div></div>
         <section class="prompt-inspector"><div class="prompt-inspector__head"><h2>系统理解</h2><button id="copy-final-prompt" type="button">复制最终 Prompt</button></div><div class="prompt-inspector__tabs"><button type="button" class="is-active" data-prompt-tab="final">最终 Prompt</button><button type="button" data-prompt-tab="translated">翻译结果</button><button type="button" data-prompt-tab="outfit">服装注入</button></div><pre id="prompt-inspector-content">等待构建提示词</pre></section>
         <section id="result-summary" class="result-summary" hidden>
           <div class="result-summary__head"><div><span>当前作品</span><strong id="result-title">生成参数</strong></div><div class="result-summary__actions"><a id="download-result" class="result-action" hidden>下载图片</a><button id="open-output" type="button">打开保存目录</button><button id="load-result-params" type="button">使用当前设置再次绘制</button><button id="open-upscale" type="button">高清放大</button><button id="edit-result" type="button">继续编辑</button></div></div>
@@ -84,7 +84,8 @@
     </section>
 
     <section class="utility-page" data-nai-page="library" hidden>
-      <header class="utility-page__header"><button type="button" data-return-to-create>← 返回创作</button><div><h1>素材库</h1><p>管理角色、服装和参考素材</p></div></header>
+      <header class="utility-page__header"><button type="button" data-return-to-create>← 返回创作</button><div><h1 data-nai-page-title tabindex="-1">素材库</h1><p>管理角色、服装和参考素材</p></div></header>
+      <div class="utility-status-block"><div id="library-status" class="utility-status" role="status" aria-live="polite"></div><details id="library-status-details" hidden><summary>查看技术详情</summary><pre id="library-status-technical"></pre></details></div>
       <div class="library-grid">
         <details class="settings" open>
           <summary>角色档案与绘图风格</summary>
@@ -128,7 +129,8 @@
     </section>
 
     <section class="utility-page" data-nai-page="settings" hidden>
-      <header class="utility-page__header"><button type="button" data-return-to-create>← 返回创作</button><div><h1>设置</h1><p>配置 NovelAI API 连接</p></div></header>
+      <header class="utility-page__header"><button type="button" data-return-to-create>← 返回创作</button><div><h1 data-nai-page-title tabindex="-1">设置</h1><p>配置 NovelAI API 连接</p></div></header>
+      <div class="utility-status-block"><div id="settings-status" class="utility-status" role="status" aria-live="polite"></div><details id="settings-status-details" hidden><summary>查看技术详情</summary><pre id="settings-status-technical"></pre></details></div>
       <div class="settings-page__content">
         <details class="settings" open>
           <summary>连接与 API 配置</summary>

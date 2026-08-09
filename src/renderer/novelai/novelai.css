@@ -6,12 +6,13 @@
   --nai-surface: #fffdf9;
   --nai-surface-soft: #fbf6ee;
   --nai-text: #3f372f;
-  --nai-muted: #8c7e72;
+  --nai-muted: #71645a;
   --nai-line: #e8ded1;
-  --nai-accent: #df855e;
-  --nai-accent-strong: #c96c46;
-  --nai-success: #56866a;
+  --nai-accent: #a34f2e;
+  --nai-accent-strong: #833a22;
+  --nai-success: #3c7150;
   --nai-danger: #b65454;
+  --nai-focus: #4b4ea3;
   --nai-shadow: 0 16px 40px rgba(88, 67, 48, 0.10);
 }
 
@@ -35,6 +36,7 @@ button:hover:not(:disabled) { border-color: var(--nai-accent); background: #f9ed
 
 .badge { padding: 4px 8px; border: 1px solid var(--nai-line); border-radius: 999px; color: var(--nai-muted); background: var(--nai-surface-soft); font-size: 12px; }
 .badge.ok { color: var(--nai-success); border-color: color-mix(in srgb, var(--nai-success) 35%, var(--nai-line)); background: #edf6ef; }
+.badge.error { color: var(--nai-danger); border-color: color-mix(in srgb, var(--nai-danger) 35%, var(--nai-line)); background: #fff0ef; }
 
 .create-page { min-height: 0; display: grid; grid-template-columns: minmax(320px, 390px) minmax(0, 1fr); gap: 20px; padding: 20px; overflow: hidden; }
 .creation-panel, .canvas-area, .utility-page { border: 1px solid var(--nai-line); border-radius: 18px; background: var(--nai-surface); box-shadow: var(--nai-shadow); }
@@ -80,7 +82,7 @@ input::placeholder, textarea::placeholder { color: var(--nai-muted); opacity: 1;
 .history-item img { width: 100%; height: 100%; object-fit: cover; }
 .history-item div { position: absolute; inset: auto 0 0; padding: 26px 9px 8px; color: #fffdf9; background: linear-gradient(transparent, rgba(63, 55, 47, .78)); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .history-item:hover { border-color: var(--nai-accent); }
-.history-item:focus-visible { outline: 3px solid rgba(223, 133, 94, .48); outline-offset: 2px; }
+.history-item:focus-visible { outline: 3px solid var(--nai-focus); outline-offset: 2px; }
 
 .utility-page { min-height: 0; margin: 20px; padding: 24px; overflow: auto; }
 .utility-page[hidden], [data-nai-page][hidden], #activity-drawer[hidden], .settings [hidden], [data-capability][hidden], [data-studio-panel][hidden] { display: none !important; }
@@ -88,6 +90,12 @@ input::placeholder, textarea::placeholder { color: var(--nai-muted); opacity: 1;
 .utility-page__header h1, .utility-page__header p { margin: 0; }
 .utility-page__header p { margin-top: 4px; color: var(--nai-muted); }
 .utility-page__header button { border: 1px solid var(--nai-line); border-radius: 8px; color: var(--nai-text); background: var(--nai-surface-soft); padding: 9px 12px; }
+.utility-status-block { margin: 14px 0; padding: 10px 12px; border: 1px solid var(--nai-line); border-radius: 8px; background: var(--nai-surface-soft); }
+.utility-status { min-height: 18px; color: var(--nai-muted); font-size: 12px; line-height: 1.5; }
+.utility-status.is-success { color: var(--nai-success); font-weight: 700; }
+.utility-status.is-error { color: var(--nai-danger); font-weight: 700; }
+.utility-status-block details { margin-top: 6px; color: var(--nai-text); font-size: 11px; }
+.utility-status-block pre { max-height: 150px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .library-grid, .settings-page__content { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; }
 
 .activity-shell { position: relative; z-index: 5; border-top: 1px solid var(--nai-line); background: var(--nai-surface); }
@@ -101,7 +109,7 @@ input::placeholder, textarea::placeholder { color: var(--nai-muted); opacity: 1;
 #asset-status-details { margin-top: 6px; color: var(--nai-text); font-size: 11px; }
 #asset-status-technical { max-height: 150px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 
-button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible { outline: 3px solid rgba(223, 133, 94, .32); outline-offset: 2px; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible { outline: 3px solid var(--nai-focus); outline-offset: 2px; }
 
 @media (max-width: 900px) {
   body { overflow: auto; }

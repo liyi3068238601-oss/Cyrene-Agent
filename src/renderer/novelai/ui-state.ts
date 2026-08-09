@@ -1,6 +1,7 @@
 export type NovelAiPage = "create" | "library" | "settings";
+type UtilityPage = Exclude<NovelAiPage, "create">;
 
-export function showNovelAiPage(page: NovelAiPage, root: ParentNode = document): void {
+export function showNovelAiPage(page: NovelAiPage, root: ParentNode = document, moveFocus = true): void {
   root.querySelectorAll<HTMLElement>("[data-nai-page]").forEach((panel) => {
     panel.toggleAttribute("hidden", panel.dataset.naiPage !== page);
   });
@@ -10,6 +11,9 @@ export function showNovelAiPage(page: NovelAiPage, root: ParentNode = document):
     if (active) button.setAttribute("aria-current", "page");
     else button.removeAttribute("aria-current");
   });
+  if (moveFocus) {
+    root.querySelector<HTMLElement>(`[data-nai-page="${page}"] [data-nai-page-title]`)?.focus({ preventScroll: true });
+  }
 }
 
 export function setActivityDrawer(open: boolean, root: ParentNode = document): void {
@@ -20,16 +24,38 @@ export function setActivityDrawer(open: boolean, root: ParentNode = document): v
   drawer.toggleAttribute("hidden", !open);
 }
 
-export function reportAssetStatus(text: string, error = false, detail?: unknown, root: ParentNode = document): void {
-  const status = root.querySelector<HTMLElement>("#asset-status");
-  const details = root.querySelector<HTMLDetailsElement>("#asset-status-details");
-  const technical = root.querySelector<HTMLPreElement>("#asset-status-technical");
+function reportStatusRegion(prefix: string, text: string, error: boolean, detail: unknown, root: ParentNode): void {
+  const status = root.querySelector<HTMLElement>(`#${prefix}`);
+  const details = root.querySelector<HTMLDetailsElement>(`#${prefix}-details`);
+  const technical = root.querySelector<HTMLPreElement>(`#${prefix}-technical`);
   if (!status || !details || !technical) return;
   status.textContent = text;
   status.classList.toggle("is-error", error);
+  status.classList.toggle("is-success", Boolean(text) && !error);
   technical.textContent = detail instanceof Error ? detail.stack || detail.message : detail ? String(detail) : "";
   details.hidden = !technical.textContent;
   if (details.hidden) details.open = false;
+}
+
+export function reportCreateStatus(text: string, error = false, detail?: unknown, root: ParentNode = document): void {
+  reportStatusRegion("status", text, error, detail, root);
+  root.querySelector<HTMLElement>("#status")?.classList.toggle("error", error);
+}
+
+export function reportAssetStatus(text: string, error = false, detail?: unknown, root: ParentNode = document): void {
+  reportStatusRegion("asset-status", text, error, detail, root);
+}
+
+export function reportUtilityStatus(page: UtilityPage, text: string, error = false, detail?: unknown, root: ParentNode = document): void {
+  reportStatusRegion(`${page}-status`, text, error, detail, root);
+  if (page === "settings" && error) {
+    const badge = root.querySelector<HTMLElement>("#connection-badge");
+    if (badge) {
+      badge.textContent = "设置失败";
+      badge.classList.remove("ok");
+      badge.classList.add("error");
+    }
+  }
 }
 
 interface AssetActionOptions<T> {
@@ -71,7 +97,7 @@ export function bindNovelAiUi(root: ParentNode = document): () => void {
     toggle.addEventListener("click", click);
     cleanups.push(() => toggle.removeEventListener("click", click));
   }
-  showNovelAiPage("create", root);
+  showNovelAiPage("create", root, false);
   setActivityDrawer(false, root);
   return () => cleanups.forEach((cleanup) => cleanup());
 }
