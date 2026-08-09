@@ -34,10 +34,10 @@ GREEN（实现后）：
 | `npx.cmd vitest run src/renderer/novelai/asset-selection.test.ts src/renderer/novelai/ui-state.test.ts` | 0 | 2 个测试文件、15 项测试通过。 |
 | `npx.cmd vitest run src/plugins/novelai src/renderer/novelai` | 0 | 本轮修复后 14 个测试文件、65 项测试通过。 |
 | `npm.cmd run build:renderer` | 0 | 本轮修复后 Vite 转换 8625 个模块并完成构建；仅有既有的大 chunk 警告。 |
-| `npm.cmd test` | 0 | 主控制器在本轮修复前的 `6594a37` 上最终复审：282 个测试文件通过、1 个跳过；2478 项测试通过、12 项跳过。 |
-| `npm.cmd run build` | 0 | 主控制器在本轮修复前的 `6594a37` 上最终复审：`build:skills`、`build:main`、`build:preload`、`build:cli`、`build:renderer` 全部成功；renderer 转换 8624 个模块。仅有既有 Vite >500 kB chunk 警告。 |
+| `npm.cmd test` | 0 | 主控制器在最终修复提交 `383b0f9` 后验证：283 个测试文件通过、1 个跳过；2483 项测试通过、12 项跳过；耗时 154.98 秒。 |
+| `npm.cmd run build` | 0 | 主控制器在最终修复提交 `383b0f9` 后验证：`build:skills`、`build:main`、`build:preload`、`build:cli`、`build:renderer` 全部成功；renderer 转换 8625 个模块。仅有既有 Vite >500 kB chunk 警告。 |
 
-以上全量证据由主控制器在本轮素材修复前的 HEAD `6594a37` 上实际执行并回传；本轮新增选择模块后的聚焦测试和 renderer 构建由实现代理重新执行。完整全量测试不在本轮重复运行。
+以上是真正最终的全量证据，由主控制器在 HEAD `383b0f9` 后实际执行并回传。本轮素材修复前的历史阶段 `6594a37` 曾通过 282 个测试文件（另 1 个跳过）、2478 项测试（另 12 项跳过）及完整构建（renderer 8624 个模块）；该组数字仅保留为阶段记录，不代表最终验证结果。
 
 ## 行为测试覆盖
 
