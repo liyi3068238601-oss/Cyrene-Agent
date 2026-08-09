@@ -17,8 +17,14 @@
 | `npm.cmd run build` | 0 | `build:skills`、`build:main`、`build:preload`、`build:cli`、`build:renderer` 全部完成；Vite 转换 8622 个模块。 |
 | `git diff --check` | 0 | 无输出。 |
 | `git diff --cached --name-only` | 0 | 无输出；暂存区没有 `dist/` 路径。 |
+| `git status --short` | 0 | 仅输出 `M dist/renderer/react/index.html` 与 `?? dist/renderer/novelai/`；二者均为任务简报明确允许保留的工作区 `dist/` 项。 |
+| `git log --oneline -6` | 0 | `c78cf51 docs(novelai): record beginner UI verification`; `c02e96a fix(novelai): handle asset failure results`; `fb428b4 fix(novelai): isolate asset operation errors`; `7156105 fix(novelai): style result activity states`; `a0ea222 feat(novelai): wire beginner studio interactions`; `4f10c4f fix(novelai): restore responsive and keyboard focus`。 |
 
 构建警告：Vite 报告超过 500 kB 的 chunk-size 提示（`renderer` 628.58 kB、`chat-react` 1385.53 kB、`index` 1598.24 kB，均为压缩前大小）。构建没有 TypeScript 或 Rollup 错误。
+
+范围检查结论：`git diff --check` 无输出；`git status --short` 未显示任何源文件、测试文件或文档的未提交改动，只包含上述两项允许的 `dist/` 产物；`git log --oneline -6` 如表中所列。
+
+审查补充后的复查：再次运行 `git diff --check`，退出码 0。命令没有报告空白错误；Git 仅提示该施工记录下次由 Git 写入时会从 LF 转为 CRLF。
 
 ## 人工走查
 
