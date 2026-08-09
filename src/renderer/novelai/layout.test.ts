@@ -33,6 +33,14 @@ describe("NovelAI beginner layout", () => {
     expect(html).toContain('id="activity-drawer" hidden');
   });
 
+  it("offers result actions and an accessible status region", () => {
+    expect(html).toContain('id="download-result"');
+    expect(html).toContain('id="open-output"');
+    expect(html).toContain('id="status" class="status" role="status" aria-live="polite"');
+    expect(html).toContain('id="status-details" hidden');
+    expect(html).toContain('id="status-technical"');
+  });
+
   it("preserves critical integration ids", () => {
     for (const id of ["connection-badge", "generate", "status", "preview", "task-list", "history", "test", "save", "asset-library", "profile-character-select", "outfit-editor"]) {
       expect(html).toContain(`id="${id}"`);

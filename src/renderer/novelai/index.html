@@ -67,14 +67,15 @@
         <section class="creation-step creation-step--action" data-create-step="generate">
           <div class="section-head"><span class="step-number">3.</span><h2>3. 开始绘制</h2></div>
           <button id="generate" class="primary"><span>✦</span><span>开始绘制</span></button>
-          <div id="status" class="status">准备好了，写下你想看到的画面。</div>
+          <div id="status" class="status" role="status" aria-live="polite">准备好了，写下你想看到的画面。</div>
+          <details id="status-details" hidden><summary>查看技术详情</summary><pre id="status-technical"></pre></details>
         </section>
       </aside>
       <section class="canvas-area">
-        <div class="canvas-toolbar"><div><h1>画布</h1><p>生成结果会自动保存到本机</p></div><button id="open-output">打开图片目录</button></div>
+        <div class="canvas-toolbar"><div><h1>画布</h1><p>生成结果会自动保存到本机</p></div></div>
         <section class="prompt-inspector"><div class="prompt-inspector__head"><h2>系统理解</h2><button id="copy-final-prompt" type="button">复制最终 Prompt</button></div><div class="prompt-inspector__tabs"><button type="button" class="is-active" data-prompt-tab="final">最终 Prompt</button><button type="button" data-prompt-tab="translated">翻译结果</button><button type="button" data-prompt-tab="outfit">服装注入</button></div><pre id="prompt-inspector-content">等待构建提示词</pre></section>
         <section id="result-summary" class="result-summary" hidden>
-          <div class="result-summary__head"><div><span>当前作品</span><strong id="result-title">生成参数</strong></div><div class="result-summary__actions"><button id="open-upscale" type="button">高清放大</button><button id="edit-result" type="button">继续编辑</button><button id="load-result-params" type="button">载入参数</button></div></div>
+          <div class="result-summary__head"><div><span>当前作品</span><strong id="result-title">生成参数</strong></div><div class="result-summary__actions"><a id="download-result" class="result-action" hidden>下载图片</a><button id="open-output" type="button">打开保存目录</button><button id="load-result-params" type="button">使用当前设置再次绘制</button><button id="open-upscale" type="button">高清放大</button><button id="edit-result" type="button">继续编辑</button></div></div>
           <div id="result-chips" class="result-chips"></div>
           <details><summary>查看完整提示词与参数</summary><dl id="result-details"></dl></details>
         </section>

@@ -1,3 +1,5 @@
+import { bindNovelAiUi, setActivityDrawer, showNovelAiPage } from "./ui-state";
+
 type ProviderKind = "novelai-gateway" | "openai-images" | "chat-completions-image" | "novelai-native" | "async-task";
 interface Capabilities { negativePrompt:boolean; dimensions:boolean; steps:boolean; scale:boolean; sampler:boolean; seed:boolean; img2img:boolean; inpaint:boolean; vibe:boolean; directorReference:boolean; multiCharacter:boolean }
 interface NovelAiResult { id:string; prompt:string; compiledPrompt?:string; model:string; providerMode?:ProviderKind; createdAt:string; dataUrl:string; width?:number; height?:number; steps?:number; scale?:number; sampler?:string; seed?:number; mode?:"photo"|"drawing"; characterId?:string|null; characterName?:string|null; outfitId?:string|null; outfitName?:string|null; negativePrompt?:string; referenceMode?:string; referenceStrength?:number|null; referenceInformationExtracted?:number|null; characters?:CharacterComposition[]; favorite?:boolean; upscaledFrom?:string }
@@ -65,7 +67,12 @@ const presets: Record<ProviderKind, Pick<NovelAiConfig,"gatewayUrl"|"modelsPath"
   "async-task": { gatewayUrl:"", modelsPath:"/v1/models", generationPath:"/api/generate_image", asyncResultPath:"/api/get_result/{id}" },
 };
 
-function setStatus(text:string,error=false):void { status.textContent=text; status.classList.toggle("error",error); }
+function setStatus(text:string,error=false,detail?:unknown):void {
+  status.textContent=text;status.classList.toggle("error",error);
+  const details=$<HTMLDetailsElement>("status-details");const technical=$<HTMLPreElement>("status-technical");
+  technical.textContent=detail instanceof Error?detail.stack||detail.message:detail?String(detail):"";
+  details.hidden=!technical.textContent;if(details.hidden)details.open=false;
+}
 async function saveLocalConfig(buttonId:string,message:string):Promise<void>{const button=$<HTMLButtonElement>(buttonId);button.disabled=true;try{await window.novelai.saveConfig(configFromForm());setStatus(message)}catch(error){setStatus(error instanceof Error?error.message:String(error),true)}finally{button.disabled=false}}
 function getKind():ProviderKind { return providerMode.value as ProviderKind; }
 function configFromForm():Partial<NovelAiConfig> {
@@ -199,6 +206,7 @@ function showResult(item:NovelAiResult):void {
   selectedResult=item;
   preview.replaceChildren();
   const img=document.createElement("img"); img.src=item.dataUrl; img.alt=item.prompt; preview.appendChild(img);
+  const download=$<HTMLAnchorElement>("download-result");download.href=item.dataUrl;download.download=`novelai-${item.id}.png`;download.hidden=false;
   $("result-summary").hidden=false;
   $("result-title").textContent=`${item.characterName||"未指定角色"} · ${item.outfitName||"未选择服装"}`;
   const chips=$("result-chips");chips.replaceChildren();
@@ -235,6 +243,17 @@ async function loadMoreHistory():Promise<void>{if(historyLoading||!historyHasMor
 
 function renderTasks(tasks:ImageTask[]):void{
   const list=$("task-list");list.replaceChildren();$("task-count").textContent=`${tasks.length} 项`;
+  const activitySummary=$<HTMLElement>("activity-summary");
+  const activeTask=tasks.find((task)=>task.status==="running"||task.status==="queued");
+  const failedTask=tasks.find((task)=>task.status==="failed");
+  activitySummary.textContent=activeTask
+    ? `${activeTask.status==="running"?"正在生成":"等待生成"} · ${activeTask.prompt}`
+    : failedTask
+      ? `生成失败 · ${failedTask.error||"点击查看详情"}`
+      : tasks.length
+        ? `最近共有 ${tasks.length} 项任务`
+        : "暂无生成任务";
+  activitySummary.classList.toggle("is-error",Boolean(failedTask&&!activeTask));
   if(!tasks.length){const empty=document.createElement("p");empty.className="task-empty";empty.textContent="暂无任务";list.appendChild(empty);return}
   const labels:Record<ImageTask["status"],string>={queued:"等待中",running:"生成中",completed:"已完成",failed:"失败",cancelled:"已取消"};
   for(const task of tasks.slice(0,8)){
@@ -242,7 +261,7 @@ function renderTasks(tasks:ImageTask[]):void{
     const text=document.createElement("div");const title=document.createElement("strong");title.textContent=task.prompt;const meta=document.createElement("small");meta.textContent=task.error||`${labels[task.status]} · ${new Date(task.createdAt).toLocaleTimeString()}`;text.append(title,meta);
     const action=document.createElement("button");action.type="button";
     if(task.status==="queued"||task.status==="running"){action.textContent="×";action.title="取消任务";action.onclick=()=>void window.novelai.cancelTask(task.id)}
-    else if(task.status==="failed"||task.status==="cancelled"){action.textContent="↻";action.title="重试任务";action.onclick=async()=>{action.disabled=true;try{const result=await window.novelai.retryTask(task.id);showResult(result);await refreshHistory()}catch(e){setStatus(e instanceof Error?e.message:String(e),true)}finally{action.disabled=false}}}
+    else if(task.status==="failed"||task.status==="cancelled"){action.textContent="↻";action.title="重试任务";action.onclick=async()=>{action.disabled=true;try{const result=await window.novelai.retryTask(task.id);showResult(result);await refreshHistory()}catch(e){setStatus("任务重试失败，请稍后再试。",true,e);setActivityDrawer(true)}finally{action.disabled=false}}}
     else{action.textContent="✓";action.disabled=true;action.title="任务已完成"}
     row.append(text,action);list.appendChild(row);
   }
@@ -258,9 +277,11 @@ function useAsset(asset:ImageAsset):void{
   syncReferenceDisplay();updateReferencePanel();void refreshAssets();setStatus(referenceImages.length?`已选择 ${referenceImages.length} 张参考素材。再次点击可取消选择。`:"已清空参考素材。");
 }
 async function refreshAssets():Promise<void>{
-  allAssets=await window.novelai.assets();const query=$<HTMLInputElement>("asset-search").value.trim().toLowerCase(),category=$<HTMLSelectElement>("asset-category").value;const assets=allAssets.filter((asset)=>(!query||asset.name.toLowerCase().includes(query))&&(category==="all"||(category==="favorite"?asset.favorite:(asset.category||"other")===category)));const library=$("asset-library");library.replaceChildren();$("asset-count").textContent=`${assets.length}/${allAssets.length} 张`;
-  if(!assets.length){const empty=document.createElement("p");empty.className="task-empty";empty.textContent="尚未导入素材";library.appendChild(empty);return}
-  for(const asset of assets){const item=document.createElement("article");item.className="asset-item";item.classList.toggle("is-selected",referenceImages.some((selected)=>selected.id===asset.id));item.tabIndex=0;const image=document.createElement("img");image.src=asset.dataUrl;image.alt=asset.name;const name=document.createElement("span");name.textContent=asset.name;name.ondblclick=async(event)=>{event.stopPropagation();const next=promptDialog("重命名素材",asset.name);if(next){await window.novelai.updateAsset(asset.id,{name:next});await refreshAssets()}};const categorySelect=document.createElement("select");for(const [value,label] of [["character","角色"],["outfit","服装"],["pose","姿势"],["style","画风"],["other","其他"]]){const option=document.createElement("option");option.value=value;option.textContent=label;categorySelect.appendChild(option)}categorySelect.value=asset.category||"other";categorySelect.onclick=(event)=>event.stopPropagation();categorySelect.onchange=async()=>{await window.novelai.updateAsset(asset.id,{category:categorySelect.value});await refreshAssets()};const favorite=document.createElement("button");favorite.type="button";favorite.className="asset-item__favorite";favorite.textContent=asset.favorite?"★":"☆";favorite.onclick=async(event)=>{event.stopPropagation();await window.novelai.updateAsset(asset.id,{favorite:!asset.favorite});await refreshAssets()};const remove=document.createElement("button");remove.type="button";remove.textContent="×";remove.title="删除素材";remove.onclick=async(event)=>{event.stopPropagation();referenceImages=referenceImages.filter((selected)=>selected.id!==asset.id);syncReferenceDisplay();await window.novelai.deleteAsset(asset.id);await refreshAssets()};item.onclick=()=>useAsset(asset);item.onkeydown=(event)=>{if(event.key==="Enter"||event.key===" ")useAsset(asset)};item.append(image,name,categorySelect,favorite,remove);library.appendChild(item)}
+  try{
+    allAssets=await window.novelai.assets();const query=$<HTMLInputElement>("asset-search").value.trim().toLowerCase(),category=$<HTMLSelectElement>("asset-category").value;const assets=allAssets.filter((asset)=>(!query||asset.name.toLowerCase().includes(query))&&(category==="all"||(category==="favorite"?asset.favorite:(asset.category||"other")===category)));const library=$("asset-library");library.replaceChildren();$("asset-count").textContent=`${assets.length}/${allAssets.length} 张`;
+    if(!assets.length){const empty=document.createElement("p");empty.className="task-empty";empty.textContent="尚未导入素材";library.appendChild(empty);return}
+    for(const asset of assets){const item=document.createElement("article");item.className="asset-item";item.classList.toggle("is-selected",referenceImages.some((selected)=>selected.id===asset.id));item.tabIndex=0;const image=document.createElement("img");image.src=asset.dataUrl;image.alt=asset.name;const name=document.createElement("span");name.textContent=asset.name;name.ondblclick=async(event)=>{event.stopPropagation();const next=promptDialog("重命名素材",asset.name);if(next){await window.novelai.updateAsset(asset.id,{name:next});await refreshAssets()}};const categorySelect=document.createElement("select");for(const [value,label] of [["character","角色"],["outfit","服装"],["pose","姿势"],["style","画风"],["other","其他"]]){const option=document.createElement("option");option.value=value;option.textContent=label;categorySelect.appendChild(option)}categorySelect.value=asset.category||"other";categorySelect.onclick=(event)=>event.stopPropagation();categorySelect.onchange=async()=>{await window.novelai.updateAsset(asset.id,{category:categorySelect.value});await refreshAssets()};const favorite=document.createElement("button");favorite.type="button";favorite.className="asset-item__favorite";favorite.textContent=asset.favorite?"★":"☆";favorite.onclick=async(event)=>{event.stopPropagation();await window.novelai.updateAsset(asset.id,{favorite:!asset.favorite});await refreshAssets()};const remove=document.createElement("button");remove.type="button";remove.textContent="×";remove.title="删除素材";remove.onclick=async(event)=>{event.stopPropagation();referenceImages=referenceImages.filter((selected)=>selected.id!==asset.id);syncReferenceDisplay();await window.novelai.deleteAsset(asset.id);await refreshAssets()};item.onclick=()=>useAsset(asset);item.onkeydown=(event)=>{if(event.key==="Enter"||event.key===" ")useAsset(asset)};item.append(image,name,categorySelect,favorite,remove);library.appendChild(item)}
+  }catch(error){setStatus("参考素材加载失败，仍可继续使用文字绘图。",true,error)}
 }
 
 async function testConnection():Promise<void>{
@@ -272,7 +293,7 @@ async function testConnection():Promise<void>{
       const models=await window.novelai.models(draft); const options=$<HTMLDataListElement>("model-options"); options.replaceChildren();
       for(const id of models){const option=document.createElement("option");option.value=id;options.appendChild(option)}
     }catch{setStatus("接口可用，但没有提供模型列表；请手动填写模型名。")}
-  }catch(e){badge.textContent="连接失败";setStatus(e instanceof Error?e.message:String(e),true)}
+  }catch(e){badge.textContent="连接失败";setStatus("连接测试失败，请检查服务地址和密钥。",true,e)}
 }
 
 async function init():Promise<void>{
@@ -301,7 +322,6 @@ $("load-result-params").onclick=()=>{if(selectedResult)loadResultParams(selected
 $("edit-result").onclick=()=>{if(selectedResult)editFromResult(selectedResult)};
 $<HTMLInputElement>("asset-search").oninput=()=>void refreshAssets();$<HTMLSelectElement>("asset-category").onchange=()=>void refreshAssets();$<HTMLInputElement>("history-search").oninput=applyHistoryFilter;$<HTMLInputElement>("history-favorites").onchange=applyHistoryFilter;
 document.querySelector<HTMLElement>(".history-panel")!.onscroll=(event)=>{const panel=event.currentTarget as HTMLElement;if(panel.scrollTop+panel.clientHeight>=panel.scrollHeight-120)void loadMoreHistory()};
-document.querySelectorAll<HTMLButtonElement>("[data-studio-tab]").forEach((button)=>button.onclick=()=>{document.querySelectorAll<HTMLElement>("[data-studio-tab]").forEach((item)=>item.classList.toggle("is-active",item===button));document.querySelectorAll<HTMLElement>("[data-studio-panel]").forEach((panel)=>panel.toggleAttribute("hidden",panel.dataset.studioPanel!==button.dataset.studioTab))});
 document.querySelectorAll<HTMLButtonElement>("[data-prompt-tab]").forEach((button)=>button.onclick=()=>{inspectorTab=button.dataset.promptTab as typeof inspectorTab;renderInspector()});
 $("copy-final-prompt").onclick=()=>void navigator.clipboard.writeText(inspector.final||prompt.value);
 $("translate-prompt").onclick=async()=>{const description=$<HTMLTextAreaElement>("natural-prompt").value.trim();if(!description){setStatus("请先填写自然语言画面描述。",true);return}const button=$<HTMLButtonElement>("translate-prompt");button.disabled=true;setStatus("正在理解画面并构建 NovelAI Prompt...");try{const raw=await window.novelai.translatePrompt(description);const translated=typeof raw==="string"?raw:String((raw as any)?.reply||(raw as any)?.content||"");if(!translated.trim())throw new Error("模型没有返回提示词");prompt.value=translated.trim().replace(/^```\w*|```$/g,"").trim();inspector.translated=prompt.value;updateOutfitInspector();inspectorTab="final";renderInspector();setStatus("Prompt 已构建，可以继续编辑或直接生成。") }catch(error){setStatus(error instanceof Error?error.message:String(error),true)}finally{button.disabled=false}};
@@ -345,9 +365,11 @@ $("generate").onclick=async()=>{
     const strength=Number($<HTMLInputElement>("reference-strength").value);const informationExtracted=Number($<HTMLInputElement>("reference-info").value);
     const draft={prompt:prompt.value,negativePrompt:negative.value,model:model.value,characterId:activeCharacterId,outfitId:$<HTMLSelectElement>("outfit-select").value,width:referenceMode==="outpaint"?outpaintWidth:$<HTMLSelectElement>("width").value,height:referenceMode==="outpaint"?outpaintHeight:$<HTMLSelectElement>("height").value,steps:$<HTMLInputElement>("steps").value,scale:$<HTMLInputElement>("scale").value,sampler:$<HTMLSelectElement>("sampler").value,referenceMode,referenceImage:referenceMode==="outpaint"?outpaintImageDataUrl:referenceImages[0]?.dataUrl,maskImage:referenceMode==="outpaint"?outpaintMaskDataUrl:maskImageDataUrl,referenceImages:referenceImages.map((item)=>({image:item.dataUrl,strength,informationExtracted})),referenceStrength:strength,referenceInformationExtracted:informationExtracted,characters:characters.filter((item)=>item.prompt.trim())};
     if(referenceImages[0]?.id.startsWith("history-"))(draft as Record<string,unknown>).parentId=referenceImages[0].id.slice(8);const count=Math.max(1,Math.min(4,Number($<HTMLSelectElement>("variant-count").value)||1));const requestedSeed=$<HTMLInputElement>("seed").value.trim();const results=await Promise.all(Array.from({length:count},(_,index)=>window.novelai.generate({...draft,seed:requestedSeed?Number(requestedSeed)+index:""})));showResult(results[results.length-1]);await refreshHistory();setStatus(`${count} 张变体绘制完成，作品已保存。`);
-  }catch(e){setStatus(e instanceof Error?e.message:String(e),true)}finally{button.disabled=false}
+  }catch(e){setStatus("绘图提交失败，请检查设置后重试。",true,e);setActivityDrawer(true)}finally{button.disabled=false}
 };
+bindNovelAiUi();
+showNovelAiPage("create");
+renderInspector();
 void init();
 window.novelai.onTasksChanged((tasks)=>{renderTasks(tasks);window.clearTimeout(taskRefreshTimer);taskRefreshTimer=window.setTimeout(()=>void refreshHistory(),250)});
-document.querySelector<HTMLButtonElement>("[data-studio-tab='generate']")?.click();renderInspector();
 export {};

@@ -39,4 +39,11 @@ describe("NovelAI UI state", () => {
     setActivityDrawer(false);
     expect(document.querySelector("#activity-drawer")?.hasAttribute("hidden")).toBe(true);
   });
+
+  it("toggles the drawer through its bound button", () => {
+    bindNovelAiUi();
+    (document.querySelector("#activity-toggle") as HTMLButtonElement).click();
+    expect(document.querySelector("#activity-drawer")?.hasAttribute("hidden")).toBe(false);
+    expect(document.querySelector("#activity-toggle")?.getAttribute("aria-expanded")).toBe("true");
+  });
 });
