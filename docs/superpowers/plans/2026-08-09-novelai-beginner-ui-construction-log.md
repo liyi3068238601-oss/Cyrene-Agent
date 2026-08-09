@@ -58,3 +58,31 @@ GREEN（实现后）：
 - 使用真实 NovelAI 凭据确认生成、任务重试、连接失败响应、outpaint 解码/尺寸错误和系统文件对话框。
 - 核对深色系统主题或宿主主题覆盖下的最终视觉体感；本轮固定色值对暖白主题的计算对比度已自动验证。
 - `dist/renderer/react/index.html` 与 `dist/renderer/novelai/` 是本地构建产物，仅保留在工作区，不纳入提交。
+
+## 小窗口独立滚动修复
+
+根因：桌面布局的 `.studio` 没有将中间工作区约束在视口高度内，且左侧 `.creation-panel` 与右侧 `.canvas-area` 缺少明确的最小高度和垂直滚动约束；短窗口会让内容参与页面整体高度计算，而不是形成两个独立滚动面板。
+
+- 桌面（宽度大于 900px）：`.studio` 使用 `height: 100vh` 和 `min-height: 0`；两个工作面板使用 `min-height: 0`、`overflow-y: auto`、`overscroll-behavior: contain`。在真实浏览器 1200 × 620 下，左/右面板滚动范围分别为 479px/318px；将左侧设为 `scrollTop = 240` 后右侧仍为 0，将右侧设为 240 后左侧仍为 240，证明滚动相互独立。
+- 窄窗口（宽度不大于 900px）：media query 恢复 `min-height: auto`、`overflow: visible` 和 `overscroll-behavior: auto`，由文档自然滚动。浏览器 820 × 620 断言得到 `body overflow = auto`、左右面板 `overflow = visible`，没有嵌套滚动条。
+- 生成结果图片规则未改动；既有 `object-fit: contain` 行为保持不变。
+
+RED/GREEN（Task 1 的实际实现证据）：
+
+| 阶段 | 命令 | 退出码与结果 |
+| --- | --- | --- |
+| RED | `npm.cmd test -- src/renderer/novelai/style-contract.test.ts` | 1；1 个测试文件失败，新增契约因面板缺少 `min-height: 0`、`overflow-y: auto`、`overscroll-behavior: contain` 而失败。 |
+| GREEN | `npm.cmd test -- src/renderer/novelai/style-contract.test.ts src/renderer/novelai/layout.test.ts` | 0；2 个测试文件、21 个测试通过。 |
+
+本轮实际验证：
+
+| 命令 | 退出码与结果 |
+| --- | --- |
+| `npm.cmd run build:renderer` | 0；Vite 转换 8625 个模块，输出 `dist/renderer/novelai/index.html`；仅有允许的 >500 kB chunk 警告。 |
+| `node .superpowers/sdd/verify-scroll-smoke.cjs` | 0；使用隐藏 Vite（127.0.0.1:5175）与系统 Edge 完成上述宽/窄窗口断言，脚本结束后确认端口没有监听者。 |
+| `npm.cmd test -- src/plugins/novelai src/renderer/novelai` | 0；14 个测试文件、66 个测试通过。 |
+| `New-Item -ItemType Directory -Force "$PWD\.superpowers\sdd\test-profile-scroll-fix" | Out-Null; $env:USERPROFILE = "$PWD\.superpowers\sdd\test-profile-scroll-fix"; npm.cmd test` | 0；283 个测试文件通过、1 个跳过；2484 个测试通过、12 个跳过。隔离 profile 下测试输出了非致命的 Git/技能目录警告。 |
+| `npm.cmd run build` | 0；`build:skills`、`build:main`、`build:preload`、`build:cli`、`build:renderer` 均成功；renderer 仍为 8625 个模块，只有允许的大 chunk 警告。 |
+| `git diff --check HEAD~1..HEAD` | 0；无空白错误。 |
+
+提交前工作区检查确认 `dist/renderer/react/index.html` 和 `dist/renderer/novelai/` 仍是未暂存的本地构建产物，未加入本提交；`.superpowers/sdd/` 下的烟测脚本、日志和隔离 profile 同样不提交。
