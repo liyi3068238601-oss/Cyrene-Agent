@@ -1,6 +1,6 @@
 import { bindGenerationFlow } from "./generation-flow";
 import { renderTaskActivitySummary } from "./task-presentation";
-import { bindNovelAiUi, reportCreateStatus, reportUtilityStatus, runAssetAction, setActivityDrawer } from "./ui-state";
+import { bindNovelAiUi, reportAssetSelection, reportCreateStatus, reportUtilityStatus, runAssetAction, setActivityDrawer, setCreateConnectionWarning, syncAssetSelectionState } from "./ui-state";
 
 type ProviderKind = "novelai-gateway" | "openai-images" | "chat-completions-image" | "novelai-native" | "async-task";
 interface Capabilities { negativePrompt:boolean; dimensions:boolean; steps:boolean; scale:boolean; sampler:boolean; seed:boolean; img2img:boolean; inpaint:boolean; vibe:boolean; directorReference:boolean; multiCharacter:boolean }
@@ -120,7 +120,7 @@ function renderOutfits(activeId?:string):void{
   });
   refreshOutfitSelect(activeId);
 }
-function renderTemplates():void{const editor=$("template-editor");editor.replaceChildren();outfitTemplates.forEach((template,index)=>{const row=document.createElement("div");row.className="outfit-row";const head=document.createElement("div");head.className="outfit-row__head";const name=document.createElement("input");name.value=template.name;name.placeholder="通用模板名称";const remove=document.createElement("button");remove.type="button";remove.textContent="×";remove.title="删除模板";const tags=document.createElement("textarea");tags.rows=2;tags.value=template.tags;tags.placeholder="通用服装 Tags，不要包含角色外貌";const actions=document.createElement("div");actions.className="template-actions";const copy=document.createElement("button");copy.type="button";copy.textContent="复制到当前角色";copy.disabled=!activeProfile();copy.onclick=()=>{const profile=activeProfile();if(!profile)return;const clone={...template,id:slug(`${profile.id}-${template.name}-${Date.now()}`),name:template.name};profile.outfits.push(clone);outfits=profile.outfits;renderOutfits(clone.id);setStatus(`已将“${template.name}”复制到 ${profile.name} 的衣柜。`)};const sync=()=>{outfitTemplates[index]={...outfitTemplates[index],name:name.value.trim()||`通用模板 ${index+1}`,tags:tags.value.trim()}};name.oninput=sync;tags.oninput=sync;remove.onclick=()=>{outfitTemplates.splice(index,1);renderTemplates()};head.append(name,remove);actions.appendChild(copy);row.append(head,tags,actions);editor.appendChild(row)})}
+function renderTemplates():void{const editor=$("template-editor");editor.replaceChildren();outfitTemplates.forEach((template,index)=>{const row=document.createElement("div");row.className="outfit-row";const head=document.createElement("div");head.className="outfit-row__head";const name=document.createElement("input");name.value=template.name;name.placeholder="通用模板名称";const remove=document.createElement("button");remove.type="button";remove.textContent="×";remove.title="删除模板";const tags=document.createElement("textarea");tags.rows=2;tags.value=template.tags;tags.placeholder="通用服装 Tags，不要包含角色外貌";const actions=document.createElement("div");actions.className="template-actions";const copy=document.createElement("button");copy.type="button";copy.textContent="复制到当前角色";copy.disabled=!activeProfile();copy.onclick=()=>{const profile=activeProfile();if(!profile)return;const clone={...template,id:slug(`${profile.id}-${template.name}-${Date.now()}`),name:template.name};profile.outfits.push(clone);outfits=profile.outfits;renderOutfits(clone.id);reportUtilityStatus("library",`已将“${template.name}”复制到 ${profile.name} 的衣柜。`)};const sync=()=>{outfitTemplates[index]={...outfitTemplates[index],name:name.value.trim()||`通用模板 ${index+1}`,tags:tags.value.trim()}};name.oninput=sync;tags.oninput=sync;remove.onclick=()=>{outfitTemplates.splice(index,1);renderTemplates()};head.append(name,remove);actions.appendChild(copy);row.append(head,tags,actions);editor.appendChild(row)})}
 
 function updateProviderLabels():void {
   const kind=getKind();
@@ -261,18 +261,19 @@ async function refreshTasks():Promise<void>{try{renderTasks(await window.novelai
 
 function renderCharacters():void{const editor=$("character-editor");editor.replaceChildren();characters.forEach((character,index)=>{const row=document.createElement("article");row.className="character-row";const name=document.createElement("input");name.value=character.name;const tags=document.createElement("textarea");tags.rows=2;tags.value=character.prompt;tags.placeholder="外观、服装、动作、表情 Tags";const negativeInput=document.createElement("input");negativeInput.value=character.negativePrompt;negativeInput.placeholder="角色负面提示词";const remove=document.createElement("button");remove.type="button";remove.textContent="×";const sync=()=>{characters[index]={...characters[index],name:name.value||`角色 ${index+1}`,prompt:tags.value,negativePrompt:negativeInput.value};renderCharacterMarkers()};name.oninput=sync;tags.oninput=sync;negativeInput.oninput=sync;remove.onclick=()=>{characters.splice(index,1);renderCharacters()};row.append(name,tags,negativeInput,remove);editor.appendChild(row)});renderCharacterMarkers()}
 function renderCharacterMarkers():void{const board=$("composition-board");board.querySelectorAll("button").forEach((node)=>node.remove());characters.forEach((character,index)=>{const marker=document.createElement("button");marker.type="button";marker.textContent=String(index+1);marker.title=character.name;marker.style.left=`${character.x*100}%`;marker.style.top=`${character.y*100}%`;marker.onpointerdown=(event)=>{marker.setPointerCapture(event.pointerId);marker.onpointermove=(next)=>{const rect=board.getBoundingClientRect();character.x=Math.max(0,Math.min(1,(next.clientX-rect.left)/rect.width));character.y=Math.max(0,Math.min(1,(next.clientY-rect.top)/rect.height));marker.style.left=`${character.x*100}%`;marker.style.top=`${character.y*100}%`};marker.onpointerup=()=>{marker.onpointermove=null}};board.appendChild(marker)})}
+function syncRenderedAssetSelection():void{document.querySelectorAll<HTMLElement>(".asset-item[data-asset-id]").forEach((item)=>syncAssetSelectionState(item,referenceImages.some((selected)=>selected.id===item.dataset.assetId)))}
 function useAsset(asset:ImageAsset):void{
   const mode=$<HTMLSelectElement>("reference-mode");if(mode.value==="none"){const first=Array.from(mode.options).find((option)=>option.value!=="none"&&!option.disabled);if(first)mode.value=first.value}
   const multi=mode.value==="vibe"||mode.value.startsWith("director-");const exists=referenceImages.findIndex((item)=>item.id===asset.id);
   if(multi&&exists>=0)referenceImages.splice(exists,1);else if(multi)referenceImages.push({...asset,strength:0.7,informationExtracted:1});else referenceImages=[{...asset,strength:0.7,informationExtracted:1}];
-  syncReferenceDisplay();updateReferencePanel();void refreshAssets();setStatus(referenceImages.length?`已选择 ${referenceImages.length} 张参考素材。再次点击可取消选择。`:"已清空参考素材。");
+  syncReferenceDisplay();updateReferencePanel();syncRenderedAssetSelection();reportAssetSelection(referenceImages.length);void refreshAssets(false);
 }
-async function refreshAssets():Promise<void>{
+async function refreshAssets(clearStatus=true):Promise<void>{
   await runAssetAction(async()=>{
     allAssets=await window.novelai.assets();const query=$<HTMLInputElement>("asset-search").value.trim().toLowerCase(),category=$<HTMLSelectElement>("asset-category").value;const assets=allAssets.filter((asset)=>(!query||asset.name.toLowerCase().includes(query))&&(category==="all"||(category==="favorite"?asset.favorite:(asset.category||"other")===category)));const library=$("asset-library");library.replaceChildren();$("asset-count").textContent=`${assets.length}/${allAssets.length} 张`;
     if(!assets.length){const empty=document.createElement("p");empty.className="task-empty";empty.textContent="尚未导入素材";library.appendChild(empty);return}
     for(const asset of assets){
-      const item=document.createElement("article");item.className="asset-item";item.classList.toggle("is-selected",referenceImages.some((selected)=>selected.id===asset.id));item.tabIndex=0;
+      const item=document.createElement("article");item.className="asset-item";item.dataset.assetId=asset.id;syncAssetSelectionState(item,referenceImages.some((selected)=>selected.id===asset.id));item.tabIndex=0;
       const image=document.createElement("img");image.src=asset.dataUrl;image.alt=asset.name;
       const name=document.createElement("span");name.textContent=asset.name;name.ondblclick=(event)=>{event.stopPropagation();const next=promptDialog("重命名素材",asset.name);if(next)void runAssetAction(async()=>{const updated=await window.novelai.updateAsset(asset.id,{name:next});if(updated)await refreshAssets();return updated},{errorMessage:ASSET_ACTION_ERROR,isFailure:(result)=>result===null,failureDetail:"素材更新未成功。"})};
       const categorySelect=document.createElement("select");for(const [value,label] of [["character","角色"],["outfit","服装"],["pose","姿势"],["style","画风"],["other","其他"]]){const option=document.createElement("option");option.value=value;option.textContent=label;categorySelect.appendChild(option)}categorySelect.value=asset.category||"other";categorySelect.onclick=(event)=>event.stopPropagation();categorySelect.onchange=()=>{void runAssetAction(async()=>{const updated=await window.novelai.updateAsset(asset.id,{category:categorySelect.value});if(updated)await refreshAssets();return updated},{errorMessage:ASSET_ACTION_ERROR,isFailure:(result)=>result===null,failureDetail:"素材更新未成功。"})};
@@ -280,19 +281,19 @@ async function refreshAssets():Promise<void>{
       const remove=document.createElement("button");remove.type="button";remove.textContent="×";remove.title="删除素材";remove.onclick=(event)=>{event.stopPropagation();void runAssetAction(async()=>{const deleted=await window.novelai.deleteAsset(asset.id);if(deleted){referenceImages=referenceImages.filter((selected)=>selected.id!==asset.id);syncReferenceDisplay();await refreshAssets()}return deleted},{errorMessage:ASSET_ACTION_ERROR,isFailure:(result)=>result===false,failureDetail:"素材删除未成功。"})};
       item.onclick=()=>useAsset(asset);item.onkeydown=(event)=>{if(event.key==="Enter"||event.key===" ")useAsset(asset)};item.append(image,name,categorySelect,favorite,remove);library.appendChild(item);
     }
-  },{errorMessage:ASSET_LOAD_ERROR,clearOnSuccess:true});
+  },{errorMessage:ASSET_LOAD_ERROR,clearOnSuccess:clearStatus});
 }
 
 async function testConnection():Promise<void>{
   badge.textContent="检测中"; badge.classList.remove("ok","error");
   try{
-    const draft=configFromForm(); const result=await window.novelai.test(draft); await applyCapabilities(result.capabilities);
-    badge.textContent="已连接"; badge.classList.add("ok"); reportUtilityStatus("settings","接口连接正常。");
+    const draft=configFromForm(); const result=await window.novelai.test(draft);if(!result.ok)throw new Error("连接测试未通过");await applyCapabilities(result.capabilities);
+    badge.textContent="已连接"; badge.classList.add("ok");setCreateConnectionWarning(true);reportUtilityStatus("settings","接口连接正常。");
     try{
       const models=await window.novelai.models(draft); const options=$<HTMLDataListElement>("model-options"); options.replaceChildren();
       for(const id of models){const option=document.createElement("option");option.value=id;options.appendChild(option)}
     }catch{reportUtilityStatus("settings","接口可用，但没有提供模型列表；请手动填写模型名。")}
-  }catch(e){reportUtilityStatus("settings","连接测试失败，请检查服务地址和密钥。",true,e);badge.textContent="连接失败"}
+  }catch(e){setCreateConnectionWarning(false);reportUtilityStatus("settings","连接测试失败，请检查服务地址和密钥。",true,e);badge.textContent="连接失败"}
 }
 
 async function init():Promise<void>{
@@ -308,7 +309,7 @@ async function init():Promise<void>{
     $<HTMLInputElement>("wardrobe-enabled").checked=config.wardrobeEnabled!==false;
     characterProfiles=Array.isArray(config.characters)?config.characters:[];outfitTemplates=Array.isArray(config.outfitTemplates)?config.outfitTemplates:[];activeCharacterId=config.activeCharacterId||"__none__";loadActiveProfile();renderTemplates();
     updateProviderLabels(); await applyCapabilities(); await Promise.all([refreshHistory(),refreshTasks(),refreshAssets()]); void testConnection();
-  }catch(e){setStatus(String(e),true)}
+  }catch(e){setCreateConnectionWarning(false);setStatus(String(e),true)}
   const theme=await window.cyreneTheme?.get?.(); if(theme)document.body.dataset.uiTheme=theme;
   window.cyreneTheme?.onChanged?.((value)=>document.body.dataset.uiTheme=value);
 }
@@ -377,7 +378,7 @@ $("save-wardrobe").onclick=()=>void saveLocalConfig("save-wardrobe","角色衣�
 providerMode.onchange=()=>{
   const preset=presets[getKind()]; gateway.value=preset.gatewayUrl; $<HTMLInputElement>("models-path").value=preset.modelsPath;
   $<HTMLInputElement>("generation-path").value=preset.generationPath; $<HTMLInputElement>("async-result-path").value=preset.asyncResultPath;
-  updateProviderLabels(); void applyCapabilities(); badge.textContent="未检测"; badge.classList.remove("ok","error");
+  updateProviderLabels(); void applyCapabilities(); badge.textContent="未检测"; badge.classList.remove("ok","error");setCreateConnectionWarning(false);
 };
 $("save").onclick=async()=>{const button=$<HTMLButtonElement>("save");button.disabled=true;try{await window.novelai.saveConfig(configFromForm());reportUtilityStatus("settings","配置已加密保存到本机。");await testConnection()}catch(e){reportUtilityStatus("settings","配置保存失败，请检查后重试。",true,e);badge.textContent="保存失败"}finally{button.disabled=false}};
 bindGenerationFlow({

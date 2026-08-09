@@ -24,6 +24,14 @@ export function setActivityDrawer(open: boolean, root: ParentNode = document): v
   drawer.toggleAttribute("hidden", !open);
 }
 
+export function setCreateConnectionWarning(connected: boolean, root: ParentNode = document): void {
+  const warning = root.querySelector<HTMLElement>("#create-connection-warning");
+  if (!warning) return;
+  const message = warning.querySelector<HTMLElement>("#create-connection-message");
+  if (message) message.textContent = "API 尚未连接";
+  warning.toggleAttribute("hidden", connected);
+}
+
 function reportStatusRegion(prefix: string, text: string, error: boolean, detail: unknown, root: ParentNode): void {
   const status = root.querySelector<HTMLElement>(`#${prefix}`);
   const details = root.querySelector<HTMLDetailsElement>(`#${prefix}-details`);
@@ -44,6 +52,15 @@ export function reportCreateStatus(text: string, error = false, detail?: unknown
 
 export function reportAssetStatus(text: string, error = false, detail?: unknown, root: ParentNode = document): void {
   reportStatusRegion("asset-status", text, error, detail, root);
+}
+
+export function reportAssetSelection(count: number, root: ParentNode = document): void {
+  reportAssetStatus(count > 0 ? `已选择 ${count} 张参考素材。再次点击可取消选择。` : "已清空参考素材。", false, undefined, root);
+}
+
+export function syncAssetSelectionState(item: HTMLElement, selected: boolean): void {
+  item.classList.toggle("is-selected", selected);
+  item.setAttribute("aria-selected", String(selected));
 }
 
 export function reportUtilityStatus(page: UtilityPage, text: string, error = false, detail?: unknown, root: ParentNode = document): void {

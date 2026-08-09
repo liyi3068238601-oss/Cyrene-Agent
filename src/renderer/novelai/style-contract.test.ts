@@ -38,6 +38,7 @@ describe("NovelAI warm studio styles", () => {
     expect(contrast(colorToken("--nai-accent"), primaryLabel)).toBeGreaterThanOrEqual(4.5);
     expect(contrast(colorToken("--nai-accent-strong"), primaryLabel)).toBeGreaterThanOrEqual(4.5);
     expect(contrast(colorToken("--nai-success"), surface)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(colorToken("--nai-danger"), softSurface)).toBeGreaterThanOrEqual(4.5);
   });
 
   it("uses an opaque high-contrast focus ring including keyboard-focused assets", () => {
