@@ -62,6 +62,19 @@ describe("NovelAI UI state", () => {
     expect(document.querySelector("#asset-status-technical")?.textContent).toContain("asset IPC unavailable");
   });
 
+  it("treats an asset IPC failure sentinel as a captured error", async () => {
+    await expect(runAssetAction(
+      async () => false,
+      {
+        errorMessage: "素材操作失败，仍可继续使用文字绘图。",
+        isFailure: (result) => result === false,
+        failureDetail: "素材删除未成功。",
+      },
+    )).resolves.toBeUndefined();
+    expect(document.querySelector("#asset-status")?.textContent).toBe("素材操作失败，仍可继续使用文字绘图。");
+    expect(document.querySelector("#asset-status-technical")?.textContent).toContain("素材删除未成功。");
+  });
+
   it("clears a previous asset error after a successful refresh action", async () => {
     reportAssetStatus("旧素材错误", true, new Error("old"));
     await expect(runAssetAction(

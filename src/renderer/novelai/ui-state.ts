@@ -32,16 +32,19 @@ export function reportAssetStatus(text: string, error = false, detail?: unknown,
   if (details.hidden) details.open = false;
 }
 
-interface AssetActionOptions {
+interface AssetActionOptions<T> {
   errorMessage: string;
   clearOnSuccess?: boolean;
+  isFailure?: (result: T) => boolean;
+  failureDetail?: string;
   root?: ParentNode;
 }
 
-export async function runAssetAction<T>(action: () => Promise<T>, options: AssetActionOptions): Promise<T | undefined> {
+export async function runAssetAction<T>(action: () => Promise<T>, options: AssetActionOptions<T>): Promise<T | undefined> {
   const root = options.root || document;
   try {
     const result = await action();
+    if (options.isFailure?.(result)) throw new Error(options.failureDetail || options.errorMessage);
     if (options.clearOnSuccess) reportAssetStatus("", false, undefined, root);
     return result;
   } catch (error) {
