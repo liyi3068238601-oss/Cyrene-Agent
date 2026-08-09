@@ -58,11 +58,6 @@ export function reportAssetSelection(count: number, root: ParentNode = document)
   reportAssetStatus(count > 0 ? `已选择 ${count} 张参考素材。再次点击可取消选择。` : "已清空参考素材。", false, undefined, root);
 }
 
-export function syncAssetSelectionState(item: HTMLElement, selected: boolean): void {
-  item.classList.toggle("is-selected", selected);
-  item.setAttribute("aria-selected", String(selected));
-}
-
 export function reportUtilityStatus(page: UtilityPage, text: string, error = false, detail?: unknown, root: ParentNode = document): void {
   reportStatusRegion(`${page}-status`, text, error, detail, root);
   if (page === "settings" && error) {

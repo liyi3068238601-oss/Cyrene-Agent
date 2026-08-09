@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it } from "vitest";
-import { bindNovelAiUi, reportAssetSelection, reportAssetStatus, reportUtilityStatus, runAssetAction, setActivityDrawer, showNovelAiPage, syncAssetSelectionState } from "./ui-state";
+import { bindNovelAiUi, reportAssetSelection, reportAssetStatus, reportUtilityStatus, runAssetAction, setActivityDrawer, showNovelAiPage } from "./ui-state";
 
 beforeEach(() => {
   document.body.innerHTML = `
@@ -115,17 +115,10 @@ describe("NovelAI UI state", () => {
     expect(document.querySelector("#asset-status-technical")?.textContent).toBe("");
   });
 
-  it("keeps asset selection semantics and visible feedback synchronized", () => {
-    const item = document.createElement("article");
-    syncAssetSelectionState(item, true);
-    expect(item.classList.contains("is-selected")).toBe(true);
-    expect(item.getAttribute("aria-selected")).toBe("true");
+  it("keeps asset selection feedback visible", () => {
     reportAssetSelection(1);
     expect(document.querySelector("#asset-status")?.textContent).toContain("已选择 1 张参考素材");
 
-    syncAssetSelectionState(item, false);
-    expect(item.classList.contains("is-selected")).toBe(false);
-    expect(item.getAttribute("aria-selected")).toBe("false");
     reportAssetSelection(0);
     expect(document.querySelector("#asset-status")?.textContent).toBe("已清空参考素材。");
   });
