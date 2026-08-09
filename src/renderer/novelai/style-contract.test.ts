@@ -18,6 +18,16 @@ describe("NovelAI warm studio styles", () => {
     expect(css).toContain("#activity-drawer");
   });
 
+  it("visually emphasizes failed activity summaries", () => {
+    expect(css).toMatch(/#activity-summary\.is-error\s*\{[^}]*color:\s*var\(--nai-danger\)/s);
+  });
+
+  it("styles the download action without overriding its hidden state", () => {
+    expect(wardrobe).toMatch(/#download-result\.result-action\s*\{[^}]*border:[^}]*background:[^}]*text-decoration:\s*none/s);
+    expect(wardrobe).toMatch(/#download-result\.result-action:focus-visible\s*\{[^}]*outline:/s);
+    expect(wardrobe).toMatch(/#download-result\.result-action\[hidden\]\s*\{[^}]*display:\s*none/s);
+  });
+
   it("supports small windows and keyboard focus", () => {
     expect(css).toMatch(/@media\s*\(max-width:\s*900px\)/);
     expect(css).toContain(":focus-visible");

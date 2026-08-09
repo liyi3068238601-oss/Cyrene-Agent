@@ -92,6 +92,7 @@ input::placeholder, textarea::placeholder { color: var(--nai-muted); opacity: 1;
 
 .activity-shell { position: relative; z-index: 5; border-top: 1px solid var(--nai-line); background: var(--nai-surface); }
 #activity-toggle { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 44px; padding: 0 22px; border: 0; color: var(--nai-text); background: transparent; }
+#activity-summary.is-error { color: var(--nai-danger); font-weight: 700; }
 #activity-drawer { display: grid; grid-template-columns: minmax(260px, .7fr) minmax(0, 1.3fr); gap: 18px; max-height: min(48vh, 520px); padding: 18px 22px 22px; overflow: auto; border-top: 1px solid var(--nai-line); }
 #activity-toggle[aria-expanded="true"] #activity-chevron { transform: rotate(180deg); }
 
