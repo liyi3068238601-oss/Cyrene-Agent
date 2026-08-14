@@ -6,6 +6,7 @@ import type { UiTheme } from "../shared/ui-theme";
 import type { UiFont } from "../shared/ui-font";
 import type { ReasoningPreference } from "../shared/reasoning";
 import type { DocumentIndexProgress } from "../main/rag/document-index-queue";
+import type { AguiRunAck } from "../shared/run-terminal";
 import { getLive2DIpcListenerCounts } from "./live2d-listener-diagnostics";
 import { exposeMusicApi } from "./music";
 import { normalizeChatAppearance, type ChatAppearanceSettings } from "../shared/chat-appearance";
@@ -92,7 +93,8 @@ contextBridge.exposeInMainWorld("cyrene", cyreneApi);
 contextBridge.exposeInMainWorld("chat", chatApi);
 
 // AG-UI 事件流：发起一次 agent run，通过 onEvent 回调收 AG-UI 标准事件，
-// 返回 Promise<{success,error}> 表示整轮结束。onEvent 返回的取消订阅函数用于停止监听。
+// 返回 AguiRunAck 表示 invoke 已被接收（终态仍由事件流承载）。
+// onEvent 返回的取消订阅函数用于停止监听。
 const aguiApi = {
   run: (input: {
     messages: unknown[];
@@ -104,8 +106,11 @@ const aguiApi = {
     sessionId?: string;
     attachments?: { name: string; text: string }[];
     imageAttachments?: { name: string; filePath: string; mime?: string }[];
+    recoveryContext?: string;
   }) =>
-    ipcRenderer.invoke(IPC.AGUI_RUN, input) as Promise<{ success: boolean; error?: string }>,
+    // Task 2 / C1：返回 AguiRunAck，渲染端可立即拿到 canonical runId。
+    // ack.runId 与后续 RUN_STARTED.runId 强一致（由 bridge 注入 options.runId 保证）。
+    ipcRenderer.invoke(IPC.AGUI_RUN, input) as Promise<AguiRunAck>,
   onEvent: (callback: (event: unknown) => void) => {
     const listener = (_e: unknown, event: unknown) => {
       try {
@@ -271,6 +276,10 @@ const settingsApi = {
   close: () => ipcRenderer.send(IPC.SETTINGS_CLOSE),
   getConfig: () => ipcRenderer.invoke(IPC.SETTINGS_GET_CONFIG),
   saveConfig: (config: unknown) => ipcRenderer.invoke(IPC.SETTINGS_SAVE_CONFIG, config),
+  listModelProfiles: () => ipcRenderer.invoke(IPC.SETTINGS_MODEL_PROFILES_LIST),
+  saveModelProfile: (profile: unknown) => ipcRenderer.invoke(IPC.SETTINGS_MODEL_PROFILE_SAVE, profile),
+  deleteModelProfile: (id: string) => ipcRenderer.invoke(IPC.SETTINGS_MODEL_PROFILE_DELETE, id),
+  setDefaultModelProfile: (id: string) => ipcRenderer.invoke(IPC.SETTINGS_MODEL_PROFILE_SET_DEFAULT, id),
   testConnection: (config: { provider: string; baseUrl: string; model: string; apiKey: string; explicitTransport?: "openai" | "anthropic"; reasoning?: ReasoningPreference }) => ipcRenderer.invoke(IPC.SETTINGS_TEST_CONNECTION, config),
   testVision: (config: { baseUrl: string; apiKey: string; model: string }) => ipcRenderer.invoke(IPC.SETTINGS_TEST_VISION, config),
   // main → settings：要求切到指定标签（窗口已打开时由 main 发这个事件）
@@ -307,8 +316,23 @@ const settingsApi = {
   getRerankerStatus: (): Promise<{ light: boolean; standard: boolean }> => ipcRenderer.invoke(IPC.RERANKER_GET_STATUS),
   setToolEnabled: (id: string, enabled: boolean) => ipcRenderer.invoke(IPC.TOOL_SET_ENABLED, { id, enabled }),
   getToolEnabled: () => ipcRenderer.invoke(IPC.TOOL_GET_ENABLED),
+  // 三模适配层：工具-模式覆盖层（UI 设置面板用）
+  getToolCatalog: () => ipcRenderer.invoke(IPC.TOOL_GET_CATALOG),
+  getToolModeOverrides: () => ipcRenderer.invoke(IPC.TOOL_GET_MODE_OVERRIDES),
+  setToolModeOverride: (toolId: string, mode: string, enabled: boolean) =>
+    ipcRenderer.invoke(IPC.TOOL_SET_MODE_OVERRIDE, { toolId, mode, enabled }),
+  clearToolModeOverride: (toolId: string, mode?: string) =>
+    ipcRenderer.invoke(IPC.TOOL_CLEAR_MODE_OVERRIDE, { toolId, mode }),
   listSkills: () => ipcRenderer.invoke(IPC.SKILL_LIST),
   setSkillEnabled: (id: string, enabled: boolean) => ipcRenderer.invoke(IPC.SKILL_SET_ENABLED, { id, enabled }),
+  // 三模适配层：skill-模式覆盖层（UI 设置面板用）
+  getSkillCatalog: () => ipcRenderer.invoke(IPC.SKILL_GET_CATALOG),
+  rescanSkills: () => ipcRenderer.invoke(IPC.SKILL_RESCAN),
+  getSkillModeOverrides: () => ipcRenderer.invoke(IPC.SKILL_GET_MODE_OVERRIDES),
+  setSkillModeOverride: (skillId: string, mode: string, enabled: boolean) =>
+    ipcRenderer.invoke(IPC.SKILL_SET_MODE_OVERRIDE, { skillId, mode, enabled }),
+  clearSkillModeOverride: (skillId: string, mode?: string) =>
+    ipcRenderer.invoke(IPC.SKILL_CLEAR_MODE_OVERRIDE, { skillId, mode }),
   addMcpServer: (config: unknown) => ipcRenderer.invoke(IPC.MCP_ADD_SERVER, config),
   removeMcpServer: (serverId: string) => ipcRenderer.invoke(IPC.MCP_REMOVE_SERVER, serverId),
   listMcpServers: () => ipcRenderer.invoke(IPC.MCP_LIST_SERVERS),
@@ -503,14 +527,16 @@ contextBridge.exposeInMainWorld("live2dDiagnostics", live2dDiagnosticsApi);
 
 // 聊天会话存储（多对话历史）
 const chatStoreApi = {
-  list: (options?: { mode?: "chat" | "work" | "code" | "learn" | "daily" }) => ipcRenderer.invoke(IPC.CHATS_LIST, options),
+  list: (options?: { mode?: "chat" | "work" | "code" | "learn" }) => ipcRenderer.invoke(IPC.CHATS_LIST, options),
   get: (id: string) => ipcRenderer.invoke(IPC.CHATS_GET, id),
   getPage: (id: string, before: number | null, limit: number) =>
     ipcRenderer.invoke(IPC.CHATS_GET_PAGE, { id, before, limit }),
-  create: (payload?: { title?: string; identityId?: string | null; mode?: "chat" | "work" | "code" | "learn" | "daily" }) =>
+  create: (payload?: { title?: string; identityId?: string | null; mode?: "chat" | "work" | "code" | "learn" }) =>
     ipcRenderer.invoke(IPC.CHATS_CREATE, payload ?? {}),
   append: (id: string, message: unknown) =>
     ipcRenderer.invoke(IPC.CHATS_APPEND, { id, message }),
+  upsert: (id: string, message: unknown) =>
+    ipcRenderer.invoke(IPC.CHATS_UPSERT, { id, message }),
   setMessageTtsCacheKey: (id: string, messageId: string, cacheKey: string, converterVersion: string) =>
     ipcRenderer.invoke(IPC.CHATS_SET_MESSAGE_TTS_CACHE, { id, messageId, cacheKey, converterVersion }),
   replaceMessages: (id: string, messages: unknown[]) =>
@@ -522,6 +548,8 @@ const chatStoreApi = {
   delete: (id: string) => ipcRenderer.invoke(IPC.CHATS_DELETE, id),
   setPinned: (id: string, pinned: boolean) =>
     ipcRenderer.invoke(IPC.CHATS_SET_PINNED, { id, pinned }),
+  setModelProfile: (id: string, modelProfileId?: string) =>
+    ipcRenderer.invoke(IPC.CHATS_SET_MODEL_PROFILE, { id, modelProfileId }),
   openFolder: () => ipcRenderer.invoke(IPC.CHATS_OPEN_FOLDER),
   openWorkspace: (workspaceRoot: string) =>
     ipcRenderer.invoke(IPC.CHATS_OPEN_WORKSPACE, workspaceRoot),
@@ -559,8 +587,6 @@ const chatStoreApi = {
     ipcRenderer.on(IPC.CHATS_WORKSPACE_CHANGED, listener);
     return () => ipcRenderer.removeListener(IPC.CHATS_WORKSPACE_CHANGED, listener);
   },
-  setCodeMode: (sessionId: string, clineMode: "plan" | "act") =>
-    ipcRenderer.invoke(IPC.CHATS_SET_CODE_MODE, { sessionId, clineMode }),
   // 状态栏专用入口：要求 main 打开/复用 reactChatWindow 并加载指定 sessionId
   openInReactChatWindow: (sessionId: string) =>
     ipcRenderer.invoke(IPC.CHATS_OPEN_IN_REACT_WINDOW, sessionId),
@@ -572,37 +598,24 @@ const chatStoreApi = {
   },
   // reactChatWindow → main：ChatPage 已挂好 IPC 监听，允许 flush pending sessionId
   notifyReactReady: () => ipcRenderer.send(IPC.CHATS_REACT_READY),
-  // 获取当前各模式 TODO 状态，用于窗口初始加载和常驻显示
-  getCurrentTodos: () => ipcRenderer.invoke(IPC.TODOS_GET_CURRENT),
 };
 
 contextBridge.exposeInMainWorld("chatStore", chatStoreApi);
 
-// Code run 状态查询 + 验证审批
-const codeRunApi = {
-  getRun: (runId: string) =>
-    ipcRenderer.invoke(IPC.CODE_RUN_GET, runId),
-  getActiveRun: (params: { chatSessionId?: string; clineSessionId?: string }) =>
-    ipcRenderer.invoke(IPC.CODE_RUN_GET_ACTIVE, params),
-  listRuns: (chatSessionId?: string) =>
-    ipcRenderer.invoke(IPC.CODE_RUN_LIST, chatSessionId),
-  getPendingApprovals: (params: { chatSessionId?: string; runId?: string }) =>
-    ipcRenderer.invoke(IPC.CODE_VERIFICATION_GET_PENDING, params),
-  approveVerification: (approvalId: string) =>
-    ipcRenderer.invoke(IPC.CODE_VERIFICATION_APPROVE, approvalId),
-    rejectVerification: (approvalId: string) =>
-      ipcRenderer.invoke(IPC.CODE_VERIFICATION_REJECT, approvalId),
-    getPendingAsks: (chatSessionId?: string) =>
-      ipcRenderer.invoke(IPC.CODE_ASK_GET_PENDING, chatSessionId),
-    respondAsk: (promptId: string, answer: string) =>
-      ipcRenderer.invoke(IPC.CODE_ASK_RESPOND, { promptId, answer }),
-    cancelAsk: (promptId: string) =>
-      ipcRenderer.invoke(IPC.CODE_ASK_CANCEL, promptId),
-    createNewTask: (chatSessionId: string) =>
-      ipcRenderer.invoke(IPC.CODE_SESSION_NEW_TASK, chatSessionId),
-  };
-
-contextBridge.exposeInMainWorld("codeRun", codeRunApi);
+const codeGitApi = {
+  getStatus: (sessionId: string) => ipcRenderer.invoke(IPC.CODE_GIT_STATUS, sessionId),
+  watch: (sessionId: string) => ipcRenderer.invoke(IPC.CODE_GIT_WATCH, sessionId),
+  unwatch: (sessionId: string) => ipcRenderer.invoke(IPC.CODE_GIT_UNWATCH, sessionId),
+  switchBranch: (sessionId: string, branch: string, create = false) => ipcRenderer.invoke(IPC.CODE_GIT_SWITCH_BRANCH, { sessionId, branch, create }),
+  commit: (sessionId: string, message: string, paths: string[]) => ipcRenderer.invoke(IPC.CODE_GIT_COMMIT, { sessionId, message, paths }),
+  push: (sessionId: string) => ipcRenderer.invoke(IPC.CODE_GIT_PUSH, sessionId),
+  onChanged: (callback: (payload: { sessionId: string }) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: { sessionId: string }) => callback(payload);
+    ipcRenderer.on(IPC.CODE_GIT_CHANGED, listener);
+    return () => ipcRenderer.removeListener(IPC.CODE_GIT_CHANGED, listener);
+  },
+};
+contextBridge.exposeInMainWorld("codeGit", codeGitApi);
 
 // Token 用量查询（设置中心 Token 面板用）
 const tokenUsageApi = {

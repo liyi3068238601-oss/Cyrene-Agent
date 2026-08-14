@@ -44,6 +44,15 @@ export const IPC = {
   AGUI_CANCEL: "agui:cancel",
   SCHEDULER_EVENT: "scheduler:event",
 
+  // Code 模式 Git 工作台（renderer 只能读取结构化状态）
+  CODE_GIT_STATUS: "code-git:status",
+  CODE_GIT_CHANGED: "code-git:changed",
+  CODE_GIT_WATCH: "code-git:watch",
+  CODE_GIT_UNWATCH: "code-git:unwatch",
+  CODE_GIT_SWITCH_BRANCH: "code-git:switch-branch",
+  CODE_GIT_COMMIT: "code-git:commit",
+  CODE_GIT_PUSH: "code-git:push",
+
   // sidebar window (status / schedule / settings entry)
   SIDEBAR_MINIMIZE: "sidebar:minimize",
   SIDEBAR_CLOSE: "sidebar:close",
@@ -63,6 +72,10 @@ export const IPC = {
   SETTINGS_SWITCH_SECTION: "settings:switch-section",
   SETTINGS_GET_CONFIG: "settings:get-config",
   SETTINGS_SAVE_CONFIG: "settings:save-config",
+  SETTINGS_MODEL_PROFILES_LIST: "settings:model-profiles:list",
+  SETTINGS_MODEL_PROFILE_SAVE: "settings:model-profiles:save",
+  SETTINGS_MODEL_PROFILE_DELETE: "settings:model-profiles:delete",
+  SETTINGS_MODEL_PROFILE_SET_DEFAULT: "settings:model-profiles:set-default",
   SETTINGS_TEST_CONNECTION: "settings:test-connection",
   SETTINGS_TEST_VISION: "settings:test-vision",
   SETTINGS_GET_GENERAL: "settings:get-general",
@@ -102,12 +115,14 @@ export const IPC = {
   CHATS_GET_PAGE: "chats:get-page",
   CHATS_CREATE: "chats:create",
   CHATS_APPEND: "chats:append",
+  CHATS_UPSERT: "chats:upsert",
   CHATS_SET_MESSAGE_TTS_CACHE: "chats:set-message-tts-cache",
   CHATS_REPLACE_MESSAGES: "chats:replace-messages",
   CHATS_REPLACE_TAIL: "chats:replace-tail",
   CHATS_RENAME: "chats:rename",
   CHATS_DELETE: "chats:delete",
   CHATS_SET_PINNED: "chats:set-pinned",
+  CHATS_SET_MODEL_PROFILE: "chats:set-model-profile",
   CHATS_OPEN_FOLDER: "chats:open-folder",
   CHATS_OPEN_WORKSPACE: "chats:open-workspace",
   CHATS_MIGRATE_LEGACY: "chats:migrate-legacy",
@@ -139,24 +154,6 @@ export const IPC = {
   CHATS_INIT_LEARN_WORKSPACE: "chats:init-learn-workspace",
   // main → 所有窗口：工作区绑定变更广播
   CHATS_WORKSPACE_CHANGED: "chats:workspace-changed",
-  // Code 会话级 Cline plan/act 模式
-  CHATS_SET_CODE_MODE: "chats:set-code-mode",
-
-  // Code run 状态查询
-  CODE_RUN_GET: "code:run:get",
-  CODE_RUN_GET_ACTIVE: "code:run:get-active",
-  CODE_RUN_LIST: "code:run:list",
-  // Code 验证审批
-  CODE_VERIFICATION_GET_PENDING: "code:verification:get-pending",
-  CODE_VERIFICATION_APPROVE: "code:verification:approve",
-  CODE_VERIFICATION_REJECT: "code:verification:reject",
-  // main → renderer：验证审批广播
-  CODE_VERIFICATION_APPROVAL_REQUESTED: "code:verification:approval-requested",
-  // Code / Cline AskQuestionExecutor bridge
-  CODE_ASK_GET_PENDING: "code:ask:get-pending",
-  CODE_ASK_RESPOND: "code:ask:respond",
-  CODE_ASK_CANCEL: "code:ask:cancel",
-  CODE_SESSION_NEW_TASK: "code:session:new-task",
 
 // sticker manager window
 	  STICKERS_MINIMIZE: "stickers:minimize",
@@ -222,10 +219,24 @@ export const IPC = {
   // tool (plugin) toggle
   TOOL_SET_ENABLED: "tool:set-enabled",
   TOOL_GET_ENABLED: "tool:get-enabled",
+  // tool-mode override (三模适配层：用户自定义工具在 learn/code/work 模式下的可见性)
+  TOOL_GET_MODE_OVERRIDES: "tool:get-mode-overrides",
+  TOOL_SET_MODE_OVERRIDE: "tool:set-mode-override",
+  TOOL_CLEAR_MODE_OVERRIDE: "tool:clear-mode-override",
+  // tool catalog (工具页拉取工具元数据：id/name/description/modes)
+  TOOL_GET_CATALOG: "tool:get-catalog",
 
   // skill toggle
   SKILL_LIST: "skill:list",
   SKILL_SET_ENABLED: "skill:set-enabled",
+  // skill-mode override（三模适配层：用户自定义 skill 在 work/code/learn 模式下的可见性）
+  SKILL_GET_MODE_OVERRIDES: "skill:get-mode-overrides",
+  SKILL_SET_MODE_OVERRIDE: "skill:set-mode-override",
+  SKILL_CLEAR_MODE_OVERRIDE: "skill:clear-mode-override",
+  // skill catalog（skill 页拉取元数据：id/name/description/modes）
+  SKILL_GET_CATALOG: "skill:get-catalog",
+  // 重新扫描 user skills 目录，安装/删除 skill 后无需重启即可刷新 UI
+  SKILL_RESCAN: "skill:rescan",
 
   // scheduled tasks
   SCHEDULER_LIST: "scheduler:list",
@@ -352,12 +363,9 @@ export const IPC = {
   SCREENSHOT_HOTKEY_CAPTURE_START: "screenshot:hotkey-capture-start",
   SCREENSHOT_HOTKEY_CAPTURE_END: "screenshot:hotkey-capture-end",
 
-  // TODO 卡片：初始加载当前状态（常驻需求）
-  TODOS_GET_CURRENT: "todos:get-current",
-
   // plugin system
   PLUGINS_LIST: "plugins:list",
   PLUGINS_SET_ENABLED: "plugins:set-enabled",
   PLUGINS_OPEN: "plugins:open",
-} as const;
 
+} as const;

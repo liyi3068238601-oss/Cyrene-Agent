@@ -292,8 +292,107 @@
 
 .cy-run-activity__detail {
   display: grid;
-  gap: 7px;
+  gap: 4px;
   padding: 8px 0;
+}
+
+.cy-message--git-review {
+  display: flex;
+  justify-content: center;
+}
+
+.cy-message--git-review .ant-bubble-body,
+.cy-message--git-review .ant-bubble-content {
+  width: 100%;
+  max-width: none;
+}
+
+.cy-message--git-review .ant-bubble-content {
+  display: flex;
+  justify-content: center;
+  padding: 8px 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+
+.cy-agent-round {
+  min-width: 0;
+}
+
+.cy-agent-round__header {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 34px minmax(0, 1fr) 16px;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 2px;
+  border: 0;
+  background: transparent;
+  color: var(--cy-text);
+  font: 600 12px/1.4 var(--rb-font-sans, sans-serif);
+  text-align: left;
+  cursor: pointer;
+}
+
+.cy-agent-round__header:hover {
+  color: #a84f7a;
+}
+
+.cy-agent-round__header:focus-visible {
+  outline: 2px solid rgb(209 144 173 / 42%);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+.cy-agent-round__art {
+  display: flex;
+  width: 34px;
+  height: 34px;
+  align-items: center;
+  justify-content: center;
+}
+
+.cy-agent-round__art-image {
+  display: block;
+  width: 34px;
+  height: 34px;
+  object-fit: contain;
+  user-select: none;
+}
+
+.cy-agent-round.is-running .cy-agent-round__art-image {
+  animation: cy-run-activity-breathe 2s ease-in-out infinite;
+}
+
+.cy-agent-round__title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cy-agent-round__chevron {
+  width: 16px;
+  height: 16px;
+  color: #b7688e;
+  transition: transform 180ms ease;
+}
+
+.cy-agent-round__chevron.is-expanded {
+  transform: rotate(180deg);
+}
+
+.cy-agent-round__body {
+  display: grid;
+  gap: 6px;
+  padding: 1px 2px 9px 42px;
+}
+
+.cy-run-activity__process {
+  padding: 7px 9px;
+  border-left: 2px solid rgb(209 144 173 / 45%);
+  color: var(--cy-text-secondary);
+  font-size: 12px;
 }
 
 .cy-run-activity__divider {

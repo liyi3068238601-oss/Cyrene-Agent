@@ -5,10 +5,12 @@ const { handle } = vi.hoisted(() => ({
 }));
 
 vi.mock("electron", () => ({
+  app: { getPath: vi.fn(() => "C:/tmp/cyrene-test") },
   ipcMain: { handle },
 }));
 
 import {
+  cancelPendingChoicesForRun,
   registerChoiceIpc,
   requestUserClarification,
   setChoiceCardSender,
@@ -182,5 +184,66 @@ describe("requestUserClarification", () => {
       revision: 3,
       reason: "answered",
     });
+  });
+
+  it("settles a structured clarification exactly once when its run is cancelled", async () => {
+    vi.useFakeTimers();
+    const sender = vi.fn();
+    const onSettled = vi.fn();
+    let outcome: unknown;
+
+    void requestUserClarification({
+      intro: "还需要确认一下。",
+      questions: [],
+      deferredFields: [],
+    }, sender, onSettled, { runId: "run-abort", revision: 1 }).then(
+      (value) => { outcome = { status: "resolved", value }; },
+      (error) => { outcome = { status: "rejected", name: (error as Error).name }; },
+    );
+
+    cancelPendingChoicesForRun("run-abort");
+    await Promise.resolve();
+
+    expect(outcome).toEqual({ status: "rejected", name: "AbortError" });
+    expect(onSettled).toHaveBeenCalledOnce();
+    expect(onSettled).toHaveBeenCalledWith(expect.objectContaining({
+      runId: "run-abort",
+      reason: "cancelled",
+    }));
+
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(onSettled).toHaveBeenCalledOnce();
+  });
+
+  it("settles only choices belonging to the cancelled run", async () => {
+    const firstSettled = vi.fn();
+    const secondSettled = vi.fn();
+    let firstOutcome: unknown;
+    let secondOutcome: unknown;
+
+    void requestUserClarification({ intro: "first", questions: [], deferredFields: [] }, vi.fn(), firstSettled, {
+      runId: "run-first",
+      revision: 1,
+    }).then(
+      (value) => { firstOutcome = { status: "resolved", value }; },
+      (error) => { firstOutcome = { status: "rejected", name: (error as Error).name }; },
+    );
+    void requestUserClarification({ intro: "second", questions: [], deferredFields: [] }, vi.fn(), secondSettled, {
+      runId: "run-second",
+      revision: 1,
+    }).then(
+      (value) => { secondOutcome = { status: "resolved", value }; },
+      (error) => { secondOutcome = { status: "rejected", name: (error as Error).name }; },
+    );
+
+    cancelPendingChoicesForRun("run-first");
+    await Promise.resolve();
+
+    expect(firstOutcome).toEqual({ status: "rejected", name: "AbortError" });
+    expect(firstSettled).toHaveBeenCalledWith(expect.objectContaining({ reason: "cancelled" }));
+    expect(secondOutcome).toBeUndefined();
+    expect(secondSettled).not.toHaveBeenCalled();
+
+    cancelPendingChoicesForRun("run-second");
   });
 });

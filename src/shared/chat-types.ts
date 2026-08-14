@@ -6,6 +6,8 @@
 //   列表渲染只读 index.json，避免一次性把所有会话消息加载到内存。
 // - identityId 当前为预留字段——职位面板还未做，新会话默认 null，
 import type { MusicCardData } from "./music-card";
+import type { TodoItem } from "./todo-types";
+import type { TaskDelegationPresentation } from "./task-session";
 
 // - schemaVersion 用于以后改 schema 时的迁移判断；当前固定 1。
 
@@ -14,28 +16,7 @@ export type ChatRole = "user" | "model";
 export type ChatSessionPurpose = "proactive-chat";
 
 /** 会话模式：创建时绑定，整个会话生命周期不变 */
-export type ConversationMode = "chat" | "work" | "code" | "learn" | "daily";
-
-/** Code 会话专属元数据 */
-export interface CodeSessionMetadata {
-  activeClineSessionId?: string;
-  clineMode: "plan" | "act";
-  codePreferencesVersion?: number;
-  tasks: Array<{
-    clineSessionId: string;
-    createdAt: number;
-    closedAt?: number;
-    title?: string;
-  }>;
-  pendingPrompt?: {
-    chatSessionId: string;
-    clineSessionId: string;
-    promptId: string;
-    status: "pending" | "answered" | "cancelled";
-    createdAt: number;
-    answeredAt?: number;
-  };
-}
+export type ConversationMode = "chat" | "work" | "code" | "learn";
 
 export type ChatStickerId =
   | "playful"
@@ -50,12 +31,14 @@ export type ChatStickerId =
 /** 任意表情包 ID（内置 + 用户自定义） */
 export type AnyStickerId = string;
 
-/** 一次模型回复中已展示的工具执行记录，供 React Daily/Work 会话恢复执行过程。 */
+/** 一次模型回复中已展示的工具执行记录，供 React Harness 会话恢复执行过程。 */
 export interface ToolExecutionRecord {
   id: string;
   name: string;
   status: "running" | "success" | "error";
   result?: string;
+  argsText?: string;
+  roundId?: string;
 }
 
 /** 一次 assistant run 的可恢复展示指标。 */
@@ -68,6 +51,16 @@ export interface RunActivityRecord {
   reasoningMs: number;
   /** 当前仍在流式输出的 reasoning 段起点；终态时必须清除。 */
   activeReasoningStartedAt?: number;
+  /** 取消、超时或失败时保持过程面板展开，避免隐藏唯一可见的执行证据。 */
+  keepExpanded?: boolean;
+}
+
+export interface ProcessMessageRecord {
+  id: string;
+  content: string;
+  /** 该过程消息出现前已完成的工具数，用于恢复大致执行顺序。 */
+  afterToolCount?: number;
+  roundId?: string;
 }
 
 export interface ReasoningBlock {
@@ -76,6 +69,18 @@ export interface ReasoningBlock {
   streaming?: boolean;
   /** 已完成的工具数，用于恢复 Think 与工具链的真实顺序。 */
   afterToolCount?: number;
+  roundId?: string;
+}
+
+export interface AgentRoundRecord {
+  id: string;
+  status: "running" | "completed";
+  startedAt: number;
+  completedAt?: number;
+}
+
+export interface TaskDelegationDisplayRecord extends TaskDelegationPresentation {
+  roundId?: string;
 }
 
 export interface ChatMessage {
@@ -85,6 +90,12 @@ export interface ChatMessage {
   /** 模型公开返回的推理过程；不包含隐藏或加密思考。 */
   reasoning?: string;
   reasoningBlocks?: ReasoningBlock[];
+  /** 工具轮次中模型给用户的过程说明；不属于正式回答，也不冒充 reasoning。 */
+  processMessages?: ProcessMessageRecord[];
+  /** Harness 模型调用回合；用于把公开文本、reasoning 与工具执行折叠为一个单元。 */
+  agentRounds?: AgentRoundRecord[];
+  /** 父流程中的趣味子任务委托行；不包含子任务私有上下文。 */
+  taskDelegations?: TaskDelegationDisplayRecord[];
   at: number;
   /** 不直接显示在聊天气泡里，但会拼入模型上下文。 */
   modelContext?: string;
@@ -95,6 +106,14 @@ export interface ChatMessage {
   toolExecutions?: ToolExecutionRecord[];
   /** 本轮处理与公开推理的展示指标。 */
   runActivity?: RunActivityRecord;
+  /** 活跃 Agent run 的可恢复检查点；非终态快照在重启后只能恢复为 interrupted。 */
+  runSnapshot?: {
+    runId?: string;
+    status: "running" | "waiting_user" | "interrupted" | "terminal";
+    terminalStatus?: "success" | "cancelled" | "timeout" | "runtime_error";
+    todos?: TodoItem[];
+    updatedAt: number;
+  };
   /** TTS 缓存 key。只存 key，不存绝对路径，避免 userData 路径变化后 session JSON 失效。 */
   ttsCacheKey?: string;
   /** 生成缓存时使用的朗读文本转换器版本；版本变化时旧缓存自然失效。 */
@@ -152,10 +171,10 @@ export interface ChatSession {
   workspaceBinding?: ConversationWorkspaceBinding;
   /** 会话模式：创建时绑定，整个会话生命周期不变。旧会话无此字段时默认 "work"。 */
   mode?: ConversationMode;
-  /** Code 会话专属元数据（mode === "code" 时使用） */
-  codeSession?: CodeSessionMetadata;
   /** 用户是否置顶该会话；置顶项在列表中优先展示。 */
   pinned?: boolean;
+  /** 当前会话选择的已保存模型；缺失时使用默认模型。 */
+  modelProfileId?: string;
 }
 
 // index.json 里的轻量元数据（列表渲染用）。

@@ -56,27 +56,32 @@ describe("chats IPC mode filtering", () => {
     ]);
   });
 
-  it("persists the selected Cline plan/act mode only for Code sessions", async () => {
+  it("validates and forwards CHATS_UPSERT for run checkpoints", async () => {
     const { registerChatsIpc } = await import("./chats-ipc");
     registerChatsIpc();
 
     const create = mocks.handlers.get(IPC.CHATS_CREATE);
-    const setCodeMode = mocks.handlers.get(IPC.CHATS_SET_CODE_MODE);
-    if (!create || !setCodeMode) throw new Error("Code session IPC handlers were not registered");
+    const upsert = mocks.handlers.get(IPC.CHATS_UPSERT);
+    if (!create || !upsert) throw new Error("checkpoint IPC handlers were not registered");
     const event = { sender: {} };
-    const code = await create(event, { mode: "code" }) as { id: string };
-    const work = await create(event, { mode: "work" }) as { id: string };
+    const session = await create(event, { mode: "work" }) as { id: string };
 
-    expect(await setCodeMode(event, { sessionId: code.id, clineMode: "plan" })).toEqual(
-      expect.objectContaining({ ok: true, session: expect.objectContaining({
-        mode: "code",
-        codeSession: expect.objectContaining({ clineMode: "plan" }),
-      }) }),
-    );
-    expect(await setCodeMode(event, { sessionId: work.id, clineMode: "plan" })).toEqual({
-      ok: false,
-      error: "Code session not found",
-    });
+    expect(await upsert(event, null)).toBeNull();
+    expect(await upsert(event, { id: session.id })).toBeNull();
+    expect(await upsert(event, {
+      id: session.id,
+      message: { id: "assistant-1", role: "model", content: "checkpoint", at: 1 },
+    })).toEqual(expect.objectContaining({
+      messages: [expect.objectContaining({ id: "assistant-1", content: "checkpoint" })],
+    }));
+  });
+
+  it("does not register the removed Cline plan/act IPC", async () => {
+    const { registerChatsIpc } = await import("./chats-ipc");
+    registerChatsIpc();
+
+    const setCodeMode = mocks.handlers.get("chats:set-code-mode");
+    expect(setCodeMode).toBeUndefined();
   });
 
   it("opens only a workspace already bound to a project conversation", async () => {

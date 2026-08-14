@@ -2,14 +2,11 @@
 //
 // 架构：
 //   Chat  ──> CyreneAgent ──> 无工具 ChatLoop
-//   Work  ──> CyreneAgent ──> LangGraph Runtime
-//   Daily ──> CyreneAgent ──> legacy TwoPhaseFC Runtime
-//   Code  ──> runCodeRequest() ──> 原生 Cline Runtime
-//   Learn ──> legacy TwoPhaseFC Runtime（同 Daily + Obsidian 工具）
+//   Work / Learn / Code ──> CyreneAgent ──> CyreneHarness
 //   各链路事件都由本桥通过 AGUI_EVENT 转发给渲染进程。
 //
-// Chat / Work 的 Observable 是内存流、跨不过进程边界；Code 的后台任务也不能依赖
-// WebContents 生命周期。因此主进程统一持有运行并仅把事件发送给 Renderer。
+// Agent 的 Observable 是内存流、跨不过进程边界。
+// 因此主进程统一持有运行并仅把事件发送给 Renderer。
 import { ipcMain, IpcMainInvokeEvent, WebContents } from "electron";
 import { IPC } from "../shared/ipc-channels";
 import { Subscription } from "rxjs";
@@ -20,107 +17,57 @@ import {
   type CyreneRunOptions,
   type CyreneRunResult,
 } from "./orchestrator/cyrene-agent";
+import { RunSettlementGate } from "./orchestrator/run-settlement";
+import type { AguiRunAck, CyreneRunTerminalResult } from "../shared/run-terminal";
 import { indexConversationTurn } from "./orchestrator/history-tools";
 import type { RelationshipChannel } from "./relationship/relationship-log";
 import { createThinkFilter, type ThinkStreamFilter, type ThinkFilterMode } from "./chat/think-filter";
+import { ChatTimeStreamPrefixFilter } from "./chat-time-stream-filter";
 import { runLearnPostTurnHook } from "./learn/progress/learn-post-turn";
 import { obsidianWorkspace } from "./learn/obsidian/obsidian-workspace-service";
 import { registerObsidianTools, unregisterObsidianTools } from "./learn/obsidian/obsidian-tools";
 import { getAdapterForConfig } from "./orchestrator/vendors";
 import { perf } from "./perf-trace";
 import type { StyleId } from "../shared/style-sampling";
-import { codeRunStore } from "./orchestrator/code/code-run-store";
-import { codeRunCoordinator } from "./orchestrator/code/code-run-coordinator";
 import * as chatsStore from "./chats/chats-store";
 import type { ConversationMode } from "../shared/chat-types";
-import { requestUserClarification } from "./user-choice";
-import {
-  cancelAsk,
-  listPendingAskPresentations,
-  respondToAsk,
-} from "./orchestrator/code/code-ask-bridge";
-
-type RunCodeRequest = typeof import("./orchestrator/code/code-request").runCodeRequest;
-
+import { requestUserClarification, cancelPendingChoicesForRun } from "./user-choice";
+import { cancelPendingApprovalsForRun } from "./permission";
 /**
- * Code 模式才加载完整 Cline 链。
- * 避免其他模式启动和 AG-UI 单测沿 code-request -> index 形成循环导入。
+ * Task 2 / C1：从 RUN_FINISHED 事件中提取 canonical terminal。
+ *
+ * CyreneAgent.runWithEvents 在 success / cancelled / timeout / runtime_error 路径都会发出
+ * RUN_FINISHED 并附带 `result: CyreneRunTerminalResult`。下游（bridge / settlement gate）据此决定：
+ *  - 是否跑成功收尾副作用（仅 status="success"）
+ *  - runtime_error 是否转走 RUN_ERROR（Issue 2）
+ *
+ * 缺失 result 字段时按 success 兜底，兼容尚未升级的 upstream。
  */
-async function runCodeRequest(...args: Parameters<RunCodeRequest>): Promise<void> {
-  const codeRequest = await import("./orchestrator/code/code-request");
-  return codeRequest.runCodeRequest(...args);
-}
-
-const CODE_RENDERER_EVENT_TYPES: Record<string, string> = {
-  text_message_start: "TEXT_MESSAGE_START",
-  text_message_content: "TEXT_MESSAGE_CONTENT",
-  text_message_end: "TEXT_MESSAGE_END",
-  run_finished: "RUN_FINISHED",
-  run_error: "RUN_ERROR",
-};
-
-export function normalizeCodeRendererEvent(event: unknown, runId?: string): unknown {
-  if (!event || typeof event !== "object") return event;
-  const typed = event as { type?: string; payload?: unknown };
-  if (typed.type === "code_verification_card" || typed.type === "code_verification_approval" || typed.type === "code_mutation_evidence" || typed.type === "code_ask") {
-    return {
-      type: "CUSTOM",
-      name: typed.type,
-      value: typed.payload,
-      ...("runId" in typed ? { runId: typed.runId } : {}),
-    };
-  }
-  if (typed.type === "agent_event" && typed.payload && typeof typed.payload === "object") {
-    const agentEvent = (typed.payload as { event?: unknown }).event;
-    if (agentEvent && typeof agentEvent === "object") {
-      const content = agentEvent as {
-        type?: string;
-        contentType?: string;
-        text?: string;
-        reasoning?: string;
-        toolName?: string;
-        toolCallId?: string;
-        output?: unknown;
-        error?: string;
-      };
-      if (content.type === "content_start" || content.type === "content_update") {
-        if (content.contentType === "text" && content.text) {
-          return { type: "TEXT_MESSAGE_CONTENT", messageId: runId ? `code-text-${runId}` : undefined, delta: content.text };
-        }
-        if (content.contentType === "reasoning" && content.reasoning) {
-          return { type: "REASONING_MESSAGE_CONTENT", messageId: runId ? `code-reasoning-${runId}` : undefined, delta: content.reasoning };
-        }
-        if (content.type === "content_start" && content.contentType === "tool") {
-          return {
-            type: "TOOL_CALL_START",
-            toolCallId: content.toolCallId,
-            toolCallName: content.toolName,
-          };
-        }
-      }
-      if (content.type === "content_end") {
-        if (content.contentType === "text") return { type: "TEXT_MESSAGE_END" };
-        if (content.contentType === "reasoning") return { type: "REASONING_MESSAGE_END" };
-        if (content.contentType === "tool") {
-          const result = content.error ?? (
-            typeof content.output === "string"
-              ? content.output
-              : content.output === undefined
-                ? ""
-                : JSON.stringify(content.output)
-          );
-          return {
-            type: "TOOL_CALL_RESULT",
-            toolCallId: content.toolCallId,
-            content: result,
-            status: content.error ? "failed" : "success",
-          };
-        }
-      }
+function extractTerminalFromRunFinished(baseEvent: unknown): CyreneRunTerminalResult {
+  const result = (baseEvent as { result?: unknown })?.result;
+  if (
+    result
+    && typeof result === "object"
+    && "status" in result
+    && typeof (result as { status: unknown }).status === "string"
+  ) {
+    const status = (result as { status: string }).status;
+    // Issue 1：gate 内部状态名用 runtime_error（冻结边界），AG-UI 事件名仍是 RUN_ERROR。
+    if (status === "success" || status === "cancelled" || status === "timeout" || status === "runtime_error") {
+      const reason = (result as { reason?: unknown }).reason;
+      // Issue 3：externalEffectsMayContinue 是必填 invariant；
+      // upstream 缺省时按保守规则补齐（success → false，其余三态 → true）。
+      const rawFlag = (result as { externalEffectsMayContinue?: unknown }).externalEffectsMayContinue;
+      const externalEffectsMayContinue = typeof rawFlag === "boolean"
+        ? rawFlag
+        : status !== "success";
+      const terminal: CyreneRunTerminalResult = { status, externalEffectsMayContinue };
+      if (typeof reason === "string") terminal.reason = reason;
+      return terminal;
     }
   }
-  const normalizedType = typed.type ? CODE_RENDERER_EVENT_TYPES[typed.type] : undefined;
-  return normalizedType ? { ...typed, type: normalizedType } : event;
+  // 兼容旧 upstream：未带 result 字段时按 success 处理（无 unresolved uncertainty）。
+  return { status: "success", externalEffectsMayContinue: false };
 }
 
 /** 渲染进程发起 run 时传的输入。 */
@@ -145,6 +92,10 @@ export interface AguiRunInput {
   attachments?: { name: string; text: string }[];
   /** 本轮图片附件。主进程会安全读取并转成 OpenAI-compatible image_url content block。 */
   imageAttachments?: { name: string; filePath: string; mime?: string }[];
+  /** 同一会话上一次异常中断的只读恢复检查点。 */
+  recoveryContext?: string;
+  /** 只由主进程根据会话持久化字段注入，渲染端传值不可信。 */
+  modelProfileId?: string;
 }
 
 /** 调用方（index.ts）注入：把输入转成 agent 需要的 options（含 system prompt 拼接）。 */
@@ -174,8 +125,24 @@ export interface AguiConversationLifecycle {
   onConversationEnded(): void;
 }
 
-/** 单次对话的活跃订阅（用于取消）。键 = runId。 */
-const activeRuns = new Map<string, { subscription: Subscription; endLifecycle: () => void }>();
+/**
+ * 单次对话的活跃订阅（用于取消）。键 = runId。
+ * Task 3 / C2：每个 run 持有独立 AbortController，AGUI_CANCEL 调用 abort() 触发
+ * harness 的 cancelled 流程，而非粗暴 unsubscribe()。
+ */
+const activeRuns = new Map<string, {
+  subscription: Subscription;
+  endLifecycle: () => void;
+  abortController: AbortController;
+}>();
+
+/**
+ * Issue 7：测试专用——验证同步 complete 后没有幽灵 active run。
+ * 仅在测试环境使用；生产代码不要调用。
+ */
+export function __hasActiveRunForTest(runId: string): boolean {
+  return activeRuns.has(runId);
+}
 
 let buildOptionsFn: BuildOptionsFn | null = null;
 let getChatWindowFn: GetChatWindowFn = () => null;
@@ -211,6 +178,12 @@ export function registerAgUiIpc(
     const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
     const send = (baseEvent: unknown): void => {
+      // CyreneAgent 的 RUN_STARTED / RUN_FINISHED 自带 runId，但 ChatLoop 等内部
+      // AgentLoopEvent 经 toAguiEvent 转换后没有。渲染端用 runId 隔离并发会话，
+      // 因此所有桥层发出的事件都必须带 canonical runId，不能只给终态事件补上。
+      const eventWithRunId = baseEvent && typeof baseEvent === "object"
+        ? { ...(baseEvent as Record<string, unknown>), runId: (baseEvent as { runId?: unknown }).runId ?? runId }
+        : baseEvent;
       const targets: WebContents[] = [];
       if (!sender.isDestroyed()) targets.push(sender);
       const chatWin = getChatWindowFn();
@@ -219,7 +192,7 @@ export function registerAgUiIpc(
       }
       for (const t of targets) {
         try {
-          t.send(IPC.AGUI_EVENT, baseEvent);
+          t.send(IPC.AGUI_EVENT, eventWithRunId);
         } catch (err) {
           console.error("[AgUiBridge] send 失败:", (err instanceof Error ? err.message : String(err)), "事件类型=", (baseEvent as { type?: string })?.type);
         }
@@ -227,7 +200,6 @@ export function registerAgUiIpc(
     };
 
     // ── 顶层模式分流：读取 ChatSession.mode（唯一可信来源） ──
-    // Code 模式完全绕过 CyreneAgent、CITA、WorkLoop
     const sessionId = input.sessionId;
     if (!sessionId) {
       lifecycle?.onConversationEnded();
@@ -239,46 +211,19 @@ export function registerAgUiIpc(
       throw new Error(`AGUI_RUN 会话不存在: ${sessionId}`);
     }
     const mode = session.mode ?? (session.purpose === "proactive-chat" ? "chat" : "work");
-    if ((mode === "work" || mode === "code" || mode === "daily" || mode === "learn") && !session.workspaceBinding?.workspaceRoot) {
+    if ((mode === "work" || mode === "code" || mode === "learn") && !session.workspaceBinding?.workspaceRoot) {
       lifecycle?.onConversationEnded();
       throw new Error(`${mode} 模式需要先绑定项目工作区`);
     }
 
-    if (mode === "code") {
-      console.log("[AgUiBridge] mode=code, dispatching to runCodeRequest (bypass CyreneAgent)");
-      const userText = (() => {
-        const msgs = input.messages;
-        for (let i = msgs.length - 1; i >= 0; i--) {
-          const m = msgs[i] as { role?: string; content?: string };
-          if (m?.role === "user") return m.content ?? "";
-        }
-        return "";
-      })();
-      send({ type: "RUN_STARTED", runId, threadId: sessionId });
-      const codeSend = (codeEvent: unknown): void => send(normalizeCodeRendererEvent(codeEvent, runId));
-      void runCodeRequest(
-        { text: userText, sessionId },
-        session,
-        { runId, sessionId, signal: new AbortController().signal, emitEvent: codeSend },
-      ).catch((err) => {
-        const message = err instanceof Error ? err.message : String(err);
-        codeSend({ type: "run_error", message, runId, threadId: sessionId });
-      }).finally(() => {
-        lifecycle?.onConversationEnded();
-      });
-
-      // CodeRunWorker 持有后台任务；Renderer/WebContents 仅接收事件，不拥有任务生命周期。
-      return { success: true, runId };
-    }
-
-    // ── Chat / Work / Daily / Learn：共用 CyreneAgent 外壳，固定选择各自 runtime ──
-    // Chat 走无工具 chat-loop；Work 强制 LangGraph；Daily / Learn 强制 legacy TwoPhaseFC。
+    // ── Chat / Work / Learn / Code：共用 CyreneAgent 外壳 ──
     const agentExecutionMode: AgentExecutionMode = mode === "chat" ? "chat" : "work";
     let built;
     try {
     built = await perf.track("build_options", () => buildOptionsFn!({
       ...input,
       mode,
+      modelProfileId: session.modelProfileId,
       executionMode: agentExecutionMode,
     }));
     } catch (error) {
@@ -288,8 +233,17 @@ export function registerAgUiIpc(
     }
     const { options, latestUserText } = built;
     options.executionMode = agentExecutionMode;
+    options.recoveryContext = input.recoveryContext;
     options.conversationMode = mode;
-    options.agentRuntime = (mode === "daily" || mode === "learn") ? "legacy" : "langgraph";
+    // Task 2 / C1：把 bridge 创建的 canonical runId 注入 CyreneRunOptions，
+    // 一路传到 Agent / Harness adapter / ToolContext / 所有 AG-UI 事件。
+    // ack.runId 与 RUN_STARTED.runId 必须一致（Step 5 测试断言）。
+    options.runId = runId;
+    // Task 3 / C2：为本次 run 创建 AbortController，signal 一路传到 Agent / harness。
+    // AGUI_CANCEL 调用 abortController.abort()，触发 harness 返回 cancelled，
+    // CyreneAgent 发出 RUN_FINISHED(result.status="cancelled")，complete 回调自然清理。
+    const runAbortController = new AbortController();
+    options.signal = runAbortController.signal;
     options.requestUserClarification = (card) => requestUserClarification(card, (cardData) => {
       send({ type: "CUSTOM", name: "cyrene.choice", value: cardData, threadId, runId });
     }, (settlement) => {
@@ -313,6 +267,10 @@ export function registerAgUiIpc(
     const agent = new CyreneAgent({ threadId, description: "Cyrene 主聊天" });
 
     let pendingRunFinishedEvent: unknown | null = null;
+    // Task 2 / C1：exactly-once settlement gate。
+    // complete / error 两条 RxJS 回调都会先 trySettle，只有第一次进入的那条会真正发出终态事件。
+    // 这覆盖：upstream 连续发两个 terminal、success 后 error、error 后 success 等竞态。
+    const settlementGate = new RunSettlementGate();
     let lifecycleEnded = false;
     const endLifecycle = (): void => {
       if (lifecycleEnded) return;
@@ -327,6 +285,7 @@ export function registerAgUiIpc(
     // <think> 标签过滤器：按单条 assistant message 隔离（TEXT_MESSAGE_START ~ END）
     // leading-only 模式：只在消息开头以 <think> 开头时才过滤，避免误删正文中的 <think> 讨论
     let thinkFilter: ThinkStreamFilter | null = null;
+    let timePrefixFilter: ChatTimeStreamPrefixFilter | null = null;
     const thinkFilterMode: ThinkFilterMode = "leading-only";
     let pendingTextStart: { type: string; messageId?: string; [key: string]: unknown } | null = null;
     let textStartForwarded = false;
@@ -378,8 +337,23 @@ export function registerAgUiIpc(
           // 兜底清理：如果 filter 仍存在（TEXT_MESSAGE_END 缺失），销毁
           endEmbeddedReasoning();
           thinkFilter = null;
+          timePrefixFilter = null;
           pendingTextStart = null;
           textStartForwarded = false;
+          // Task 2 / C1：通过 settlement gate 保证 only-once terminal。
+          // 如果 upstream 已经发过 RUN_FINISHED / RUN_ERROR（gate 已结算），丢弃后续重复事件。
+          const terminal = extractTerminalFromRunFinished(baseEvent);
+          if (!settlementGate.trySettle(terminal)) {
+            return;
+          }
+          // Issue 2：runtime_error 必须走 RUN_ERROR，不缓存为 RUN_FINISHED。
+          // complete 回调据此跳过成功收尾副作用；渲染端只收到 RUN_ERROR 作为终态。
+          if (terminal.status === "runtime_error") {
+            const reason = terminal.reason ?? "E_RUN_FAILURE";
+            send({ type: "RUN_ERROR", message: reason, code: reason, threadId, runId });
+            pendingRunFinishedEvent = null;
+            return;
+          }
           pendingRunFinishedEvent = baseEvent;
           return;
         }
@@ -387,6 +361,7 @@ export function registerAgUiIpc(
         // <think> 过滤：拦截 TEXT_MESSAGE_* 事件
         if (eventType === "TEXT_MESSAGE_START") {
           thinkFilter = createThinkFilter(thinkFilterMode);
+          timePrefixFilter = new ChatTimeStreamPrefixFilter();
           pendingTextStart = baseEvent as typeof pendingTextStart;
           textStartForwarded = false;
           embeddedReasoningStarted = false;
@@ -402,7 +377,7 @@ export function registerAgUiIpc(
           }
           const event = baseEvent as { type: string; delta?: string };
           const rawDelta = typeof event.delta === "string" ? event.delta : "";
-          const visibleDelta = thinkFilter.push(rawDelta);
+          const visibleDelta = timePrefixFilter?.push(thinkFilter.push(rawDelta)) ?? thinkFilter.push(rawDelta);
           forwardEmbeddedReasoning(thinkFilter.takeThinking());
           if (visibleDelta) {
             endEmbeddedReasoning();
@@ -415,15 +390,17 @@ export function registerAgUiIpc(
 
         if (eventType === "TEXT_MESSAGE_END") {
           if (thinkFilter) {
-            const tail = thinkFilter.flush();
+            const tail = timePrefixFilter?.push(thinkFilter.flush()) ?? thinkFilter.flush();
+            const timeTail = timePrefixFilter?.finish() ?? "";
             forwardEmbeddedReasoning(thinkFilter.takeThinking());
-            if (tail) {
+            if (tail || timeTail) {
               endEmbeddedReasoning();
               forwardTextStart();
               // flush 出的尾部文本作为最后一个 CONTENT 发送，确保在 END 之前到达
-              send({ type: "TEXT_MESSAGE_CONTENT", delta: tail, threadId, runId });
+              send({ type: "TEXT_MESSAGE_CONTENT", delta: `${tail}${timeTail}`, threadId, runId });
             }
             thinkFilter = null;
+            timePrefixFilter = null;
           }
           endEmbeddedReasoning();
           if (textStartForwarded) send(baseEvent);
@@ -448,6 +425,27 @@ export function registerAgUiIpc(
         console.error("[AgUiBridge] run 失败:", message);
         perf.dump();
         const code = err instanceof AgentRuntimeError ? err.code : undefined;
+        // Task 2 / C1：runtime error 必须经过同一个 settlement gate。
+        // 如果 upstream 已经发过 RUN_FINISHED（gate 已结算为 success / cancelled / timeout），
+        // 这里直接丢弃 RUN_ERROR，避免渲染端收到第二终态。
+        // pendingRunFinishedEvent 仍会在 complete 回调里发出（如果 complete 被调用）；
+        // 若 complete 不会被调用（error 后 RxJS 不再调 complete），则下面兜底直接发 RUN_FINISHED。
+        const errorTerminal: CyreneRunTerminalResult = {
+          status: "runtime_error",
+          reason: code ?? "E_RUN_FAILURE",
+          externalEffectsMayContinue: true,
+        };
+        if (!settlementGate.trySettle(errorTerminal)) {
+          // 已结算：检查是否需要补发缓存的 RUN_FINISHED。
+          // 仅当 RUN_FINISHED 被 next 缓存但尚未发出（complete 未触发）时才补发。
+          if (pendingRunFinishedEvent) {
+            send(pendingRunFinishedEvent);
+            pendingRunFinishedEvent = null;
+          }
+          activeRuns.delete(runId);
+          endLifecycle();
+          return;
+        }
         // 补发 RUN_ERROR 事件，渲染端据此收尾（invoke 早已 resolve，靠事件驱动）
         send({ type: "RUN_ERROR", message, code, threadId, runId });
         activeRuns.delete(runId);
@@ -456,11 +454,33 @@ export function registerAgUiIpc(
       complete: async () => {
         perf.mark("agent_run_complete");
         activeRuns.delete(runId);
+        // Task 2 / C1：complete 路径下 settlement 应已由 next(RUN_FINISHED) 写入。
+        // Issue 4：若 upstream 走裸 complete（没有 RUN_FINISHED），必须补发一个合成的 RUN_FINISHED，
+        // 否则 renderer 收到零个终态事件，exactly-once 退化为 at-most-once。
+        // 若已被 error 路径或 runtime_error RUN_FINISHED 结算，则保持该终态，不再补发。
+        if (!settlementGate.isSettled()) {
+          const synthesizedTerminal: CyreneRunTerminalResult = {
+            status: "success",
+            externalEffectsMayContinue: false,
+          };
+          settlementGate.trySettle(synthesizedTerminal);
+          pendingRunFinishedEvent = {
+            type: "RUN_FINISHED",
+            threadId,
+            runId,
+            result: synthesizedTerminal,
+          };
+        }
+        const settlement = settlementGate.get();
+        const isSuccessfulCompletion = settlement?.status === "success";
         try {
-          if (agent.lastResult) {
+          // Task 2 / C1：cancelled / timeout / runtime_error 不跑成功收尾副作用
+          // （sticker / memory / learn-progress / 历史召回）。
+          // 这些副作用假定 run 已经成功产出回复；其他终态不能保证有可用 finalAnswer。
+          if (agent.lastResult && isSuccessfulCompletion) {
             const lastResult = agent.lastResult;
             const effects = await perf.track("on_run_finished", async () => onFinished(lastResult, latestUserText, sessionId));
-            if (effects?.sticker !== undefined) {
+            if (mode !== "code" && effects?.sticker !== undefined) {
               send({
                 type: "CUSTOM",
                 name: "cyrene.sticker",
@@ -502,14 +522,23 @@ export function registerAgUiIpc(
         } catch (err) {
           console.warn("[AgUiBridge] 副作用失败（不影响结果）:", err);
         }
-        if (pendingRunFinishedEvent) {
+        // Issue 2：runtime_error 已在 next 回调发过 RUN_ERROR，complete 不再补发终态事件。
+        if (settlement?.status === "runtime_error") {
+          pendingRunFinishedEvent = null;
+        } else if (pendingRunFinishedEvent) {
           send(pendingRunFinishedEvent);
+          pendingRunFinishedEvent = null;
         }
         endLifecycle();
         perf.dump();
       },
     });
-    activeRuns.set(runId, { subscription: sub, endLifecycle });
+    // Issue 7：同步 Observable 在 subscribe() 返回前可能已 complete 并 delete(runId)。
+    // 若此时再无条件 set，会把已结算的 run 重新加入 map，留下幽灵 active run。
+    // 仅在未结算（async、仍在运行）时才登记，供 cancel 取消用。
+    if (!settlementGate.isSettled()) {
+      activeRuns.set(runId, { subscription: sub, endLifecycle, abortController: runAbortController });
+    }
 
     // invoke 立刻返回 ack，不等 Observable 结束。
     // 终态（RUN_FINISHED/RUN_ERROR）由事件流承载，渲染端据此 offEvent + 收尾。
@@ -517,104 +546,28 @@ export function registerAgUiIpc(
     return { success: true, runId };
   });
 
-  // ── Code run 状态查询 IPC ────────────────────────────
-
-  ipcMain.handle(IPC.CODE_RUN_GET, (_event, runId: string) => {
-    return codeRunStore.getRun(runId) ?? null;
-  });
-
-  ipcMain.handle(IPC.CODE_RUN_GET_ACTIVE, (_event, params: { chatSessionId?: string; clineSessionId?: string } = {}) => {
-    if (params.chatSessionId) {
-      return codeRunStore.getActiveRunByChatSession(params.chatSessionId) ?? null;
-    }
-    if (params.clineSessionId) {
-      return codeRunStore.getActiveRunByClineSession(params.clineSessionId) ?? null;
-    }
-    return null;
-  });
-
-  ipcMain.handle(IPC.CODE_RUN_LIST, (_event, chatSessionId?: string) => {
-    return codeRunStore.listRuns(chatSessionId);
-  });
-
-  // ── Code 验证审批 IPC ────────────────────────────
-
-  ipcMain.handle(IPC.CODE_VERIFICATION_GET_PENDING, (_event, params: { chatSessionId?: string; runId?: string } = {}) => {
-    if (params.runId) {
-      return codeRunStore.getPendingApprovalsByRun(params.runId);
-    }
-    if (params.chatSessionId) {
-      return codeRunStore.getPendingApprovalsByChatSession(params.chatSessionId);
-    }
-    return [];
-  });
-
-  ipcMain.handle(IPC.CODE_VERIFICATION_APPROVE, (_event, approvalId: string) => {
-    const a = codeRunStore.getApproval(approvalId);
-    if (!a) return { ok: false, error: "approval not found" };
-    if (a.status === "approved") return { ok: true, approval: a };
-    if (a.status !== "pending") return { ok: false, error: `approval already ${a.status}`, approval: a };
-    if (!codeRunCoordinator.isActive(a.runId)) {
-      return { ok: false, error: "run is terminal", approval: a };
-    }
-    return { ok: true, approval: codeRunStore.approve(approvalId) };
-  });
-
-  ipcMain.handle(IPC.CODE_VERIFICATION_REJECT, (_event, approvalId: string) => {
-    const a = codeRunStore.getApproval(approvalId);
-    if (!a) return { ok: false, error: "approval not found" };
-    if (a.status === "rejected") return { ok: true, approval: a };
-    if (a.status !== "pending") return { ok: false, error: `approval already ${a.status}`, approval: a };
-    if (!codeRunCoordinator.isActive(a.runId)) {
-      return { ok: false, error: "run is terminal", approval: a };
-    }
-    return { ok: true, approval: codeRunStore.reject(approvalId) };
-  });
-
-  // ── Code / Cline Ask IPC ────────────────────────────
-
-  ipcMain.handle(IPC.CODE_ASK_GET_PENDING, (_event, chatSessionId?: string) => {
-    return listPendingAskPresentations(chatSessionId);
-  });
-
-  ipcMain.handle(IPC.CODE_ASK_RESPOND, (_event, input: { promptId?: string; answer?: string } = {}) => {
-    const promptId = input.promptId?.trim();
-    const answer = input.answer?.trim();
-    if (!promptId || !answer) return { ok: false, error: "promptId and answer are required" };
-    return respondToAsk(promptId, answer)
-      ? { ok: true }
-      : { ok: false, error: "ask not found" };
-  });
-
-  ipcMain.handle(IPC.CODE_ASK_CANCEL, (_event, promptId: string) => {
-    const normalized = promptId?.trim();
-    if (!normalized) return { ok: false, error: "promptId is required" };
-    return cancelAsk(normalized, "user")
-      ? { ok: true }
-      : { ok: false, error: "ask not found" };
-  });
-
-  ipcMain.handle(IPC.CODE_SESSION_NEW_TASK, async (_event, chatSessionId: string) => {
-    const normalized = chatSessionId?.trim();
-    if (!normalized) return { ok: false, error: "chatSessionId is required" };
-    const { beginNewCodeTask } = await import("./orchestrator/code/code-command-router");
-    return beginNewCodeTask(normalized);
-  });
-
   ipcMain.handle(IPC.AGUI_CANCEL, (_event, runId?: string) => {
+    // Task 3 / C2：通过 abort signal 触发 harness 的 cancelled 流程，
+    // 而非粗暴 unsubscribe()。后者会阻止 RUN_FINISHED(result.status="cancelled")
+    // 送达渲染端。abort() 让 harness 自然返回 cancelled → CyreneAgent 发出
+    // RUN_FINISHED → complete 回调清理 activeRuns + endLifecycle。
+    // 每个 run 持有独立 AbortController，cancel 一个 runId 绝不影响其他 run。
+    const abortRun = (id: string): void => {
+      const run = activeRuns.get(id);
+      if (run && !run.abortController.signal.aborted) {
+        run.abortController.abort();
+      }
+      // Task 3 / C2：清理该 run 关联的 pending permission / ask_user 卡片。
+      // 渲染端通过 RUN_FINISHED(result.status="cancelled") 自然收到卡片关闭信号。
+      cancelPendingChoicesForRun(id);
+      cancelPendingApprovalsForRun(id);
+    };
     if (runId) {
-      const run = activeRuns.get(runId);
-      if (run) {
-        run.subscription.unsubscribe();
-        run.endLifecycle();
-        activeRuns.delete(runId);
-      }
+      abortRun(runId);
     } else {
-      for (const run of activeRuns.values()) {
-        run.subscription.unsubscribe();
-        run.endLifecycle();
+      for (const id of [...activeRuns.keys()]) {
+        abortRun(id);
       }
-      activeRuns.clear();
     }
     return true;
   });

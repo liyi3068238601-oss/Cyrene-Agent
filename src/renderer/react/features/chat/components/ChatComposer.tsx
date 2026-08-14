@@ -5,10 +5,9 @@ import { resolveAsset } from "../../../../../shared/renderer-base";
 import { ReasoningControl } from "./ReasoningControl";
 import { StyleControl } from "./StyleControl";
 import { PermissionControl } from "./PermissionControl";
-import { ClineModeSwitch, type ClineMode } from "./ClineModeSwitch";
+import { ModelSelector } from "./ModelSelector";
 import chatWelcomeUrl from "../../../assets/welcome/chat.png?url";
 import codeWelcomeUrl from "../../../assets/welcome/code.png?url";
-import dailyWelcomeUrl from "../../../assets/welcome/daily.png?url";
 import learnWelcomeUrl from "../../../assets/welcome/learn.png?url";
 import workWelcomeUrl from "../../../assets/welcome/work.png?url";
 
@@ -21,7 +20,6 @@ interface ChatComposerProps {
   attachmentBusy?: boolean;
   modelBusy?: boolean;
   pendingQueue?: Array<{ id: string; content: string }>;
-  clineMode?: ClineMode;
   onChange: (value: string) => void;
   onSubmit: (value: string) => void;
   onCancel?: () => void;
@@ -32,9 +30,8 @@ interface ChatComposerProps {
   onRemoveAttachment: (index: number) => void;
   onScreenshot: () => void;
   onChooseSticker: (id: string) => void;
-  onClineModeChange?: (mode: ClineMode) => void;
-  onNewClineTask?: () => void;
-  onInitVaultStructure?: () => void;
+  activeModelProfileId?: string;
+  onSelectModelProfile?: (id: string) => void;
 }
 
 export interface ComposerAttachment {
@@ -53,7 +50,6 @@ export interface ComposerAttachment {
 const WELCOME_IMAGE_BY_MODE: Record<string, string> = {
   chat: chatWelcomeUrl,
   code: codeWelcomeUrl,
-  daily: dailyWelcomeUrl,
   learn: learnWelcomeUrl,
   work: workWelcomeUrl,
 };
@@ -78,6 +74,24 @@ interface EnabledSticker {
   id: string;
   src: string;
   description?: string;
+}
+
+export function parseComposerMessage(mode: string, content: string): {
+  rawContent: string;
+  visibleContent: string;
+  userSticker?: string;
+} {
+  const trimmed = content.trim();
+  const stickerMatch = trimmed.match(/\[sticker:([^\]]+)\]/i);
+  const visibleContent = trimmed.replace(/\[sticker:[^\]]+\]/gi, "").trim();
+  if (mode === "code") {
+    return { rawContent: visibleContent, visibleContent, userSticker: undefined };
+  }
+  return {
+    rawContent: trimmed,
+    visibleContent,
+    userSticker: stickerMatch?.[1]?.trim() || undefined,
+  };
 }
 
 function stickerUrl(src: string): string {
@@ -178,7 +192,6 @@ export function ChatComposer({
   attachmentBusy = false,
   modelBusy = false,
   pendingQueue = [],
-  clineMode = "act",
   onChange,
   onSubmit,
   onCancel,
@@ -189,16 +202,16 @@ export function ChatComposer({
   onRemoveAttachment,
   onScreenshot,
   onChooseSticker,
-  onClineModeChange,
-  onNewClineTask,
-  onInitVaultStructure,
+  activeModelProfileId,
+  onSelectModelProfile,
 }: ChatComposerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [enabledStickers, setEnabledStickers] = useState<EnabledSticker[]>([]);
-  const supportsWorkFiles = ["work", "code", "daily"].includes(mode);
+  const supportsWorkFiles = ["work", "code"].includes(mode);
   const supportsObsidianLibrary = mode === "learn";
   const supportsPermission = supportsWorkFiles || supportsObsidianLibrary;
   const supportsStyle = mode !== "code";
+  const supportsStickers = mode !== "code";
   const welcomeImageUrl = WELCOME_IMAGE_BY_MODE[mode] ?? chatWelcomeUrl;
   const requiresWorkspace = supportsWorkFiles;
   const placeholder = mode === "chat"
@@ -206,9 +219,9 @@ export function ChatComposer({
     : requiresWorkspace && !workspaceName
       ? "有什么问题 / 任务，来找昔涟♪（ps：请先选中一个项目路径哦♪）"
       : "有什么问题 / 任务，来找昔涟♪";
-  const selectedStickerIds = [...value.matchAll(/\[sticker:([^\]]+)\]/gi)]
+  const selectedStickerIds = supportsStickers ? [...value.matchAll(/\[sticker:([^\]]+)\]/gi)]
     .map((match) => match[1].trim())
-    .filter(Boolean);
+    .filter(Boolean) : [];
   const stickerOccurrences = new Map<string, number>();
   const selectedStickers = selectedStickerIds.map((id) => {
     const occurrence = stickerOccurrences.get(id) ?? 0;
@@ -266,9 +279,11 @@ export function ChatComposer({
         value={value}
         placeholder={modelBusy ? "按 Enter 停止 · Shift+Enter 加入队列" : placeholder}
         loading={modelBusy}
-        disabled={requiresWorkspace && !workspaceName}
+        // `disabled` 会同时禁掉 Sender 内建的取消键；运行中的任务必须始终可停止。
+        disabled={!modelBusy && requiresWorkspace && !workspaceName}
         autoSize={{ minRows: 3, maxRows: 7 }}
         onChange={onChange}
+        onCancel={onCancel}
         onKeyDown={(event) => { shiftPressedRef.current = event.shiftKey; }}
         onSubmit={(submitValue) => {
           if (modelBusy) {
@@ -332,7 +347,7 @@ export function ChatComposer({
             >
               <ScreenshotIcon />
             </button>
-            <StickerPicker onChoose={onChooseSticker} />
+            {supportsStickers && <StickerPicker onChoose={onChooseSticker} />}
           </div>
         }
         />
@@ -351,31 +366,12 @@ export function ChatComposer({
             <ChevronIcon />
           </button>
         )}
-        {supportsObsidianLibrary && workspaceName && onInitVaultStructure && (
-          <button type="button" className="cy-composer__footer-button" aria-label="添加 Cyrene 学习结构" onClick={onInitVaultStructure}>
-            <PlusIcon />
-            <span>添加学习结构</span>
-          </button>
-        )}
         {supportsPermission && <span className="cy-composer__footer-separator" />}
         {supportsPermission && (
           <PermissionControl />
         )}
-        {mode === "code" && onClineModeChange && (
-          <ClineModeSwitch value={clineMode} disabled={modelBusy} onChange={onClineModeChange} />
-        )}
-        {mode === "code" && onNewClineTask && (
-          <button
-            type="button"
-            className="cy-composer__footer-button cy-composer__cline-task-button"
-            disabled={modelBusy}
-            title="结束当前 Cline Task；下一条消息从新上下文开始"
-            onClick={onNewClineTask}
-          >
-            新 Cline Task
-          </button>
-        )}
         {supportsStyle && <StyleControl />}
+        {onSelectModelProfile && <ModelSelector activeProfileId={activeModelProfileId} onSelect={onSelectModelProfile} />}
         <ReasoningControl />
         </div>
       </div>

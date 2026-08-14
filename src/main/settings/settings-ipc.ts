@@ -22,7 +22,7 @@ import { downloadEmbeddingModel, deleteEmbeddingModel } from "../embedding-manag
 import * as os from "os";
 import { testVendorConnection } from "../orchestrator/vendors/test-connection";
 import type { VendorConfig } from "../orchestrator/vendors";
-import { normalizeModelSettings, getPublicModelConfig } from "../settings/model-settings";
+import { normalizeModelSettings, getPublicModelConfig, listSavedModelProfiles, saveModelProfile, setDefaultModelProfile, saveModelSettings } from "../settings/model-settings";
 import type { ModelSettings } from "../settings/model-settings";
 import { getTimeoutSettings, saveTimeoutSettings } from "../timeout-manager";
 import type { syncVolcanoSearchMcp } from "./general-settings-lifecycle";
@@ -57,7 +57,6 @@ const VISION_TEST_IMAGE_BASE64 =
 
 export function registerSettingsIpc(deps: SettingsIpcDependencies): void {
   const {
-    windowManager,
     getGeneralSettings,
     saveGeneralSettings,
     getModelSettings,
@@ -69,6 +68,9 @@ export function registerSettingsIpc(deps: SettingsIpcDependencies): void {
     syncVolcanoSearchMcp,
     syncPlaywrightMcp,
   } = deps;
+  // 注意：windowManager 不解构，统一用 deps.windowManager 实时读取 getter。
+  // registerSettingsIpc 在模块加载阶段调用，那时 windowManager 仍为 null，
+  // 解构会捕获 null 并导致后续 ?. 永远短路（设置里的打开侧边栏/日程等会失效）。
 
   function broadcastToAuxWindows(channel: string, payload: unknown): void {
     for (const win of [reactChatWindow, sidebarWindow, tasksWindow, settingsWindow]) {
@@ -87,6 +89,32 @@ export function registerSettingsIpc(deps: SettingsIpcDependencies): void {
   }
 
   ipcMain.handle(IPC.SETTINGS_GET_CONFIG, () => getModelSettings());
+  ipcMain.handle(IPC.SETTINGS_MODEL_PROFILES_LIST, () => ({
+    profiles: listSavedModelProfiles(getModelSettings()),
+    defaultModelProfileId: getModelSettings().defaultModelProfileId,
+  }));
+  ipcMain.handle(IPC.SETTINGS_MODEL_PROFILE_SAVE, (_event, profile) => {
+    const saved = saveModelProfile(profile as Parameters<typeof saveModelProfile>[0]);
+    if (saved.added && saved.settings.defaultModelProfileId === saved.settings.modelProfiles?.at(-1)?.id) {
+      broadcastModelConfigChanged(saved.settings);
+    }
+    return { added: saved.added, profiles: listSavedModelProfiles(saved.settings), defaultModelProfileId: saved.settings.defaultModelProfileId };
+  });
+  ipcMain.handle(IPC.SETTINGS_MODEL_PROFILE_DELETE, (_event, id: unknown) => {
+    if (typeof id !== "string") return null;
+    const settings = getModelSettings();
+    const profiles = listSavedModelProfiles(settings).filter((profile) => profile.id !== id);
+    const defaultModelProfileId = settings.defaultModelProfileId === id ? profiles[0]?.id : settings.defaultModelProfileId;
+    const saved = saveModelSettings({ modelProfiles: profiles, defaultModelProfileId });
+    broadcastModelConfigChanged(saved);
+    return { profiles: listSavedModelProfiles(saved), defaultModelProfileId: saved.defaultModelProfileId };
+  });
+  ipcMain.handle(IPC.SETTINGS_MODEL_PROFILE_SET_DEFAULT, (_event, id: unknown) => {
+    if (typeof id !== "string") return null;
+    const saved = setDefaultModelProfile(id);
+    broadcastModelConfigChanged(saved);
+    return { profiles: listSavedModelProfiles(saved), defaultModelProfileId: saved.defaultModelProfileId };
+  });
 
   ipcMain.handle(IPC.SETTINGS_GET_GENERAL, () => getGeneralSettings());
 
@@ -188,7 +216,7 @@ export function registerSettingsIpc(deps: SettingsIpcDependencies): void {
   });
 
   ipcMain.on(IPC.SETTINGS_OPEN_SIDEBAR, () => {
-    windowManager?.createSidebarWindow();
+    deps.windowManager?.createSidebarWindow();
   });
 
   ipcMain.on(IPC.SETTINGS_CLOSE_SIDEBAR, async () => {
@@ -196,7 +224,7 @@ export function registerSettingsIpc(deps: SettingsIpcDependencies): void {
   });
 
   ipcMain.on(IPC.SETTINGS_OPEN_TASKS, () => {
-    windowManager?.createTasksWindow();
+    deps.windowManager?.createTasksWindow();
   });
 
   ipcMain.on(IPC.SETTINGS_CLOSE_TASKS, async () => {
@@ -205,7 +233,7 @@ export function registerSettingsIpc(deps: SettingsIpcDependencies): void {
 
   ipcMain.on(IPC.SETTINGS_SET_PET_ALWAYS_ON_TOP, (_event, value: boolean) => {
     const saved = saveGeneralSettings({ ...getGeneralSettings(), petAlwaysOnTop: Boolean(value) });
-    windowManager?.setMainWindowAlwaysOnTop(saved.petAlwaysOnTop);
+    deps.windowManager?.setMainWindowAlwaysOnTop(saved.petAlwaysOnTop);
   });
 
   ipcMain.on(IPC.SETTINGS_SET_PET_VISIBLE, (_event, value: boolean) => {
@@ -214,7 +242,7 @@ export function registerSettingsIpc(deps: SettingsIpcDependencies): void {
 
   ipcMain.on(IPC.SETTINGS_SET_PET_ZOOM, (_event, value: number) => {
     const saved = saveGeneralSettings({ ...getGeneralSettings(), petZoom: Number(value) });
-    windowManager?.applyMainWindowZoom(saved.petZoom);
+    deps.windowManager?.applyMainWindowZoom(saved.petZoom);
   });
 
   ipcMain.handle(IPC.MODEL_CONFIG_GET, () => getPublicModelConfig());

@@ -107,7 +107,7 @@ export function ConversationSidebar({
   onDelete,
   onTogglePin,
 }: ConversationSidebarProps) {
-  const supportsProjects = mode === "work" || mode === "code" || mode === "daily";
+  const supportsProjects = mode === "work" || mode === "code";
   const projects = useMemo(() => {
     const result = new Map<string, ProjectSummary>();
     for (const session of sessions) {
@@ -287,7 +287,7 @@ export function ConversationSidebar({
               items={items}
               activeKey={activeSessionId}
               onActiveChange={(key) => {
-                queueMicrotask(() => onSelect(String(key)));
+                onSelect(String(key));
               }}
               groupable={supportsProjects ? {
                 collapsible: true,

@@ -73,6 +73,8 @@ import { resolveVendorRuntimeSettings, setVendorRuntimeSettingsGetter } from "./
 import { toolRegistry } from "./orchestrator/tool-registry";
 import { setLive2dWindowSender } from "./orchestrator/built-in-tools";
 import { registerAllTools } from "./orchestrator/tool-registration";
+import { LspManager } from "./lsp/manager";
+import { initSandbox } from "./orchestrator/sandbox/sandbox-exec";
 import { initMcpManager, pruneMcpServersByIds } from "./orchestrator/mcp-manager";
 import { syncPlaywrightMcp, PLAYWRIGHT_MCP_ID, REMOVED_BUILTIN_MCP_IDS } from "./sync-mcp-builtin";
 import { bootstrapPermission } from "./permission/bootstrap";
@@ -124,17 +126,13 @@ import { type RuntimeState } from "./runtime-state";
 import { getAppIconPath } from "./app-icon";
 import type { StartTtsRequest } from "../shared/tts-session";
 import { registerAgUiIpc, type AguiRunInput } from "./agui-bridge";
-import { codeRunWorker } from "./orchestrator/code/code-run-worker";
 import {
   setWeatherConfig,
   setSearchConfig,
-  getCurrentTodos,
-  setDelegateSettings,
   setUserTimezoneConfig,
 } from "./orchestrator/built-in-tools";
 import { resolveMusicPaths } from "./music/paths";
 import { bootstrapGameBot } from "./game-bot/bootstrap";
-import { bootstrapTodos } from "./todos/bootstrap";
 import { bootstrapMusicService } from "./music/bootstrap";
 import { installShutdownLatch } from "./music/shutdown-latch";
 import {
@@ -163,6 +161,10 @@ import {
 import { createProactiveLifecycle } from "./proactive/proactive-lifecycle";
 import { createCitaService } from "./services/cita/cita-service";
 import { contextRefRegistry } from "./orchestrator/tool-context";
+import { createGitService } from "./code-git/git-service";
+import type { GitService } from "./code-git/git-service";
+import { resolveGitExecutable } from "./code-git/git-executable";
+import { registerCodeGitIpc } from "./code-git/code-git-ipc";
 import { startPluginRuntime } from "./plugin-runtime";
 import type { PluginManager } from "../plugins/manager";
 
@@ -190,9 +192,11 @@ async function reconcileUserMemoryIndex(): Promise<void> {
 let tray: Tray | null = null;
 let schedulerSubsystem: SchedulerSubsystem | null = null;
 let channelsSubsystem: ChannelsSubsystem | null = null;
-let pluginManager: PluginManager | null = null;
 let screenshotService: ScreenshotService | null = null;
 let windowManager: WindowManager | null = null;
+let lspManager: LspManager | null = null;
+let codeGitService: GitService | null = null;
+let pluginManager: PluginManager | null = null;
 const live2dWindowLifecycle = createWindowLifecycleTracker<BrowserWindow>("live2d-main", {
   onClosed: () => { /* no-op：原 setLive2dWindow 已随 opener 子系统一起移除 */ },
 });
@@ -323,11 +327,30 @@ app.whenReady().then(async () => {
 
   // 聊天会话存储 IPC（chats-store.initialize 会建好 cyrene-chats 目录并加载 index）
   registerChatsIpc();
+  codeGitService = createGitService({
+    getSession: chatsStore.getSession,
+    resolveExecutable: () => resolveGitExecutable({
+      systemCommand: "git",
+      bundledPath: app.isPackaged
+        ? path.join(process.resourcesPath, "mingit", "cmd", "git.exe")
+        : path.join(app.getAppPath(), "resources", "mingit", "cmd", "git.exe"),
+    }),
+  });
+  registerCodeGitIpc({ service: codeGitService });
   proactiveLifecycle.initializeProactiveChatService();
   proactiveLifecycle.initializeProactiveTrigger();
 
+  // SRT 沙箱初始化（检测安装状态，不弹 UAC）：必须在 registerAllTools 前，
+  // 让 run_shell 的 workspace_mutation 分支能用上沙箱。失败不阻塞启动（fallback 到直接 spawn）。
+  await initSandbox().catch((e) =>
+    logger.error(LogTag.Runtime, "[Sandbox] initSandbox failed at startup:", e),
+  );
+
   // 工具注册：集中到一个显式入口，取代 index.ts 中的副作用 import
-  registerAllTools();
+  lspManager = new LspManager({
+    getServerOverrides: () => loadGeneralSettings().lspServerOverrides,
+  });
+  registerAllTools({ codeGitService, lspManager });
 
   // 功能插件（包含内置 NovelAI）：在内置工具之后加载，允许插件注册自己的工具与 IPC。
   pluginManager = await startPluginRuntime();
@@ -389,9 +412,8 @@ app.whenReady().then(async () => {
     skillRegistry.setAvailability("cyrene-music-companion", () => false);
   }
 
-  // 启动游戏代肝与任务清单子系统
+  // 启动游戏代肝子系统
   bootstrapGameBot();
-  bootstrapTodos();
 
   // AG-UI 事件流桥：渲染进程 invoke(AGUI_RUN) → CyreneAgent 跑 FC 循环 → 事件透传
   const agentRuntime = createAgentRuntime({
@@ -430,9 +452,6 @@ app.whenReady().then(async () => {
     () => reactChatWindow,
     proactiveLifecycle.proactiveConversationLifecycle,
   );
-
-  // 状态栏专用入口：打开/复用 reactChatWindow
-  ipcMain.handle(IPC.TODOS_GET_CURRENT, () => getCurrentTodos());
 
   const generalSettings = loadGeneralSettings();
   // 初始化 Locale Context（从 GeneralSettings 的语言配置同步）
@@ -500,17 +519,17 @@ app.on("before-quit", () => {
   windowManager?.dispose();
   schedulerSubsystem?.engine.stop();
   proactiveLifecycle.stopProactiveTrigger();
-  codeRunWorker.cleanup();
   void pluginManager?.stop();
   flushTokenUsage();
   void channelsSubsystem?.shutdown();
   void screenshotService?.shutdown();
+  void lspManager?.disposeAll();
+  void codeGitService?.dispose();
 });
 
 app.on("activate", () => {
   windowManager?.createMainWindow();
 });
-
 
 
 

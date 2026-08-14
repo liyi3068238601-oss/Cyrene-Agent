@@ -24,6 +24,10 @@ import { normalizeWindowVisibilitySettings } from "../window-visibility-settings
 import { normalizeCitaSettings } from "../cita/settings";
 import { getGeneralSettingsPath } from "../settings-store";
 import type { GeneralSettings } from "./general-settings";
+import type { ToolModeOverrides } from "../orchestrator/tool-registry";
+import type { ConversationMode } from "../../shared/chat-types";
+import type { SkillModeOverrides } from "../skills/types";
+import { normalizeLspServerOverrides } from "../lsp/server-catalog";
 
 const DEFAULT_GENERAL_SETTINGS: GeneralSettings = {
   plugins: {},
@@ -104,6 +108,9 @@ const DEFAULT_GENERAL_SETTINGS: GeneralSettings = {
   screenshotHotkey: "Alt+Shift+S",
   chatLineHeight: 1.75,
   assistantBubbleEnabled: true,
+  toolModeOverrides: {},
+  skillModeOverrides: {},
+  lspServerOverrides: [],
 };
 
 const listeners = new Set<(before: GeneralSettings, after: GeneralSettings) => void>();
@@ -274,7 +281,60 @@ export function normalizeGeneralSettings(
       ? input.ttsMosslandFormat
       : "mp3",
     ...normalizeChatAppearance(input),
+    toolModeOverrides: normalizeToolModeOverrides(input?.toolModeOverrides),
+    skillModeOverrides: normalizeSkillModeOverrides(input?.skillModeOverrides),
+    lspServerOverrides: normalizeLspServerOverrides(input?.lspServerOverrides),
   };
+}
+
+/** 规范化工具-模式覆盖层：仅保留合法的 { toolId: { mode: boolean } } 结构。
+ *  非法值（非对象、非 boolean）被丢弃，空对象兜底。 */
+function normalizeToolModeOverrides(
+  input: unknown,
+): ToolModeOverrides {
+  if (!input || typeof input !== "object") return {};
+  const result: ToolModeOverrides = {};
+  const raw = input as Record<string, unknown>;
+  for (const [toolId, modeMap] of Object.entries(raw)) {
+    if (!modeMap || typeof modeMap !== "object") continue;
+    const filtered: Partial<Record<ConversationMode, boolean>> = {};
+    for (const [mode, value] of Object.entries(modeMap as Record<string, unknown>)) {
+      if (mode !== "chat" && mode !== "work" && mode !== "code" && mode !== "learn") continue;
+      if (typeof value === "boolean") {
+        filtered[mode as ConversationMode] = value;
+      }
+    }
+    if (Object.keys(filtered).length > 0) {
+      result[toolId] = filtered;
+    }
+  }
+  return result;
+}
+
+const SKILL_MODES = new Set(["work", "code", "learn"] as const);
+
+/** 规范化 Skill-模式覆盖层：仅保留合法的 { skillId: { work|code|learn: boolean } } 结构。
+ *  非法值被丢弃，空对象兜底。 */
+function normalizeSkillModeOverrides(
+  input: unknown,
+): SkillModeOverrides {
+  if (!input || typeof input !== "object") return {};
+  const result: SkillModeOverrides = {};
+  const raw = input as Record<string, unknown>;
+  for (const [skillId, modeMap] of Object.entries(raw)) {
+    if (!modeMap || typeof modeMap !== "object") continue;
+    const filtered: Partial<Record<"work" | "code" | "learn", boolean>> = {};
+    for (const [mode, value] of Object.entries(modeMap as Record<string, unknown>)) {
+      if (!SKILL_MODES.has(mode as "work" | "code" | "learn")) continue;
+      if (typeof value === "boolean") {
+        filtered[mode as "work" | "code" | "learn"] = value;
+      }
+    }
+    if (Object.keys(filtered).length > 0) {
+      result[skillId] = filtered;
+    }
+  }
+  return result;
 }
 
 function loadGeneralSettings0(): GeneralSettings {

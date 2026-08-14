@@ -20,6 +20,7 @@ import * as chatsStore from "./chats-store";
 import * as fs from "fs";
 import * as path from "path";
 import { ensureVaultStructure, isEmptyDirectory } from "../learn/obsidian/vault-init";
+import { getDefaultModelProfile } from "../settings/model-settings";
 
 function broadcastChanged(senderWebContents?: WebContents | null): void {
   for (const win of BrowserWindow.getAllWindows()) {
@@ -58,6 +59,7 @@ export function registerChatsIpc(): void {
         title: payload?.title,
         identityId: payload?.identityId ?? null,
         mode: payload?.mode,
+        modelProfileId: getDefaultModelProfile()?.id,
       });
       broadcastChanged(event.sender);
       return session;
@@ -69,6 +71,16 @@ export function registerChatsIpc(): void {
     (event, payload: { id: string; message: ChatMessage }) => {
       if (!payload || !payload.id || !payload.message) return null;
       const session = chatsStore.appendMessage(payload.id, payload.message);
+      if (session) broadcastChanged(event.sender);
+      return session;
+    },
+  );
+
+  ipcMain.handle(
+    IPC.CHATS_UPSERT,
+    (event, payload: { id: string; message: ChatMessage } | null | undefined) => {
+      if (!payload?.id || !payload.message) return null;
+      const session = chatsStore.upsertMessage(payload.id, payload.message);
       if (session) broadcastChanged(event.sender);
       return session;
     },
@@ -132,6 +144,13 @@ export function registerChatsIpc(): void {
     return session;
   });
 
+  ipcMain.handle(IPC.CHATS_SET_MODEL_PROFILE, (event, payload: { id: string; modelProfileId?: string }) => {
+    if (!payload || typeof payload.id !== "string") return null;
+    const session = chatsStore.setSessionModelProfile(payload.id, payload.modelProfileId);
+    if (session) broadcastChanged(event.sender);
+    return session;
+  });
+
   ipcMain.handle(IPC.CHATS_OPEN_FOLDER, async () => {
     await chatsStore.openStorageFolder();
     return true;
@@ -165,19 +184,6 @@ export function registerChatsIpc(): void {
     },
   );
 
-  ipcMain.handle(
-    IPC.CHATS_SET_CODE_MODE,
-    (event, payload: { sessionId?: string; clineMode?: "plan" | "act" } = {}) => {
-      if (!payload.sessionId || (payload.clineMode !== "plan" && payload.clineMode !== "act")) {
-        return { ok: false, error: "invalid Code mode request" };
-      }
-      const session = chatsStore.updateCodeSession(payload.sessionId, { clineMode: payload.clineMode });
-      if (!session) return { ok: false, error: "Code session not found" };
-      broadcastChanged(event.sender);
-      return { ok: true, session };
-    },
-  );
-
   // ── 对话工作区绑定 ──────────────────────────────────────
 
   ipcMain.handle(
@@ -188,7 +194,7 @@ export function registerChatsIpc(): void {
       }
       const existing = chatsStore.getSession(payload.sessionId);
       if (!existing) return { ok: false, error: "session not found" };
-      if (existing.mode !== "work" && existing.mode !== "code" && existing.mode !== "daily" && existing.mode !== "learn") {
+      if (existing.mode !== "work" && existing.mode !== "code" && existing.mode !== "learn") {
         return { ok: false, error: `${existing.mode ?? "unknown"} mode does not support workspace binding` };
       }
       // 路径验证：目录存在 + realpath 解析

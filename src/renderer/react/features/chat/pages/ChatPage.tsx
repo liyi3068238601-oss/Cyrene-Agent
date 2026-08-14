@@ -1,28 +1,39 @@
 import { useEffect, useRef, useState, type DragEvent } from "react";
 import { DownOutlined } from "@ant-design/icons";
-import { ChatComposer, type ComposerAttachment } from "../components/ChatComposer";
+import { ChatComposer, parseComposerMessage, type ComposerAttachment } from "../components/ChatComposer";
 import { ComposerSlot } from "../components/ComposerSlot";
 import { TodoPanel } from "../components/TodoPanel";
-import type { TodoState } from "../../../../../shared/todo-types";
+import { CodeGitPanel } from "../components/CodeGitPanel";
+import type { TodoItem } from "../../../../../shared/todo-types";
 import {
   describePermissionRequest,
-  normalizeCodeAskInteraction,
-  normalizeCodeVerificationInteraction,
   normalizeChoiceInteraction,
   normalizeTaskPlanPresentation,
+  isFormalAnswerCommitted,
+  resolveRunFinishedStage,
+  resolveTerminalContent,
+  shouldClearComposerInteractionForTerminal,
   shouldDismissAsk,
   type AgentRunStage,
   type ComposerInteraction,
 } from "../components/run-presentation";
 import { ChatMessageList, type ChatMessageItem } from "../components/ChatMessageList";
+import { applyAgentRoundBoundary, createRoundProcessMessage } from "../components/agent-rounds";
+import { applyTaskDelegationEvent, normalizeTaskDelegationEvent } from "../components/task-delegations";
 import type { WeatherData } from "../components/weather/weather-types";
 import { getTtsPlaybackSnapshot, playTtsToCompletion, stopTtsPlayback } from "../components/tts-playback";
 import { EarlyTtsPlaybackQueue } from "../tts/early-tts-queue";
 import { ConversationSidebar } from "../components/ConversationSidebar";
-import { StatusFloat } from "../components/StatusFloat";
-import type { ChatMessage, ChatSession, ChatSessionMeta, ConversationMode, ReasoningBlock, RunActivityRecord, ToolExecutionRecord } from "../../../../../shared/chat-types";
+
+import type { AgentRoundRecord, ChatMessage, ChatSession, ChatSessionMeta, ConversationMode, ProcessMessageRecord, ReasoningBlock, RunActivityRecord, TaskDelegationDisplayRecord, ToolExecutionRecord } from "../../../../../shared/chat-types";
 import { SidebarToggle } from "../../../components/ui/SidebarToggle";
 import { ModeSwitch } from "../../../components/ui/ModeSwitch";
+import { ToolModeButton } from "../../../components/ui/ToolModeButton";
+import { ToolModePanel } from "../components/ToolModePanel";
+import { SkillModeButton } from "../../../components/ui/SkillModeButton";
+import { ModelModeButton } from "../../../components/ui/ModelModeButton";
+import { SkillModePanel } from "../components/SkillModePanel";
+import { ModelModePanel } from "../components/ModelModePanel";
 import { CharacterStatusPill } from "../../../components/ui/CharacterStatusPill";
 import { WindowControls } from "../../../components/ui/WindowControls";
 import { SettingsButton } from "../../../components/ui/SettingsButton";
@@ -32,18 +43,30 @@ import { resolveRevisableLastTurn } from "../components/last-turn-actions";
 import { NewTaskButton } from "../../../components/ui/NewTaskButton";
 import { shouldRunModelForMode } from "./conversation-run-policy";
 import {
-  applyCodeRunEvent,
-  createCodeRunViewModel,
-  restoreCodeRunViewModel,
-  type CodeRunApi,
-  type CodeRunViewModel,
-} from "../../../../lib/code-run-view-model";
-import {
+  bootstrapReactSession,
   normalizeSessionMode,
   openSessionByIdWithDeps,
   type OpenSessionArgs,
   type ReactSessionMode,
 } from "./openSessionByDeps";
+import { RunEventGate } from "./run-event-gate";
+import { splitTextForReveal } from "./message-reveal";
+import {
+  clearSessionInteraction,
+  buildTodoRecoveryContext,
+  findSessionIdForRun,
+  hasActiveRunForSession,
+  hydrateSessionMessages,
+  mergeHarnessTodosForSession,
+  patchSessionMessage,
+  recoverInterruptedMessage,
+  sessionInteraction,
+  setSessionInteraction,
+  setSessionInteractionBusy,
+  type SessionInteractionState,
+  startSessionTodos,
+  type TodoStateBySession,
+} from "./session-runtime-state";
 import "../../../components/ui/SidebarToggle.css";
 import "../../../components/ui/ModeSwitch.css";
 import "../../../components/ui/CharacterStatusPill.css";
@@ -51,18 +74,20 @@ import "../../../components/ui/WindowControls.css";
 import "../../../components/ui/SettingsButton.css";
 import "../../../components/ui/UserAvatar.css";
 import "../../../components/ui/NewTaskButton.css";
+import "../../../components/ui/ToolModeButton.css";
 import "../components/ChatComposer.css";
 import "../components/ReasoningControl.css";
 import "../components/StyleControl.css";
 import "../components/PermissionControl.css";
+import "../components/ModelModePanel.css";
 import "../components/ChatMessageList.css";
 import "../components/ConversationSidebar.css";
-import "../components/StatusFloat.css";
+
 
 import avatarLight from "../../../assets/avatars/avatar-light.png";
 import compressingPng from "../../../assets/compressing.png";
 
-const CONVERSATION_MODES: readonly ConversationMode[] = ["chat", "work", "code", "learn", "daily"];
+const CONVERSATION_MODES: readonly ConversationMode[] = ["chat", "work", "code", "learn"];
 
 function isConversationMode(value: string): value is ConversationMode {
   return CONVERSATION_MODES.includes(value as ConversationMode);
@@ -171,7 +196,7 @@ $$`,
     "下面是一段 TypeScript 代码，用来测试语法高亮和复制功能：",
     "",
     "```ts",
-    "type CyreneMode = \"work\" | \"chat\" | \"code\" | \"learn\" | \"daily\";",
+    "type CyreneMode = \"work\" | \"chat\" | \"code\" | \"learn\";",
     "",
     "function greeting(mode: CyreneMode): string {",
     "  return mode === \"chat\"",
@@ -193,28 +218,23 @@ interface ChatStoreApi {
   get: (id: string) => Promise<ChatSession | null>;
   create: (input: { identityId: null; mode: ConversationMode; title?: string }) => Promise<ChatSession>;
   append: (id: string, message: ChatMessage) => Promise<ChatSession | null>;
+  upsert: (id: string, message: ChatMessage) => Promise<ChatSession | null>;
   replaceTail: (id: string, startIndex: number, messages: ChatMessage[]) => Promise<ChatSession | null>;
   setMessageTtsCacheKey: (id: string, messageId: string, cacheKey: string, converterVersion: string) => Promise<ChatSession | null>;
   rename: (id: string, title: string) => Promise<ChatSession | null>;
   delete: (id: string) => Promise<boolean>;
   setPinned: (id: string, pinned: boolean) => Promise<ChatSession | null>;
+  setModelProfile: (id: string, modelProfileId?: string) => Promise<ChatSession | null>;
   pickWorkspaceFolder: () => Promise<{ ok: boolean; path?: string; displayName?: string; error?: string }>;
   setWorkspace: (sessionId: string, workspaceRoot: string) => Promise<{ ok: boolean; error?: string; isEmpty?: boolean }>;
   initLearnWorkspace: (sessionId: string) => Promise<{ ok: boolean; error?: string; created?: string[]; skipped?: string[] }>;
   openWorkspace: (workspaceRoot: string) => Promise<{ ok: boolean; error?: string }>;
   setActiveSession: (sessionId: string | null) => Promise<unknown>;
   onChanged: (callback: () => void) => () => void;
-  setCodeMode: (sessionId: string, clineMode: "plan" | "act") => Promise<{
-    ok: boolean;
-    error?: string;
-    session?: ChatSession;
-  }>;
   // main → reactChatWindow：通知 ChatPage 切换到指定 sessionId
   onReactSwitchSession: (callback: (sessionId: string) => void) => () => void;
   // reactChatWindow → main：ChatPage 已挂好 IPC 监听，允许 flush pending sessionId
   notifyReactReady: () => void;
-  // 初始加载 TODO 状态，保证卡片常驻
-  getCurrentTodos: () => Promise<Record<"work" | "daily" | "learn", TodoState>>;
 }
 
 interface SidebarApi {
@@ -238,6 +258,7 @@ interface AguiEvent {
 }
 
 interface AguiApi {
+  // Task 2 / C1：返回 AguiRunAck（含 canonical runId），与 RUN_STARTED.runId 强一致。
   run: (input: {
     messages: Array<{ role: "user" | "model"; content: string; at?: number }>;
     userTurnId: string;
@@ -245,7 +266,8 @@ interface AguiApi {
     styleId?: string;
     sessionId: string;
     imageAttachments?: Array<{ name: string; filePath: string; mime?: string }>;
-  }) => Promise<{ success: boolean; error?: string }>;
+    recoveryContext?: string;
+  }) => Promise<{ success: boolean; runId: string; error?: string }>;
   onEvent: (callback: (event: AguiEvent) => void) => () => void;
   cancel: (runId?: string) => Promise<unknown>;
 }
@@ -256,6 +278,7 @@ interface ChoiceApi {
 
 interface PermissionApprovalRequest {
   id: string;
+  runId?: string;
   toolId: string;
   toolName: string;
   toolDescription: string;
@@ -299,10 +322,6 @@ function settingsApprovalApi(): SettingsApprovalApi | undefined {
   return (window as typeof window & { settings?: SettingsApprovalApi }).settings;
 }
 
-function codeRunApi(): CodeRunApi | undefined {
-  return (window as typeof window & { codeRun?: CodeRunApi }).codeRun;
-}
-
 function permissionInteraction(request: PermissionApprovalRequest): ComposerInteraction {
   const target = [request.args.path, request.args.filePath]
     .find((value): value is string => typeof value === "string" && value.trim().length > 0);
@@ -326,20 +345,25 @@ function stageForStep(stepName: string | undefined): AgentRunStage | undefined {
 }
 
 function toUiMessages(session: ChatSession): ChatMessageItem[] {
-  return session.messages.map((message) => ({
-    id: message.id,
-    role: message.role === "model" ? "assistant" : "user",
-    content: message.content,
-    reasoning: message.reasoning,
-    reasoningBlocks: message.reasoningBlocks,
-    runActivity: message.runActivity,
-    ttsCacheKey: message.ttsCacheKey,
-    ttsCacheVersion: message.ttsCacheVersion,
-    responseStarted: message.role === "model",
-    sticker: message.sticker,
-    toolExecutions: message.toolExecutions,
-    attachments: message.attachments,
-  }));
+  return session.messages.map((message) => {
+    const item: ChatMessageItem = {
+      id: message.id,
+      role: message.role === "model" ? "assistant" : "user",
+      content: message.content,
+      reasoning: message.reasoning,
+      reasoningBlocks: message.reasoningBlocks,
+      processMessages: message.processMessages,
+      agentRounds: message.agentRounds,
+      runActivity: message.runActivity,
+      ttsCacheKey: message.ttsCacheKey,
+      ttsCacheVersion: message.ttsCacheVersion,
+      responseStarted: message.role === "model" && Boolean(message.content.trim() || message.sticker),
+      sticker: message.sticker,
+      toolExecutions: message.toolExecutions,
+      attachments: message.attachments,
+    };
+    return message.runSnapshot ? recoverInterruptedMessage(item, message.runSnapshot) : item;
+  });
 }
 
 /**
@@ -369,25 +393,29 @@ function getInitialMode(): ConversationMode {
 export function ChatPage() {
   const preferredAddress = useUserCallPreference();
   const [collapsed, setCollapsed] = useState(false);
+  const [toolPanelOpen, setToolPanelOpen] = useState(false);
+  const [skillPanelOpen, setSkillPanelOpen] = useState(false);
+  const [modelPanelOpen, setModelPanelOpen] = useState(false);
   const [mode, setMode] = useState<ConversationMode>(getInitialMode);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [messagesByMode, setMessagesByMode] = useState<Partial<Record<ConversationMode, ChatMessageItem[]>>>({});
+  const [messagesBySession, setMessagesBySession] = useState<Record<string, ChatMessageItem[]>>({});
   const [workspaceNames, setWorkspaceNames] = useState<Partial<Record<ConversationMode, string>>>({});
+  const [pendingWorkspaceByMode, setPendingWorkspaceByMode] = useState<
+    Partial<Record<ConversationMode, { path: string; displayName?: string }>>
+  >({});
   const [attachmentsByScope, setAttachmentsByScope] = useState<Record<string, ComposerAttachment[]>>({});
   const [sessionsByMode, setSessionsByMode] = useState<Partial<Record<ConversationMode, ChatSessionMeta[]>>>({});
   const [activeSessionIds, setActiveSessionIds] = useState<Partial<Record<ConversationMode, string>>>({});
   const [attachmentBusy, setAttachmentBusy] = useState(false);
   const [modelBusyByMode, setModelBusyByMode] = useState<Partial<Record<ConversationMode, boolean>>>({});
   const [isCompressingContext, setIsCompressingContext] = useState(false);
-  const [composerInteraction, setComposerInteraction] = useState<ComposerInteraction>();
-  const [interactionBusy, setInteractionBusy] = useState(false);
+  const [interactionsBySession, setInteractionsBySession] = useState<SessionInteractionState>({});
   const [lastTurnRevisionStarting, setLastTurnRevisionStarting] = useState(false);
   const [modelName, setModelName] = useState("模型未连接");
   const [modelDisplayName, setModelDisplayName] = useState("");
-  const [selectedClineMode, setSelectedClineMode] = useState<"plan" | "act">("act");
   const [stickerSize, setStickerSize] = useState<"small" | "standard" | "large">("standard");
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
-  const [todoStateByMode, setTodoStateByMode] = useState<Partial<Record<"work" | "daily" | "learn", TodoState>>>({});
+  const [todoStateBySession, setTodoStateBySession] = useState<TodoStateBySession>({});
   const activeModeRef = useRef(mode);
   const activeSessionIdsRef = useRef(activeSessionIds);
   const activeScopeRef = useRef(`mode:${mode}`);
@@ -396,10 +424,11 @@ export function ChatPage() {
   const localPreviewUrlsRef = useRef(new Set<string>());
   const demoTimers = useRef(new Set<number>());
   const activeRunsBySession = useRef<Record<string, { assistantId: string; runId?: string; mode: ConversationMode }>>({});
+  const runCheckpointBySessionRef = useRef<Record<string, (status: "running" | "waiting_user") => void>>({});
   // bootstrap 标志：只由 cold-start finally 写入；模式切换 effect 仅检查
-  const bootstrapCompletedRef = useRef(false);
-  // 长期持有的会话操作 ref：避免 IPC 回调捕获陈旧闭包
-  const openSessionByIdRef = useRef<(id: string) => Promise<boolean>>(async () => false);
+  const [bootstrapCompleted, setBootstrapCompleted] = useState(false);
+  const observedModeRef = useRef(mode);
+  // 长期持有的刷新操作 ref：供 IPC 回调读取当前实现
   const refreshSessionsRef = useRef<
     (targetMode: ConversationMode, selectCurrent: boolean) => Promise<void>
   >(async () => {});
@@ -410,44 +439,19 @@ export function ChatPage() {
   const scrollToBottomRef = useRef<() => void>(() => {});
 
   useEffect(() => {
-    const api = aguiApi();
-    if (!api) return;
-
-    // 初始同步：从 main 加载各模式 TODO，保证卡片常驻显示
-    const store = chatStore();
-    if (store?.getCurrentTodos) {
-      store
-        .getCurrentTodos()
-        .then((state) => {
-          if (state) {
-            setTodoStateByMode(state);
-          }
-        })
-        .catch(() => {});
-    }
-
-    return api.onEvent((event) => {
-      if (event.type === "CUSTOM" && event.name === "cyrene.todos") {
-        const incoming = (event.value as TodoState) ?? { todos: [] };
-        const mode = incoming.mode;
-        if (mode === "work" || mode === "daily" || mode === "learn") {
-          setTodoStateByMode((prev) => ({ ...prev, [mode]: incoming }));
-        }
-      }
-    });
-  }, []);
-
-  useEffect(() => {
     const settings = settingsApprovalApi();
     if (!settings) return;
     return settings.onPermissionApprovalRequest((request) => {
-      setInteractionBusy(false);
-      setComposerInteraction(permissionInteraction(request));
       const currentMode = activeModeRef.current;
       const currentSessionId = activeSessionIdsRef.current[currentMode];
-      const activeRun = currentSessionId ? activeRunsBySessionRef.current[currentSessionId] : undefined;
+      const ownerSessionId = findSessionIdForRun(activeRunsBySession.current, request.runId)
+        ?? currentSessionId;
+      if (!ownerSessionId) return;
+      setInteractionForSession(ownerSessionId, permissionInteraction(request));
+      const activeRun = activeRunsBySession.current[ownerSessionId];
       if (activeRun) {
-        updateMessage(currentMode, activeRun.assistantId, { runStage: { kind: "waiting_permission" } });
+        updateMessage(ownerSessionId, activeRun.assistantId, { runStage: { kind: "waiting_permission" } });
+        runCheckpointBySessionRef.current[ownerSessionId]?.("waiting_user");
       }
     });
   }, []);
@@ -473,8 +477,8 @@ export function ChatPage() {
   }, []);
   const modelBusyByModeRef = useRef<Partial<Record<ConversationMode, boolean>>>({});
   const lastTurnRevisionStartingRef = useRef(false);
-  const activeAguiOffRef = useRef<(() => void) | null>(null);
-  const activeRunsBySessionRef = useRef(activeRunsBySession);
+  const activeAguiOffsRef = useRef(new Set<() => void>());
+  const cancelRequestedSessionsRef = useRef(new Set<string>());
   const [pendingQueueBySession, setPendingQueueBySession] = useState<Record<string, { id: string; rawContent: string; visibleContent: string; attachments: ComposerAttachment[]; userSticker?: string }[]>>({});
   const pendingQueueBySessionRef = useRef(pendingQueueBySession);
   useEffect(() => {
@@ -487,14 +491,17 @@ export function ChatPage() {
     messageId: string;
   } | null>(null);
 
-  const taskLabel = ["work", "daily", "code"].includes(mode) ? "新建任务" : "新建对话";
   const activeSessionId = activeSessionIds[mode];
   const scopeKey = activeSessionId ?? `mode:${mode}`;
   const draft = drafts[scopeKey] ?? "";
-  const messages = messagesByMode[mode] ?? [];
+  const messages = activeSessionId ? (messagesBySession[activeSessionId] ?? []) : [];
+  const activeInteraction = sessionInteraction(interactionsBySession, activeSessionId);
+  const composerInteraction = activeInteraction?.interaction;
+  const interactionBusy = activeInteraction?.busy ?? false;
   const hasMessages = messages.length > 0;
   const attachments = attachmentsByScope[scopeKey] ?? [];
   const sessions = sessionsByMode[mode] ?? [];
+  const [activeSession, setActiveSession] = useState<ChatSession | null>(null);
 
   activeModeRef.current = mode;
   activeSessionIdsRef.current = activeSessionIds;
@@ -515,8 +522,8 @@ export function ChatPage() {
       window.clearInterval(timer);
     }
     demoTimers.current.clear();
-    activeAguiOffRef.current?.();
-    activeAguiOffRef.current = null;
+    for (const off of activeAguiOffsRef.current) off();
+    activeAguiOffsRef.current.clear();
     activeEarlyTtsRef.current?.queue.cancel();
     activeEarlyTtsRef.current = null;
     for (const url of localPreviewUrlsRef.current) URL.revokeObjectURL(url);
@@ -549,11 +556,13 @@ export function ChatPage() {
 
   // 模式 effect：bootstrap 完成后才刷新；bootstrap 自身由下方合并 effect 接管
   useEffect(() => {
-    if (!bootstrapCompletedRef.current) return;
+    const previousMode = observedModeRef.current;
+    observedModeRef.current = mode;
+    if (!bootstrapCompleted || previousMode === mode) return;
     void refreshSessionsRef.current(mode, true).catch((error) => {
       console.error("[ChatPage] Failed to refresh sessions after mode change:", error);
     });
-  }, [mode]);
+  }, [bootstrapCompleted, mode]);
 
   // 合并 effect：注册 IPC → cold-start → finally 置 bootstrap + 通知 ready
   useEffect(() => {
@@ -581,31 +590,21 @@ export function ChatPage() {
         });
     });
 
-    void (async () => {
-      try {
-        const urlSessionId = new URLSearchParams(window.location.search).get("sessionId");
-        if (urlSessionId) {
-          const opened = await openSessionById(urlSessionId);
-          if (!opened) {
-            await refreshSessionsRef.current(activeModeRef.current, true);
-          }
-        } else {
-          await refreshSessionsRef.current(activeModeRef.current, true);
-        }
-      } catch (error) {
-        console.error("[ChatPage] Failed to bootstrap React session:", error);
-        try {
-          await refreshSessionsRef.current(activeModeRef.current, true);
-        } catch (fallbackError) {
-          console.error("[ChatPage] Bootstrap fallback failed:", fallbackError);
-        }
-      } finally {
+    void bootstrapReactSession({
+      urlSessionId: new URLSearchParams(window.location.search).get("sessionId"),
+      currentMode: activeModeRef.current as ReactSessionMode,
+      openSession: openSessionById,
+      refreshSessions: async (targetMode, selectCurrent) => {
+        await refreshSessions(targetMode as ConversationMode, selectCurrent);
+      },
+    }).catch((error) => {
+      console.error("[ChatPage] Failed to bootstrap React session:", error);
+    }).finally(() => {
         // cold-start 全程完成才标记 bootstrap 完成；只有该标志置位后
         // mode 切换 effect 才会触发 refreshSessions
-        bootstrapCompletedRef.current = true;
+        setBootstrapCompleted(true);
         if (!disposed) store.notifyReactReady?.();
-      }
-    })();
+    });
 
     return () => {
       disposed = true;
@@ -622,13 +621,26 @@ export function ChatPage() {
     }
   }, [activeSessionId, mode]);
 
-  function updateMessage(targetMode: ConversationMode, id: string, patch: Partial<ChatMessageItem>) {
-    setMessagesByMode((current) => ({
-      ...current,
-      [targetMode]: (current[targetMode] ?? []).map((item) => (
-        item.id === id ? { ...item, ...patch } : item
-      )),
-    }));
+  function setInteractionForSession(sessionId: string, interaction: ComposerInteraction): void {
+    setInteractionsBySession((current) => setSessionInteraction(current, sessionId, interaction));
+  }
+
+  function clearInteractionForSession(sessionId: string): void {
+    setInteractionsBySession((current) => clearSessionInteraction(current, sessionId));
+  }
+
+  function setInteractionBusyForSession(sessionId: string, busy: boolean): void {
+    setInteractionsBySession((current) => setSessionInteractionBusy(current, sessionId, busy));
+  }
+
+  function updateMessage(targetScope: ConversationMode | string, id: string, patch: Partial<ChatMessageItem>) {
+    setMessagesBySession((current) => {
+      const ownerSessionId = isConversationMode(targetScope)
+        ? Object.entries(current).find(([, items]) => items.some((item) => item.id === id))?.[0]
+          ?? activeSessionIdsRef.current[targetScope]
+        : targetScope;
+      return ownerSessionId ? patchSessionMessage(current, ownerSessionId, id, patch) : current;
+    });
   }
 
   function handleTtsCacheKey(
@@ -638,7 +650,7 @@ export function ChatPage() {
     cacheKey: string,
     converterVersion: string,
   ) {
-    updateMessage(targetMode, messageId, { ttsCacheKey: cacheKey, ttsCacheVersion: converterVersion });
+    updateMessage(sessionId, messageId, { ttsCacheKey: cacheKey, ttsCacheVersion: converterVersion });
     void chatStore()?.setMessageTtsCacheKey(sessionId, messageId, cacheKey, converterVersion);
   }
 
@@ -686,44 +698,33 @@ export function ChatPage() {
     const generation = ++sessionSelectionGeneration.current;
     const session = await store.get(sessionId);
     if (!session || generation !== sessionSelectionGeneration.current) return;
+    setActiveSession(session);
     setActiveSessionIds((current) => {
       const next = { ...current, [targetMode]: sessionId };
       activeSessionIdsRef.current = next;
       return next;
     });
     const uiMessages = toUiMessages(session);
-    if (targetMode === "code") {
-      setSelectedClineMode(session.codeSession?.clineMode ?? "act");
-      const api = codeRunApi();
-      if (api) {
-        try {
-          const restored = await restoreCodeRunViewModel(createCodeRunViewModel(), api, sessionId);
-          if (generation !== sessionSelectionGeneration.current) return;
-          if (restored.run || restored.card) {
-            const assistantIndex = uiMessages.findLastIndex((message) => message.role === "assistant");
-            if (assistantIndex >= 0) uiMessages[assistantIndex] = { ...uiMessages[assistantIndex], codeRun: restored };
-            else uiMessages.push({
-              id: `code-run-${restored.run?.runId ?? sessionId}`,
-              role: "assistant",
-              content: "",
-              responseStarted: false,
-              codeRun: restored,
-            });
-          }
-          const verificationInteraction = normalizeCodeVerificationInteraction(restored.approval);
-          if (verificationInteraction) {
-            setComposerInteraction(verificationInteraction);
-          } else {
-            const pendingAsks = await api.getPendingAsks(sessionId);
-            const askInteraction = normalizeCodeAskInteraction(pendingAsks[0]);
-            setComposerInteraction(askInteraction);
-          }
-        } catch (error) {
-          console.warn("[Cyrene React] 恢复 Code 运行状态失败:", error);
-        }
-      }
+    const latestRunSnapshot = session.messages.findLast((message) => message.runSnapshot)?.runSnapshot;
+    if (latestRunSnapshot?.todos) {
+      setTodoStateBySession((current) => {
+        if (hasActiveRunForSession(activeRunsBySession.current, sessionId) && current[sessionId]) return current;
+        return {
+          ...current,
+          [sessionId]: {
+            runId: latestRunSnapshot.runId,
+            todos: latestRunSnapshot.todos ?? [],
+            updatedAt: latestRunSnapshot.updatedAt,
+          },
+        };
+      });
     }
-    setMessagesByMode((current) => ({ ...current, [targetMode]: uiMessages }));
+    setMessagesBySession((current) => hydrateSessionMessages(
+      current,
+      sessionId,
+      uiMessages,
+      hasActiveRunForSession(activeRunsBySession.current, sessionId),
+    ));
     setWorkspaceNames((current) => ({
       ...current,
       [targetMode]: session.workspaceBinding?.displayName,
@@ -736,7 +737,18 @@ export function ChatPage() {
    * 不触发页面重新加载。
    */
   async function openSessionById(sessionId: string): Promise<boolean> {
-    const opened = await openSessionByIdRef.current(sessionId);
+    const opened = await openSessionByIdWithDeps({
+      sessionId,
+      getSession: async (id) => {
+        const store = chatStore();
+        if (!store) return null;
+        const result = await store.get(id);
+        return (result ?? null) as { mode?: string } | null;
+      },
+      selectSession: async (id, targetMode) => {
+        await selectSession(id, targetMode as ConversationMode);
+      },
+    });
     if (opened && typeof window !== "undefined") {
       try {
         const url = new URL(window.location.href);
@@ -752,29 +764,6 @@ export function ChatPage() {
     }
     return opened;
   }
-
-  // 同步 openSessionByIdRef：每次 chatStore / selectSession 变更时重新打包
-  useEffect(() => {
-    openSessionByIdRef.current = (sessionId: string) =>
-      openSessionByIdWithDeps({
-        sessionId,
-        getSession: async (id) => {
-          const store = chatStore();
-          if (!store) return null;
-          const result = await store.get(id);
-          return (result ?? null) as { mode?: string } | null;
-        },
-        selectSession: async (id, mode) => {
-          // ReactSessionMode ⊂ ConversationMode，可直接传
-          await selectSession(id, mode as ConversationMode);
-        },
-      });
-  }, [chatStore, selectSession]);
-
-  // 同步 refreshSessionsRef
-  useEffect(() => {
-    refreshSessionsRef.current = refreshSessions;
-  }, [refreshSessions]);
 
   async function refreshSessions(targetMode: ConversationMode, selectCurrent: boolean) {
     const store = chatStore();
@@ -794,10 +783,12 @@ export function ChatPage() {
       activeSessionIdsRef.current = next;
       return next;
     });
-    setMessagesByMode((current) => ({ ...current, [targetMode]: [] }));
     setWorkspaceNames((current) => ({ ...current, [targetMode]: undefined }));
     if (targetMode === activeModeRef.current) void store.setActiveSession(null);
   }
+
+  // 渲染期间同步安装真实实现，保证 mount effect 不会先观察到默认 no-op。
+  refreshSessionsRef.current = refreshSessions;
 
   function streamDemoResponse(targetMode: ConversationMode, id: string, response: string, sessionId?: string) {
     const earlyTtsQueue = sessionId ? createEarlyTtsQueue(targetMode, sessionId, id) : null;
@@ -843,7 +834,7 @@ export function ChatPage() {
   }
 
   async function runModel(input: {
-    targetMode: "chat" | "work" | "daily" | "code";
+    targetMode: "chat" | "work" | "code";
     sessionId: string;
     userMessageId: string;
     assistantId: string;
@@ -854,7 +845,7 @@ export function ChatPage() {
     const store = chatStore();
     if (!api || !store) {
       const visibleError = "模型请求失败：AG-UI 模型服务尚未就绪";
-      updateMessage(input.targetMode, input.assistantId, {
+      updateMessage(input.sessionId, input.assistantId, {
         content: visibleError,
         loading: false,
         waitingForFirstEvent: false,
@@ -875,37 +866,122 @@ export function ChatPage() {
       ...activeRunsBySession.current,
       [input.sessionId]: { assistantId: input.assistantId, mode: input.targetMode },
     };
-    activeRunsBySessionRef.current = activeRunsBySession;
     setModelBusyByMode((current) => ({ ...current, [input.targetMode]: true }));
     const earlyTtsQueue = createEarlyTtsQueue(input.targetMode, input.sessionId, input.assistantId);
     let streamContent = "";
+    // Task 3 / C2：RUN_FINISHED.result.status，用于区分 success / cancelled / timeout / runtime_error
+    let terminalStatus: string | undefined;
     let reasoningContent = "";
     let reasoningBlocks: ReasoningBlock[] = [];
+    let processMessages: ProcessMessageRecord[] = [];
+    let agentRounds: AgentRoundRecord[] = [];
+    let taskDelegations: TaskDelegationDisplayRecord[] = [];
+    let activeRoundId: string | undefined;
+    let processMessageSequence = 0;
+    let finalMessageCompleted = false;
+    let revealCancelled = false;
+    let revealChain: Promise<void> = Promise.resolve();
     let sticker: string | null = null;
     let toolExecutions: ToolExecutionRecord[] = [];
     let runStarted = false;
     let runActivity: RunActivityRecord | undefined;
-    let codeRunViewModel: CodeRunViewModel = createCodeRunViewModel();
+    let currentTodos: TodoItem[] = [];
+    let persistedFinalContent = "";
+    const assistantAt = Date.now();
+    let checkpointTimer: number | undefined;
+    let checkpointChain = Promise.resolve<ChatSession | null>(null);
     const activeReasoningStarts = new Map<string, number>();
     let currentReasoningId: string | undefined;
     let resolveTerminal!: (error?: Error) => void;
     const terminal = new Promise<Error | undefined>((resolve) => {
       resolveTerminal = resolve;
     });
+    const buildCheckpoint = (
+      status: "running" | "waiting_user" | "terminal",
+    ): ChatMessage => ({
+      id: input.assistantId,
+      role: "model",
+      content: status === "terminal" ? persistedFinalContent : "",
+      reasoning: reasoningContent || undefined,
+      reasoningBlocks,
+      processMessages,
+      agentRounds,
+      taskDelegations,
+      runActivity,
+      at: assistantAt,
+      sticker,
+      toolExecutions,
+      runSnapshot: {
+        runId: activeRunsBySession.current[input.sessionId]?.runId,
+        status,
+        terminalStatus: status === "terminal"
+          ? (terminalStatus as "success" | "cancelled" | "timeout" | "runtime_error" | undefined)
+          : undefined,
+        todos: currentTodos,
+        updatedAt: Date.now(),
+      },
+    });
+    const writeCheckpoint = (
+      status: "running" | "waiting_user" | "terminal",
+    ): Promise<ChatSession | null> => {
+      const snapshot = buildCheckpoint(status);
+      checkpointChain = checkpointChain
+        .catch(() => null)
+        .then(() => store.upsert(input.sessionId, snapshot));
+      return checkpointChain;
+    };
+    const checkpointRun = (
+      status: "running" | "waiting_user" | "terminal",
+      immediate = false,
+    ): Promise<ChatSession | null> => {
+      if (checkpointTimer !== undefined) {
+        window.clearTimeout(checkpointTimer);
+        checkpointTimer = undefined;
+      }
+      if (immediate) return writeCheckpoint(status);
+      checkpointTimer = window.setTimeout(() => {
+        checkpointTimer = undefined;
+        void writeCheckpoint(status);
+      }, 350);
+      return checkpointChain;
+    };
+    runCheckpointBySessionRef.current = {
+      ...runCheckpointBySessionRef.current,
+      [input.sessionId]: (status) => {
+        void checkpointRun(status, true);
+      },
+    };
+    await checkpointRun("running", true);
     const updateRunTool = (toolId: string, patch: Partial<ToolExecutionRecord>) => {
       const index = toolExecutions.findIndex((tool) => tool.id === toolId);
       toolExecutions = index === -1
-        ? [...toolExecutions, { id: toolId, name: patch.name ?? "工具调用", status: patch.status ?? "running", result: patch.result }]
+        ? [...toolExecutions, {
+            id: toolId,
+            name: patch.name ?? "工具调用",
+            status: patch.status ?? "running",
+            result: patch.result,
+            argsText: patch.argsText,
+            roundId: patch.roundId ?? activeRoundId,
+          }]
         : toolExecutions.map((tool, toolIndex) => toolIndex === index ? { ...tool, ...patch } : tool);
-      updateMessage(input.targetMode, input.assistantId, { toolExecutions });
+      updateMessage(input.sessionId, input.assistantId, { toolExecutions });
+    };
+    const enqueuePublicTextReveal = (content: string, publish: (chunk: string) => void) => {
+      if (input.targetMode === "chat") {
+        publish(content);
+        return;
+      }
+      revealChain = revealChain.then(async () => {
+        for (const chunk of splitTextForReveal(content)) {
+          if (revealCancelled) break;
+          publish(chunk);
+          await new Promise<void>((resolve) => window.setTimeout(resolve, 14));
+        }
+      });
     };
     const publishRunActivity = () => {
       if (!runActivity) return;
-      updateMessage(input.targetMode, input.assistantId, { runActivity: { ...runActivity } });
-    };
-    const publishCodeRun = () => {
-      if (input.targetMode !== "code") return;
-      updateMessage(input.targetMode, input.assistantId, { codeRun: { ...codeRunViewModel } });
+      updateMessage(input.sessionId, input.assistantId, { runActivity: { ...runActivity } });
     };
     const updateActiveReasoningStart = () => {
       const starts = [...activeReasoningStarts.values()];
@@ -915,7 +991,7 @@ export function ChatPage() {
         activeReasoningStartedAt: starts.length ? Math.min(...starts) : undefined,
       };
     };
-    const completeRunActivity = () => {
+    const completeRunActivity = (keepExpanded = false) => {
       if (!runActivity || runActivity.completedAt === undefined) {
         const completedAt = Date.now();
         for (const startedAt of activeReasoningStarts.values()) {
@@ -929,53 +1005,70 @@ export function ChatPage() {
           ...(runActivity ?? { startedAt: completedAt, reasoningMs: 0 }),
           completedAt,
           activeReasoningStartedAt: undefined,
+          keepExpanded,
         };
         publishRunActivity();
       }
     };
     const markFirstResponse = () => {
-      updateMessage(input.targetMode, input.assistantId, { waitingForFirstEvent: false });
+      updateMessage(input.sessionId, input.assistantId, { waitingForFirstEvent: false });
     };
     const updateReasoningBlock = (id: string, patch: Partial<ReasoningBlock>) => {
       const index = reasoningBlocks.findIndex((block) => block.id === id);
       reasoningBlocks = index < 0
-        ? [...reasoningBlocks, { id, content: "", afterToolCount: toolExecutions.length, ...patch }]
+        ? [...reasoningBlocks, { id, content: "", afterToolCount: toolExecutions.length, roundId: activeRoundId, ...patch }]
         : reasoningBlocks.map((block, blockIndex) => blockIndex === index ? { ...block, ...patch } : block);
       reasoningContent = reasoningBlocks.map((block) => block.content).filter(Boolean).join("\n\n");
-      updateMessage(input.targetMode, input.assistantId, { reasoning: reasoningContent || undefined, reasoningBlocks });
+      updateMessage(input.sessionId, input.assistantId, { reasoning: reasoningContent || undefined, reasoningBlocks });
+      void checkpointRun("running");
     };
 
-    const off = api.onEvent((event) => {
-      if (event.type === "RUN_STARTED") {
+    const handleEvent = (event: AguiEvent) => {
+      if (event.type === "CUSTOM" && event.name === "cyrene.round") {
+        const value = event.value as { action?: unknown; roundId?: unknown } | null | undefined;
+        if ((value?.action === "start" || value?.action === "end") && typeof value.roundId === "string") {
+          const next = applyAgentRoundBoundary(
+            { rounds: agentRounds, activeRoundId },
+            value.action,
+            value.roundId,
+          );
+          agentRounds = next.rounds;
+          activeRoundId = next.activeRoundId;
+          updateMessage(input.sessionId, input.assistantId, { agentRounds });
+          void checkpointRun("running", true);
+        }
+      } else if (event.type === "RUN_STARTED") {
         runStarted = true;
         runActivity = { startedAt: Date.now(), reasoningMs: 0 };
         setIsCompressingContext(false);
         if (event.runId) {
+          // Task 2 / C1：RUN_STARTED.runId 必须与 ack.runId 一致（由 bridge 注入 options.runId 保证）。
+          // 不一致时只 warn 不重写，避免渲染端拿到错误 runId 后无法 cancel。
           const existing = activeRunsBySession.current[input.sessionId];
-          activeRunsBySession.current = {
-            ...activeRunsBySession.current,
-            [input.sessionId]: { ...(existing ?? { assistantId: input.assistantId, mode: input.targetMode }), runId: event.runId },
-          };
-          activeRunsBySessionRef.current = activeRunsBySession;
+          if (existing?.runId && existing.runId !== event.runId) {
+            console.warn(
+              `[ChatPage] RUN_STARTED.runId (${event.runId}) 与 ack.runId (${existing.runId}) 不一致，` +
+              `请检查 bridge 是否正确注入 options.runId。保留 ack.runId 作为权威值。`,
+            );
+          } else {
+            activeRunsBySession.current = {
+              ...activeRunsBySession.current,
+              [input.sessionId]: { ...(existing ?? { assistantId: input.assistantId, mode: input.targetMode }), runId: event.runId },
+            };
+          }
         }
-        if (input.targetMode === "code" && event.runId) {
-          codeRunViewModel = {
-            ...codeRunViewModel,
-            run: {
-              runId: event.runId,
-              chatSessionId: input.sessionId,
-              clineSessionId: "",
-              status: "running",
-              startedAt: Date.now(),
-            },
-          };
-          publishCodeRun();
-        }
-        updateMessage(input.targetMode, input.assistantId, {
+        currentTodos = [];
+        setTodoStateBySession((current) => startSessionTodos(
+          current,
+          input.sessionId,
+          event.runId ?? activeRunsBySession.current[input.sessionId]?.runId,
+        ));
+        updateMessage(input.sessionId, input.assistantId, {
           waitingForFirstEvent: false,
           runActivity: { ...runActivity },
           runStage: { kind: "understanding" },
         });
+        void checkpointRun("running", true);
         return;
       }
       if (!runStarted) return;
@@ -998,7 +1091,7 @@ export function ChatPage() {
         updateActiveReasoningStart();
         publishRunActivity();
         updateReasoningBlock(reasoningId, { streaming: true });
-        updateMessage(input.targetMode, input.assistantId, {
+        updateMessage(input.sessionId, input.assistantId, {
           loading: false,
           reasoningStreaming: true,
           runStage: { kind: "responding" },
@@ -1008,7 +1101,7 @@ export function ChatPage() {
         currentReasoningId = reasoningId;
         const current = reasoningBlocks.find((block) => block.id === reasoningId)?.content ?? "";
         updateReasoningBlock(reasoningId, { content: current + event.delta, streaming: true });
-        updateMessage(input.targetMode, input.assistantId, {
+        updateMessage(input.sessionId, input.assistantId, {
           reasoning: reasoningContent,
           loading: false,
           reasoningStreaming: true,
@@ -1029,27 +1122,32 @@ export function ChatPage() {
           updateReasoningBlock(reasoningId, { streaming: false });
         }
         currentReasoningId = undefined;
-        updateMessage(input.targetMode, input.assistantId, { reasoningStreaming: false, loading: false });
+        updateMessage(input.sessionId, input.assistantId, { reasoningStreaming: false, loading: false });
         } else if (event.type === "STEP_STARTED") {
           const stage = stageForStep(event.stepName);
-          if (stage) updateMessage(input.targetMode, input.assistantId, { runStage: stage });
+          if (stage) updateMessage(input.sessionId, input.assistantId, { runStage: stage });
         } else if (event.type === "TOOL_CALL_START" && event.toolCallId) {
           updateRunTool(event.toolCallId, {
             name: event.toolCallName ?? "工具调用",
             status: "running",
+            roundId: activeRoundId,
           });
-          updateMessage(input.targetMode, input.assistantId, {
+          updateMessage(input.sessionId, input.assistantId, {
             runStage: { kind: "executing", detail: event.toolCallName ?? "工具调用" },
           });
-        } else if (event.type === "TOOL_CALL_RESULT" && event.toolCallId) {
+      } else if (event.type === "TOOL_CALL_ARGS" && event.toolCallId && event.delta) {
+        const currentArgs = toolExecutions.find((tool) => tool.id === event.toolCallId)?.argsText ?? "";
+        updateRunTool(event.toolCallId, { argsText: currentArgs + event.delta, roundId: activeRoundId });
+      } else if (event.type === "TOOL_CALL_RESULT" && event.toolCallId) {
         updateRunTool(event.toolCallId, {
           status: event.status === "failed" ? "error" : "success",
           result: (event.content ?? "").slice(0, 4000),
         });
+        void checkpointRun("running", true);
       } else if (event.type === "TOOL_CALL_END" && event.toolCallId) {
         updateRunTool(event.toolCallId, {});
       } else if (event.type === "TEXT_MESSAGE_START") {
-        updateMessage(input.targetMode, input.assistantId, {
+        updateMessage(input.sessionId, input.assistantId, {
           loading: false,
           reasoningStreaming: false,
           responseStarted: true,
@@ -1057,90 +1155,132 @@ export function ChatPage() {
           runStage: { kind: "responding" },
         });
       } else if (event.type === "TEXT_MESSAGE_CONTENT" && event.delta) {
-        streamContent += event.delta;
-        earlyTtsQueue.append(event.delta);
-        updateMessage(input.targetMode, input.assistantId, {
-          content: streamContent,
-          loading: false,
-          streaming: true,
-          responseStarted: true,
+        enqueuePublicTextReveal(event.delta, (chunk) => {
+          streamContent += chunk;
+          earlyTtsQueue.append(chunk);
+          updateMessage(input.sessionId, input.assistantId, {
+            content: streamContent,
+            loading: false,
+            streaming: true,
+            responseStarted: true,
+          });
+          void checkpointRun("running");
         });
       } else if (event.type === "TEXT_MESSAGE_END") {
-        updateMessage(input.targetMode, input.assistantId, { streaming: false });
+        revealChain = revealChain.then(() => {
+          finalMessageCompleted = true;
+          updateMessage(input.sessionId, input.assistantId, { streaming: false });
+        });
+      } else if (event.type === "CUSTOM" && event.name === "cyrene.process_text") {
+        const content = (event.value as { content?: unknown } | null | undefined)?.content;
+        if (typeof content === "string" && content.trim()) {
+          const processId = `process-${processMessageSequence++}`;
+          processMessages = [...processMessages, createRoundProcessMessage(
+            processId,
+            "",
+            toolExecutions.length,
+            activeRoundId,
+          )];
+          updateMessage(input.sessionId, input.assistantId, { processMessages });
+          enqueuePublicTextReveal(content, (chunk) => {
+            processMessages = processMessages.map((message) => message.id === processId
+              ? { ...message, content: message.content + chunk }
+              : message);
+            updateMessage(input.sessionId, input.assistantId, { processMessages });
+            void checkpointRun("running");
+          });
+        }
+      } else if (event.type === "CUSTOM" && event.name === "cyrene.task") {
+        const delegation = normalizeTaskDelegationEvent(event.value);
+        if (delegation) {
+          taskDelegations = applyTaskDelegationEvent(taskDelegations, delegation, activeRoundId);
+          updateMessage(input.sessionId, input.assistantId, {
+            taskDelegations,
+            runStage: { kind: "executing", detail: delegation.nickname },
+          });
+          void checkpointRun("running", true);
+        }
       } else if (event.type === "CUSTOM" && event.name === "cyrene.choice") {
         const interaction = normalizeChoiceInteraction(event.value);
         if (interaction) {
-          setInteractionBusy(false);
-          setComposerInteraction(interaction);
-          updateMessage(input.targetMode, input.assistantId, { runStage: { kind: "waiting_user" } });
+          setInteractionForSession(input.sessionId, interaction);
+          updateMessage(input.sessionId, input.assistantId, { runStage: { kind: "waiting_user" } });
+          void checkpointRun("waiting_user", true);
         }
       } else if (event.type === "CUSTOM" && event.name === "cyrene.choice.dismiss") {
-        setComposerInteraction((current) => {
-          if (current?.kind !== "ask" || !shouldDismissAsk(current, event.value)) return current;
-          return undefined;
+        setInteractionsBySession((current) => {
+          const interaction = sessionInteraction(current, input.sessionId)?.interaction;
+          if (interaction?.kind !== "ask" || !shouldDismissAsk(interaction, event.value)) return current;
+          return clearSessionInteraction(current, input.sessionId);
         });
+        void checkpointRun("running", true);
       } else if (event.type === "CUSTOM" && event.name === "cyrene.taskPlan") {
         const taskPlan = normalizeTaskPlanPresentation(event.value);
         if (taskPlan) {
-          updateMessage(input.targetMode, input.assistantId, {
+          updateMessage(input.sessionId, input.assistantId, {
             taskPlan,
             runStage: { kind: "executing" },
           });
+        }
+      } else if (event.type === "CUSTOM" && event.name === "cyrene.todo") {
+        // Harness 的 Todo 复用右侧现有 TodoPanel，不再复制成消息内 TaskPlanCard。
+        const items = (event.value as { items?: Array<{ id: string; content: string; status: string }> } | null | undefined)?.items;
+        if (Array.isArray(items)) {
+          const ownerRunId = event.runId ?? activeRunsBySession.current[input.sessionId]?.runId;
+          const normalized = mergeHarnessTodosForSession({
+            [input.sessionId]: {
+              runId: ownerRunId,
+              todos: currentTodos,
+              updatedAt: Date.now(),
+            },
+          }, input.sessionId, ownerRunId, items);
+          currentTodos = normalized[input.sessionId]?.todos ?? currentTodos;
+          setTodoStateBySession((current) => mergeHarnessTodosForSession(
+            current,
+            input.sessionId,
+            ownerRunId,
+            items,
+          ));
+          void checkpointRun("running", true);
         }
       } else if (event.type === "CUSTOM" && event.name === "cyrene.compressingContext") {
         setIsCompressingContext(true);
       } else if (event.type === "CUSTOM" && event.name === "cyrene.sticker") {
         sticker = typeof event.value === "string" ? event.value : null;
-        updateMessage(input.targetMode, input.assistantId, { sticker });
+        updateMessage(input.sessionId, input.assistantId, { sticker });
       } else if (event.type === "CUSTOM" && event.name === "cyrene.weather") {
         const weather = normalizeWeatherData(event.value);
         if (weather) {
-          updateMessage(input.targetMode, input.assistantId, { weather });
-        }
-      } else if (event.type === "CUSTOM" && event.name === "code_ask") {
-        const interaction = normalizeCodeAskInteraction(event.value);
-        if (interaction) {
-          setInteractionBusy(false);
-          setComposerInteraction(interaction);
-          updateMessage(input.targetMode, input.assistantId, { runStage: { kind: "waiting_user" } });
-        }
-      } else if (event.type === "CUSTOM" && (
-        event.name === "code_verification_approval"
-        || event.name === "code_verification_card"
-      )) {
-        const next = applyCodeRunEvent(codeRunViewModel, event);
-        if (next !== codeRunViewModel) {
-          codeRunViewModel = next;
-          publishCodeRun();
-        }
-        if (event.name === "code_verification_approval") {
-          const interaction = normalizeCodeVerificationInteraction(codeRunViewModel.approval);
-          if (interaction) {
-            setInteractionBusy(false);
-            setComposerInteraction(interaction);
-            updateMessage(input.targetMode, input.assistantId, { runStage: { kind: "waiting_permission" } });
-          } else {
-            setComposerInteraction((current) => (
-              current?.kind === "permission"
-              && current.source === "code_verification"
-              && current.id === codeRunViewModel.approval?.approvalId
-                ? undefined
-                : current
-            ));
-          }
+          updateMessage(input.sessionId, input.assistantId, { weather });
         }
       } else if (event.type === "RUN_FINISHED") {
-        completeRunActivity();
-        updateMessage(input.targetMode, input.assistantId, { runStage: { kind: "completed" } });
+        // Task 3 / C2：读取 result.status 区分终态（success / cancelled / timeout / runtime_error）
+        const result = (event as { result?: { status?: string } }).result;
+        terminalStatus = result?.status;
+        if (terminalStatus !== "success") revealCancelled = true;
+        const stage = resolveRunFinishedStage(result);
+        updateMessage(input.sessionId, input.assistantId, { runStage: stage });
+        const activeRunId = activeRunsBySession.current[input.sessionId]?.runId;
+        if (shouldClearComposerInteractionForTerminal(activeRunId, event.runId)) {
+          clearInteractionForSession(input.sessionId);
+        }
         resolveTerminal();
       } else if (event.type === "RUN_ERROR") {
-        completeRunActivity();
-        updateMessage(input.targetMode, input.assistantId, { runStage: { kind: "failed" } });
+        revealCancelled = true;
+        completeRunActivity(true);
+        updateMessage(input.sessionId, input.assistantId, { runStage: { kind: "failed" } });
+        const activeRunId = activeRunsBySession.current[input.sessionId]?.runId;
+        if (shouldClearComposerInteractionForTerminal(activeRunId, event.runId)) {
+          clearInteractionForSession(input.sessionId);
+        }
         resolveTerminal(new Error(event.message ?? event.error ?? event.content ?? "模型请求失败"));
       }
+    };
+    const eventGate = new RunEventGate<AguiEvent>();
+    const off = api.onEvent((event) => {
+      for (const accepted of eventGate.accept(event)) handleEvent(accepted);
     });
-    activeAguiOffRef.current?.();
-    activeAguiOffRef.current = off;
+    activeAguiOffsRef.current.add(off);
 
     try {
       const general = await window.chat?.getGeneralSettings?.();
@@ -1154,6 +1294,7 @@ export function ChatPage() {
         assistantTurnId: input.assistantId,
         styleId: general?.currentStyleId,
         sessionId: input.sessionId,
+        recoveryContext: buildTodoRecoveryContext(input.session.messages, input.assistantId),
         imageAttachments: input.attachments
           .filter((attachment) => attachment.kind === "image" && attachment.filePath)
           .map((attachment) => ({
@@ -1163,67 +1304,90 @@ export function ChatPage() {
           })),
       });
       if (!ack.success) throw new Error(ack.error ?? "模型请求发起失败");
+      // Task 2 / C1：立即把 ack.runId 写入 activeRunsBySession，
+      // 让 cancel 在 RUN_STARTED 事件到达前也能找到正确的 runId。
+      // RUN_STARTED.runId 必须与 ack.runId 一致（由 bridge 注入 options.runId 保证）。
+      if (ack.runId) {
+        const existing = activeRunsBySession.current[input.sessionId];
+        activeRunsBySession.current = {
+          ...activeRunsBySession.current,
+          [input.sessionId]: {
+            ...(existing ?? { assistantId: input.assistantId, mode: input.targetMode }),
+            runId: ack.runId,
+          },
+        };
+        for (const accepted of eventGate.bind(ack.runId)) handleEvent(accepted);
+        await checkpointRun("running", true);
+        if (cancelRequestedSessionsRef.current.delete(input.sessionId)) {
+          await api.cancel(ack.runId);
+        }
+      }
       const terminalError = await terminal;
       if (terminalError) throw terminalError;
+      await revealChain;
 
-      const finalContent = streamContent.trim() ? streamContent : "任务已完成。";
-      updateMessage(input.targetMode, input.assistantId, {
+      // 只有 success + 完整 TEXT_MESSAGE_END + 非空正文才提交正式回答。
+      // cancelled / timeout / runtime_error 与半截流都只保留在展开的过程区。
+      const formalAnswerCommitted = isFormalAnswerCommitted(streamContent, terminalStatus, finalMessageCompleted);
+      completeRunActivity(!formalAnswerCommitted);
+      const finalContent = formalAnswerCommitted ? resolveTerminalContent(streamContent, terminalStatus) : "";
+      persistedFinalContent = finalContent;
+      updateMessage(input.sessionId, input.assistantId, {
         content: finalContent,
         loading: false,
         waitingForFirstEvent: false,
         streaming: false,
         reasoning: reasoningContent || undefined,
         reasoningBlocks,
+        processMessages,
+        agentRounds,
         reasoningStreaming: false,
         runActivity,
-        responseStarted: true,
+        responseStarted: formalAnswerCommitted,
         sticker,
         toolExecutions,
       });
-      const savedAssistant = await store.append(input.sessionId, {
-        id: input.assistantId,
-        role: "model",
-        content: finalContent,
-        reasoning: reasoningContent || undefined,
-        reasoningBlocks,
-        runActivity,
-        at: Date.now(),
-        sticker,
-        toolExecutions,
-      });
-      if (savedAssistant) {
+      const savedAssistant = await checkpointRun("terminal", true);
+      if (savedAssistant && formalAnswerCommitted) {
         finishEarlyTtsQueue(earlyTtsQueue, finalContent);
       } else earlyTtsQueue.cancel();
     } catch (error) {
       earlyTtsQueue.cancel();
-      completeRunActivity();
+      terminalStatus = terminalStatus ?? "runtime_error";
+      completeRunActivity(true);
       const errorMessage = error instanceof Error ? error.message : String(error);
       const visibleError = `模型请求失败：${errorMessage}`;
-      updateMessage(input.targetMode, input.assistantId, {
-        content: visibleError,
+      processMessages = [...processMessages, createRoundProcessMessage(
+        `process-${processMessageSequence++}`,
+        visibleError,
+        toolExecutions.length,
+        activeRoundId,
+      )];
+      updateMessage(input.sessionId, input.assistantId, {
+        content: "",
+        processMessages,
         loading: false,
         waitingForFirstEvent: false,
         streaming: false,
         reasoningStreaming: false,
         runActivity,
-        responseStarted: true,
+        responseStarted: false,
       });
-      await store.append(input.sessionId, {
-        id: input.assistantId,
-        role: "model",
-        content: visibleError,
-        runActivity,
-        at: Date.now(),
-      });
+      persistedFinalContent = "";
+      await checkpointRun("terminal", true);
     } finally {
+      if (checkpointTimer !== undefined) window.clearTimeout(checkpointTimer);
+      const checkpointCallbacks = { ...runCheckpointBySessionRef.current };
+      delete checkpointCallbacks[input.sessionId];
+      runCheckpointBySessionRef.current = checkpointCallbacks;
       off();
-      if (activeAguiOffRef.current === off) activeAguiOffRef.current = null;
+      activeAguiOffsRef.current.delete(off);
       const currentActive = activeRunsBySession.current[input.sessionId];
+      cancelRequestedSessionsRef.current.delete(input.sessionId);
       if (currentActive?.assistantId === input.assistantId) {
         const nextActive = { ...activeRunsBySession.current };
         delete nextActive[input.sessionId];
         activeRunsBySession.current = nextActive;
-        activeRunsBySessionRef.current = activeRunsBySession;
       }
       const nextBusy = { ...modelBusyByModeRef.current };
       delete nextBusy[input.targetMode];
@@ -1257,7 +1421,7 @@ export function ChatPage() {
   }
 
   function isSessionBusy(sessionId: string): boolean {
-    return Boolean(activeRunsBySessionRef.current[sessionId]);
+    return hasActiveRunForSession(activeRunsBySession.current, sessionId);
   }
 
   async function restartLastChatTurn(
@@ -1303,9 +1467,9 @@ export function ChatPage() {
       activeEarlyTtsRef.current = null;
       stopTtsPlayback();
       const assistantId = crypto.randomUUID();
-      setMessagesByMode((current) => ({
+      setMessagesBySession((current) => ({
         ...current,
-        chat: [
+        [sessionId]: [
           ...toUiMessages(truncatedSession),
           {
             id: assistantId,
@@ -1337,7 +1501,8 @@ export function ChatPage() {
   }
 
   async function editLastChatUserMessage(messageId: string, content: string): Promise<boolean> {
-    const lastTurn = resolveRevisableLastTurn(messagesByMode.chat ?? [], "chat");
+    const sessionId = activeSessionIdsRef.current.chat;
+    const lastTurn = resolveRevisableLastTurn(sessionId ? (messagesBySession[sessionId] ?? []) : [], "chat");
     if (!lastTurn || lastTurn.userMessageId !== messageId) return false;
     return restartLastChatTurn(lastTurn.userMessageId, lastTurn.assistantMessageId, content);
   }
@@ -1354,10 +1519,14 @@ export function ChatPage() {
     if (existing) return existing;
     const store = chatStore();
     if (!store) throw new Error("聊天会话服务尚未就绪");
+    const hasPendingWorkspace = !!pendingWorkspaceByMode[targetMode];
     const session = await store.create({
       identityId: null,
       mode: targetMode,
-      title: targetMode === "work" || targetMode === "code" || targetMode === "daily" ? "新任务" : "新对话",
+      title:
+        targetMode === "work" || targetMode === "code" || hasPendingWorkspace
+          ? "新任务"
+          : "新对话",
     });
     await refreshSessions(targetMode, false);
     await selectSession(session.id, targetMode);
@@ -1366,10 +1535,10 @@ export function ChatPage() {
 
 
 
-  async function initVaultStructure(sessionId: string) {
+  async function initVaultStructure(sessionId: string, options?: { confirm?: boolean }) {
     const store = chatStore();
     if (!store) return;
-    const confirmed = window.confirm(
+    const confirmed = options?.confirm === false || window.confirm(
       "要在当前 Obsidian Vault 中添加 Cyrene 通用学习结构吗？只会创建缺失的文件，不会覆盖已有内容。"
     );
     if (!confirmed) return;
@@ -1390,57 +1559,14 @@ export function ChatPage() {
     if (!store) return;
     const picked = await store.pickWorkspaceFolder();
     if (!picked.ok || !picked.path) return;
-    const sessionId = await ensureSession(targetMode);
-    const result = await store.setWorkspace(sessionId, picked.path);
-    if (!result.ok) {
-      window.alert(`设置工作区失败：${result.error ?? "未知错误"}`);
-      return;
-    }
-    setWorkspaceNames((current) => ({ ...current, [targetMode]: picked.displayName ?? "工作文件夹" }));
 
-    // Learn 模式：空目录询问是否初始化通用学习结构
-    if (targetMode === "learn" && result.isEmpty) {
-      const confirmed = window.confirm(
-        "这是一个空目录。Cyrene 可以在这里创建通用学习工作区结构（materials/、notes/、exercises/、templates/、learn/progress.md），方便你之后和 Cyrene 一起学习。\n\n是否创建？"
-      );
-      if (confirmed) {
-        await initVaultStructure(sessionId);
-      }
-    }
+    const workspace = { path: picked.path, displayName: picked.displayName ?? "工作文件夹" };
+    setWorkspaceNames((current) => ({ ...current, [targetMode]: workspace.displayName }));
 
-    await refreshSessions(targetMode, false);
-  }
-
-  async function createNewTask() {
-    const targetMode = mode;
-    const store = chatStore();
-    if (!store) return;
-    let workspace: { path: string; displayName?: string } | undefined;
-    if (targetMode === "work" || targetMode === "code" || targetMode === "daily" || targetMode === "learn") {
-      // 同一项目下的新任务应继承当前会话的可信工作区；只有还未选择
-      // 任何项目时才打开目录选择器，避免用户为每个任务重复选一次。
-      const activeId = activeSessionIdsRef.current[targetMode];
-      const activeSession = activeId ? await store.get(activeId) : null;
-      if (activeSession?.workspaceBinding?.workspaceRoot) {
-        workspace = {
-          path: activeSession.workspaceBinding.workspaceRoot,
-          displayName: activeSession.workspaceBinding.displayName,
-        };
-      } else {
-        const picked = await store.pickWorkspaceFolder();
-        if (!picked.ok || !picked.path) return;
-        workspace = { path: picked.path, displayName: picked.displayName };
-      }
-    }
-    const session = await store.create({
-      identityId: null,
-      mode: targetMode,
-      title: workspace ? "新任务" : "新对话",
-    });
-    if (workspace) {
-      const result = await store.setWorkspace(session.id, workspace.path);
+    const activeId = activeSessionIdsRef.current[targetMode];
+    if (activeId) {
+      const result = await store.setWorkspace(activeId, workspace.path);
       if (!result.ok) {
-        await store.delete(session.id);
         window.alert(`设置工作区失败：${result.error ?? "未知错误"}`);
         return;
       }
@@ -1450,12 +1576,67 @@ export function ChatPage() {
           "这是一个空目录。Cyrene 可以在这里创建通用学习工作区结构（materials/、notes/、exercises/、templates/、learn/progress.md），方便你之后和 Cyrene 一起学习。\n\n是否创建？"
         );
         if (confirmed) {
-          await initVaultStructure(session.id);
+          await initVaultStructure(activeId, { confirm: false });
         }
       }
+      await refreshSessions(targetMode, false);
+    } else {
+      // 还没有发送第一条消息、未创建 session，先暂存工作区，发消息时一起绑定。
+      setPendingWorkspaceByMode((current) => ({ ...current, [targetMode]: workspace }));
     }
-    await refreshSessions(targetMode, false);
-    await selectSession(session.id, targetMode);
+  }
+
+  async function createNewTask() {
+    const targetMode = mode;
+    const store = chatStore();
+    if (!store) return;
+
+    // 点“新建”不真正创建 session，只清空当前模式的状态并回到欢迎页。
+    // 工作区保留：如果当前 session 已绑定项目，新任务继续在该项目下创建；
+    // 否则沿用之前通过 chooseWorkspace 选好的待绑定目录。
+    const activeId = activeSessionIdsRef.current[targetMode];
+    const activeSession = activeId ? await store.get(activeId) : null;
+    const inheritedWorkspace = activeSession?.workspaceBinding?.workspaceRoot
+      ? {
+          path: activeSession.workspaceBinding.workspaceRoot,
+          displayName: activeSession.workspaceBinding.displayName,
+        }
+      : pendingWorkspaceByMode[targetMode];
+
+    setActiveSessionIds((current) => {
+      const next = { ...current };
+      delete next[targetMode];
+      activeSessionIdsRef.current = next;
+      return next;
+    });
+    setDrafts((current) => {
+      const next = { ...current };
+      delete next[`mode:${targetMode}`];
+      return next;
+    });
+    setAttachmentsByScope((current) => {
+      const next = { ...current };
+      delete next[`mode:${targetMode}`];
+      return next;
+    });
+    setPendingWorkspaceByMode((current) => {
+      const next = { ...current };
+      if (inheritedWorkspace) {
+        next[targetMode] = inheritedWorkspace;
+      } else {
+        delete next[targetMode];
+      }
+      return next;
+    });
+    setWorkspaceNames((current) => {
+      const next = { ...current };
+      if (!inheritedWorkspace) {
+        delete next[targetMode];
+      }
+      return next;
+    });
+    setToolPanelOpen(false);
+    setSkillPanelOpen(false);
   }
 
   async function handleRenameSession(sessionId: string, newTitle: string) {
@@ -1480,36 +1661,6 @@ export function ChatPage() {
     if (!store?.setPinned) return;
     await store.setPinned(sessionId, pinned);
     await refreshSessionsRef.current(mode, false);
-  }
-
-  async function changeClineMode(clineMode: "plan" | "act") {
-    const store = chatStore();
-    if (!store) return;
-    const sessionId = await ensureSession("code");
-    const previous = selectedClineMode;
-    setSelectedClineMode(clineMode);
-    try {
-      const result = await store.setCodeMode(sessionId, clineMode);
-      if (!result.ok) {
-        setSelectedClineMode(previous);
-        window.alert(`切换 Cline 模式失败：${result.error ?? "未知错误"}`);
-      }
-    } catch (error) {
-      setSelectedClineMode(previous);
-      console.warn("[Cyrene React] 切换 Cline 模式失败:", error);
-    }
-  }
-
-  async function createNewClineTask() {
-    const api = codeRunApi();
-    const sessionId = activeSessionIdsRef.current.code;
-    if (!api || !sessionId) return;
-    try {
-      const result = await api.createNewTask(sessionId);
-      if (!result.ok) window.alert(`创建 Cline Task 失败：${result.error ?? "未知错误"}`);
-    } catch (error) {
-      console.warn("[Cyrene React] 创建 Cline Task 失败:", error);
-    }
   }
 
   async function chooseFiles(files: File[]) {
@@ -1545,13 +1696,13 @@ export function ChatPage() {
   }
 
   function updateMessageAttachments(
-    targetMode: ConversationMode,
+    sessionId: string,
     messageId: string,
     updater: (attachments: ComposerAttachment[]) => ComposerAttachment[],
   ) {
-    setMessagesByMode((current) => ({
+    setMessagesBySession((current) => ({
       ...current,
-      [targetMode]: (current[targetMode] ?? []).map((item) => (
+      [sessionId]: (current[sessionId] ?? []).map((item) => (
         item.id === messageId
           ? { ...item, attachments: updater(item.attachments ?? []) }
           : item
@@ -1560,7 +1711,7 @@ export function ChatPage() {
   }
 
   async function prepareImageAttachments(
-    targetMode: ConversationMode,
+    sessionId: string,
     messageId: string,
     attachments: ComposerAttachment[],
   ) {
@@ -1576,7 +1727,7 @@ export function ChatPage() {
 
     if (strategy.mode === "direct") {
       const paths = new Set(images.map((image) => image.filePath));
-      updateMessageAttachments(targetMode, messageId, (current) => current.map((attachment) => (
+      updateMessageAttachments(sessionId, messageId, (current) => current.map((attachment) => (
         paths.has(attachment.filePath)
           ? { ...attachment, imageSendMode: "direct", status: "done" }
           : attachment
@@ -1585,7 +1736,7 @@ export function ChatPage() {
     }
 
     for (const image of images) {
-      updateMessageAttachments(targetMode, messageId, (current) => current.map((attachment) => (
+      updateMessageAttachments(sessionId, messageId, (current) => current.map((attachment) => (
         attachment.filePath === image.filePath
           ? { ...attachment, imageSendMode: "caption", status: "processing" }
           : attachment
@@ -1596,7 +1747,7 @@ export function ChatPage() {
       } catch (error) {
         result = { ok: false, error: error instanceof Error ? error.message : String(error) };
       }
-      updateMessageAttachments(targetMode, messageId, (current) => current.map((attachment) => (
+      updateMessageAttachments(sessionId, messageId, (current) => current.map((attachment) => (
         attachment.filePath === image.filePath
           ? result.ok && result.caption
             ? { ...attachment, imageSendMode: "caption", status: "done", caption: result.caption, reason: undefined }
@@ -1648,13 +1799,13 @@ export function ChatPage() {
   }
 
   async function sendMessage(content: string) {
-    const message = content.trim();
+    const parsedMessage = parseComposerMessage(mode, content);
+    const message = parsedMessage.rawContent;
     if (!message) return;
     activeEarlyTtsRef.current?.queue.cancel();
     activeEarlyTtsRef.current = null;
-    const stickerMatch = message.match(/\[sticker:([^\]]+)\]/);
-    const userSticker = stickerMatch?.[1];
-    const visibleMessage = message.replace(/\[sticker:[^\]]+\]/g, "").trim();
+    const userSticker = parsedMessage.userSticker;
+    const visibleMessage = parsedMessage.visibleContent;
     const demoResponse = DEMO_RESPONSES[message];
     const demoSticker = DEMO_STICKERS[message];
     const shouldRunModel = shouldRunModelForMode(mode, Boolean(demoResponse), Boolean(demoSticker));
@@ -1663,6 +1814,26 @@ export function ChatPage() {
     const attachmentsForMessage = attachments.map((attachment) => ({ ...attachment }));
     const targetMode = mode;
     const sessionId = await ensureSession(targetMode);
+
+    // 如果新建任务时已选好工作区但尚未创建 session，在这里一并绑定。
+    const pendingWorkspace = pendingWorkspaceByMode[targetMode];
+    if (pendingWorkspace) {
+      const workspaceResult = await chatStore()?.setWorkspace(sessionId, pendingWorkspace.path);
+      if (workspaceResult?.ok && targetMode === "learn" && workspaceResult.isEmpty) {
+        const confirmed = window.confirm(
+          "这是一个空目录。Cyrene 可以在这里创建通用学习工作区结构（materials/、notes/、exercises/、templates/、learn/progress.md），方便你之后和 Cyrene 一起学习。\n\n是否创建？"
+        );
+        if (confirmed) {
+          await initVaultStructure(sessionId, { confirm: false });
+        }
+      }
+      setPendingWorkspaceByMode((current) => {
+        const next = { ...current };
+        delete next[targetMode];
+        return next;
+      });
+    }
+
     // 如果当前 session 正在跑模型，新消息进入 composer 上方队列，等当前 run 结束后自动发送
     if (shouldRunModel && isSessionBusy(sessionId)) {
       const nextQueue = {
@@ -1707,10 +1878,10 @@ export function ChatPage() {
     userMessageId: string;
   }) {
     const { targetMode, sessionId, rawContent, visibleContent, attachments, userSticker, shouldRunModel, demoResponse, demoSticker, assistantId, userMessageId } = input;
-    setMessagesByMode((current) => ({
+    setMessagesBySession((current) => ({
       ...current,
-      [targetMode]: [
-        ...(current[targetMode] ?? []),
+      [sessionId]: [
+        ...(current[sessionId] ?? []),
         {
           id: userMessageId,
           role: "user",
@@ -1756,7 +1927,7 @@ export function ChatPage() {
     });
     void refreshSessions(targetMode, false);
     if (attachments.length > 0) {
-      void prepareImageAttachments(targetMode, userMessageId, attachments);
+      void prepareImageAttachments(sessionId, userMessageId, attachments);
     }
     if (demoResponse && assistantId) streamDemoResponse(targetMode, assistantId, demoResponse, sessionId);
     if (shouldRunModel && assistantId && !updatedSession) {
@@ -1783,13 +1954,21 @@ export function ChatPage() {
     const sessionId = activeSessionId;
     if (!sessionId) return;
     const activeRun = activeRunsBySession.current[sessionId];
-    if (!activeRun?.runId) return;
+    if (!activeRun) return;
     updateMessage(activeRun.mode, activeRun.assistantId, {
       streaming: false,
       loading: false,
       waitingForFirstEvent: false,
-      responseStarted: true,
+      responseStarted: false,
     });
+    if (!activeRun.runId) {
+      cancelRequestedSessionsRef.current.add(sessionId);
+      // 首次模型请求尚未返回 ack.runId 时，仍要立即通知主进程。
+      // 该窗口内当前窗口只有这一条 active run，桥层会取消它；ack 返回后
+      // 仍保留 cancelRequestedSessionsRef 以处理跨进程投递顺序。
+      await aguiApi()?.cancel();
+      return;
+    }
     await aguiApi()?.cancel(activeRun.runId);
   }
 
@@ -1805,16 +1984,17 @@ export function ChatPage() {
   function queueCurrentDraft(value: string) {
     if (!activeSessionId || !value.trim()) return;
     const sessionId = activeSessionId;
-    const stickerMatch = value.match(/\[sticker:([^\]]+)\]/);
-    const userSticker = stickerMatch?.[1];
-    const visibleContent = value.replace(/\[sticker:[^\]]+\]/g, "").trim();
+    const parsedMessage = parseComposerMessage(mode, value);
+    if (!parsedMessage.rawContent) return;
+    const userSticker = parsedMessage.userSticker;
+    const visibleContent = parsedMessage.visibleContent;
     const attachmentsForMessage = attachments.map((attachment) => ({ ...attachment }));
     const userMessageId = crypto.randomUUID();
     const nextQueue = {
       ...pendingQueueBySessionRef.current,
       [sessionId]: [
         ...(pendingQueueBySessionRef.current[sessionId] ?? []),
-        { id: userMessageId, rawContent: value, visibleContent, attachments: attachmentsForMessage, userSticker },
+        { id: userMessageId, rawContent: parsedMessage.rawContent, visibleContent, attachments: attachmentsForMessage, userSticker },
       ],
     };
     pendingQueueBySessionRef.current = nextQueue;
@@ -1835,9 +2015,11 @@ export function ChatPage() {
       </div>
       <div className="cy-page-top-center">
         <CharacterStatusPill avatarPath={avatarLight} status={modelDisplayName || modelName} />
-        <ModeSwitch value={mode} onChange={(nextMode) => {
-          if (isConversationMode(nextMode)) setMode(nextMode);
-        }} />
+        {!toolPanelOpen && !skillPanelOpen && !modelPanelOpen && (
+          <ModeSwitch value={mode} onChange={(nextMode) => {
+            if (isConversationMode(nextMode)) setMode(nextMode);
+          }} />
+        )}
       </div>
       <div className="cy-page-windows">
         <WindowControls
@@ -1846,34 +2028,41 @@ export function ChatPage() {
           onClose={() => window.chat?.close()}
         />
       </div>
-      <div className="cy-page-settings">
-        <SettingsButton onClick={() => sidebarApi()?.openSettings("appearance")} />
-      </div>
-      <div className="cy-page-user">
-        <UserAvatar />
-      </div>
-      <div className="cy-page-newtask">
-        <NewTaskButton label={taskLabel} onClick={() => void createNewTask()} />
-      </div>
-      <div className="cy-page-conversations">
-        <StatusFloat />
-        <ConversationSidebar
-          mode={mode}
-          sessions={sessions}
-          activeSessionId={activeSessionId}
-          onSelect={(sessionId) => void selectSession(sessionId)}
-          onOpenProject={(workspaceRoot) => {
-            void chatStore()?.openWorkspace(workspaceRoot).then((result) => {
-              if (!result.ok) window.alert(`无法打开项目文件夹：${result.error ?? "未知错误"}`);
-            });
-          }}
-          onRename={(sessionId, newTitle) => void handleRenameSession(sessionId, newTitle)}
-          onDelete={(sessionId) => void handleDeleteSession(sessionId)}
-          onTogglePin={(sessionId, pinned) => void handleTogglePinSession(sessionId, pinned)}
-        />
+      <div className="cy-page-sidebar">
+        <div className="cy-page-newtask">
+          <NewTaskButton onClick={() => void createNewTask()} />
+          <ToolModeButton active={toolPanelOpen} onClick={() => { setToolPanelOpen((v) => !v); setSkillPanelOpen(false); }} />
+          <SkillModeButton active={skillPanelOpen} onClick={() => { setSkillPanelOpen((v) => !v); setToolPanelOpen(false); setModelPanelOpen(false); }} />
+          <ModelModeButton active={modelPanelOpen} onClick={() => { setModelPanelOpen((v) => !v); setToolPanelOpen(false); setSkillPanelOpen(false); }} />
+        </div>
+        <div className="cy-page-conversations">
+          <ConversationSidebar
+            mode={mode}
+            sessions={sessions}
+            activeSessionId={activeSessionId}
+            onSelect={(sessionId) => {
+              setToolPanelOpen(false);
+              setSkillPanelOpen(false);
+              setModelPanelOpen(false);
+              void selectSession(sessionId);
+            }}
+            onOpenProject={(workspaceRoot) => {
+              void chatStore()?.openWorkspace(workspaceRoot).then((result) => {
+                if (!result.ok) window.alert(`无法打开项目文件夹：${result.error ?? "未知错误"}`);
+              });
+            }}
+            onRename={(sessionId, newTitle) => void handleRenameSession(sessionId, newTitle)}
+            onDelete={(sessionId) => void handleDeleteSession(sessionId)}
+            onTogglePin={(sessionId, pinned) => void handleTogglePinSession(sessionId, pinned)}
+          />
+        </div>
+        <div className="cy-page-sidebar-bottom">
+          <UserAvatar />
+          <SettingsButton onClick={() => sidebarApi()?.openSettings("appearance")} />
+        </div>
       </div>
       <main
-        className={`cy-workspace ${hasMessages ? "has-messages" : "is-empty"} ${isDraggingFiles ? "is-dragging-files" : ""}`}
+        className={`cy-page-main cy-workspace ${hasMessages ? "has-messages" : "is-empty"} ${isDraggingFiles ? "is-dragging-files" : ""}`}
         onDragEnter={handleDragEnter}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
@@ -1884,8 +2073,26 @@ export function ChatPage() {
             <span>松开即可添加到当前对话</span>
           </div>
         )}
-        {(mode === "work" || mode === "daily" || mode === "learn") && (
-          <TodoPanel state={todoStateByMode[mode]} mode={mode} workspaceName={workspaceNames[mode]} />
+        {modelPanelOpen ? (
+          <ModelModePanel />
+        ) : skillPanelOpen ? (
+          <SkillModePanel />
+        ) : toolPanelOpen ? (
+          <ToolModePanel />
+        ) : (
+        <>
+        {(mode === "work" || mode === "learn") && (
+          <TodoPanel
+            state={activeSessionId ? todoStateBySession[activeSessionId] : null}
+            mode={mode}
+          />
+        )}
+        {mode === "code" && activeSessionId && (
+          <CodeGitPanel
+            sessionId={activeSessionId}
+            projectName={workspaceNames.code}
+            todoState={todoStateBySession[activeSessionId] ?? null}
+          />
         )}
         {hasMessages && (
           <ChatMessageList
@@ -1940,17 +2147,12 @@ export function ChatPage() {
             attachmentBusy={attachmentBusy}
             modelBusy={isCurrentScopeRunning}
             pendingQueue={currentPendingQueue}
-            clineMode={selectedClineMode}
             onChange={(value) => setDrafts((current) => ({ ...current, [scopeKey]: value }))}
             onSubmit={(value) => void sendMessage(value)}
             onCancel={() => void cancelCurrentRun()}
             onQueueMessage={(value) => queueCurrentDraft(value)}
-            onRemoveQueuedMessage={(id) => removeQueuedMessage(activeSessionId, id)}
+            onRemoveQueuedMessage={(id) => activeSessionId && removeQueuedMessage(activeSessionId, id)}
             onChooseWorkspace={() => void chooseWorkspace()}
-            onInitVaultStructure={mode === "learn" ? () => {
-              const sessionId = activeSessionIdsRef.current[mode];
-              if (sessionId) void initVaultStructure(sessionId);
-            } : undefined}
             onChooseFiles={(files) => void chooseFiles(files)}
             onRemoveAttachment={removeAttachment}
             onScreenshot={() => void window.chat?.startScreenshot()}
@@ -1958,71 +2160,59 @@ export function ChatPage() {
               const separator = draft && !draft.endsWith(" ") ? " " : "";
               setDrafts((current) => ({ ...current, [scopeKey]: `${draft}${separator}[sticker:${id}]` }));
             }}
-            onClineModeChange={(nextMode) => void changeClineMode(nextMode)}
-            onNewClineTask={() => void createNewClineTask()}
+            activeModelProfileId={activeSession?.id === activeSessionId ? activeSession?.modelProfileId : undefined}
+            onSelectModelProfile={(modelProfileId) => {
+              if (!activeSessionId) return;
+              const store = chatStore();
+              if (!store) return;
+              void store.setModelProfile(activeSessionId, modelProfileId).then((session) => setActiveSession(session));
+            }}
             />}
             interaction={composerInteraction}
             interactionBusy={interactionBusy}
             onAnswer={(id, answer) => {
-              if (composerInteraction?.kind === "ask" && composerInteraction.source === "code") {
-                const api = codeRunApi();
-                if (!api || typeof answer !== "string" || !answer.trim()) return;
-                setInteractionBusy(true);
-                void api.respondAsk(id, answer).then((result) => {
-                  if (result.ok) setComposerInteraction(undefined);
-                  setInteractionBusy(false);
-                }).catch(() => setInteractionBusy(false));
-                return;
-              }
+              if (!activeSessionId) return;
               const choice = choiceApi();
               if (!choice) return;
-              setInteractionBusy(true);
+              setInteractionBusyForSession(activeSessionId, true);
               void choice.resolve(id, answer).then((result) => {
-                if (result.ok) setComposerInteraction(undefined);
-                setInteractionBusy(false);
-              }).catch(() => setInteractionBusy(false));
+                if (result.ok) {
+                  clearInteractionForSession(activeSessionId);
+                  runCheckpointBySessionRef.current[activeSessionId]?.("running");
+                }
+                setInteractionBusyForSession(activeSessionId, false);
+              }).catch(() => setInteractionBusyForSession(activeSessionId, false));
             }}
             onIgnore={(id) => {
-              if (composerInteraction?.kind === "ask" && composerInteraction.source === "code") {
-                const api = codeRunApi();
-                if (!api) return;
-                setInteractionBusy(true);
-                void api.cancelAsk(id).then((result) => {
-                  if (result.ok) setComposerInteraction(undefined);
-                  setInteractionBusy(false);
-                }).catch(() => setInteractionBusy(false));
-                return;
-              }
+              if (!activeSessionId) return;
               const choice = choiceApi();
               if (!choice) return;
-              setInteractionBusy(true);
+              setInteractionBusyForSession(activeSessionId, true);
               void choice.resolve(id, "").then((result) => {
-                if (result.ok) setComposerInteraction(undefined);
-                setInteractionBusy(false);
-              }).catch(() => setInteractionBusy(false));
+                if (result.ok) {
+                  clearInteractionForSession(activeSessionId);
+                  runCheckpointBySessionRef.current[activeSessionId]?.("running");
+                }
+                setInteractionBusyForSession(activeSessionId, false);
+              }).catch(() => setInteractionBusyForSession(activeSessionId, false));
             }}
             onPermissionDecision={(id, allowed) => {
-              if (composerInteraction?.kind === "permission" && composerInteraction.source === "code_verification") {
-                const api = codeRunApi();
-                if (!api) return;
-                setInteractionBusy(true);
-                const request = allowed ? api.approveVerification(id) : api.rejectVerification(id);
-                void request.then((result) => {
-                  if (result.ok) setComposerInteraction(undefined);
-                  setInteractionBusy(false);
-                }).catch(() => setInteractionBusy(false));
-                return;
-              }
+              if (!activeSessionId) return;
               const settings = settingsApprovalApi();
               if (!settings) return;
-              setInteractionBusy(true);
+              setInteractionBusyForSession(activeSessionId, true);
               void settings.resolvePermissionApproval(id, allowed).then((result) => {
-                if (result.ok) setComposerInteraction(undefined);
-                setInteractionBusy(false);
-              }).catch(() => setInteractionBusy(false));
+                if (result.ok) {
+                  clearInteractionForSession(activeSessionId);
+                  runCheckpointBySessionRef.current[activeSessionId]?.("running");
+                }
+                setInteractionBusyForSession(activeSessionId, false);
+              }).catch(() => setInteractionBusyForSession(activeSessionId, false));
             }}
           />
         </div>
+        </>
+        )}
       </main>
     </div>
   );

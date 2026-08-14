@@ -4,7 +4,6 @@ import type { GeneralSettings } from "../settings/general-settings";
 import { loadModelSettings } from "../settings/model-settings";
 import { loadUserProfile } from "../settings-store";
 import {
-  setDelegateSettings,
   setSearchConfig,
   setUserTimezoneConfig,
   setWeatherConfig,
@@ -49,13 +48,16 @@ export function bootstrapConfigGetters(ctx: BootstrapConfigContext): void {
     () => loadGeneralSettings().weatherSource,
     () => loadGeneralSettings().amapKey,
     // 天气卡片回调：工具拿到结构化数据后，发 Custom 事件给 react 聊天窗口渲染卡片
-    (card) => {
+    (card, context) => {
       const win = getReactChatWindow();
       if (win) {
         win.webContents.send(IPC.AGUI_EVENT, {
           type: "CUSTOM",
           name: "cyrene.weather",
           value: card,
+          // 天气工具在 Harness 内执行时必须归属到该 run；否则 renderer 的
+          // RunEventGate 会把没有 runId 的卡片事件当作串会话事件丢弃。
+          ...(context?.runId ? { runId: context.runId } : {}),
         });
       }
     },
@@ -161,9 +163,4 @@ export function bootstrapConfigGetters(ctx: BootstrapConfigContext): void {
     },
   );
 
-  // 注入子代理 LLM 配置（delegate_task 工具用，复用主模型配置）
-  setDelegateSettings(() => {
-    const s = loadModelSettings();
-    return { provider: s.provider, baseUrl: s.baseUrl, model: s.model, apiKey: s.apiKey, contextWindowTokens: s.contextWindowTokens };
-  });
 }

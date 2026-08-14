@@ -6,6 +6,8 @@ import { toolRegistry } from "./tool-registry";
 import { getDateLocale, getWeatherLanguage } from "../locale-context";
 import { addMcpServer } from "./mcp-manager";
 import { createPlayLive2DActionTool } from "./tools/play-live2d-action";
+import { wrapWithSandbox, isSandboxReady } from "./sandbox/sandbox-exec";
+import { getCurrentLevel } from "../permission";
 
 let sendToLive2DWindow: (channel: string, payload?: unknown) => void = () => {};
 export function setLive2dWindowSender(sender: typeof sendToLive2DWindow): void {
@@ -13,7 +15,7 @@ export function setLive2dWindowSender(sender: typeof sendToLive2DWindow): void {
 }
 import { resolveChatContextTimezone } from "../chat-time-context";
 import type { ToolContext } from "./tool-context";
-import { VerificationRunner, resolveBuiltinExecutable } from "./code/verification-runner";
+import { VerificationRunner, resolveBuiltinExecutable } from "./verification-runner";
 import { logger, LogTag } from "../logger";
 
 const LOG_PREFIX = "[BuiltinTools]";
@@ -155,6 +157,7 @@ interface ShellResult {
   stdout: string;
   stderr: string;
   truncated: boolean;
+  ranViaSandbox: boolean;
 }
 
 /**
@@ -193,64 +196,111 @@ function killTree(child: ReturnType<typeof spawn>): void {
   }
 }
 
-function runShellOnce(command: string, args: string[], cwd?: string, extraEnv?: Record<string, string>): Promise<ShellResult> {
+function runShellOnce(
+  command: string,
+  args: string[],
+  cwd?: string,
+  extraEnv?: Record<string, string>,
+  useSandbox?: boolean,
+): Promise<ShellResult> {
   return new Promise((resolve) => {
-    const child = spawn(command, args, {
-      cwd: cwd || undefined,
-      shell: false,
-      windowsHide: true,
-      env: { ...process.env, ...extraEnv },
-      // stdin→/dev/null(NUL)：误启动交互式进程(python/node REPL)时让它读到 EOF 立即退出，
-      // 不再卡在"等 stdin 输入"上耗满超时。stdout/stderr 仍 pipe 来收集输出。
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    let truncated = false;
-    const timeoutTimer = setTimeout(() => {
-      console.warn(LOG_PREFIX, "run_shell 超时，kill 进程树:", command);
-      killTree(child);
-    }, SHELL_TIMEOUT_MS);
+    // 沙箱路径：先把 command+args 包成 {argv, env}，成功则 spawn 沙箱 argv；
+    // 失败/null 则 fallback 到原直接 spawn。useSandbox=true 时尝试沙箱。
+    (async () => {
+      let spawnCmd: string = command;
+      let spawnArgs: string[] = args;
+      let spawnEnv: NodeJS.ProcessEnv = { ...process.env, ...extraEnv };
+      let ranViaSandbox = false;
 
-    child.stdout?.on("data", (chunk: Buffer) => {
-      if (stdout.length < SHELL_MAX_OUTPUT) {
-        stdout += chunk.toString("utf8");
-        if (stdout.length > SHELL_MAX_OUTPUT) {
-          stdout = stdout.slice(0, SHELL_MAX_OUTPUT);
+      if (useSandbox) {
+        try {
+          const wrapped = await wrapWithSandbox(command, args, cwd);
+          if (wrapped) {
+            spawnCmd = wrapped.argv[0];
+            spawnArgs = wrapped.argv.slice(1);
+            // 沙箱 env 是 SRT 给的（含必要的 PATH/token 等），extraEnv 叠加在后面
+            spawnEnv = { ...wrapped.env, ...extraEnv };
+            ranViaSandbox = true;
+          } else {
+            // wrap 返回 null（沙箱不可用/失败）→ fallback 到直接 spawn
+            // 调用方需自行判断是否接受 fallback（workspace_mutation 不接受 fallback）
+            console.log(LOG_PREFIX, "run_shell sandbox unavailable, fallback to direct spawn");
+          }
+        } catch (err) {
+          // wrap 异常不应让 runShellOnce 卡死，fallback 到直接 spawn
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(LOG_PREFIX, "run_shell wrap exception, fallback:", msg);
+        }
+      }
+
+      const child = spawn(spawnCmd, spawnArgs, {
+        cwd: cwd || undefined,
+        shell: false,
+        windowsHide: true,
+        env: spawnEnv,
+        // stdin→/dev/null(NUL)：误启动交互式进程(python/node REPL)时让它读到 EOF 立即退出，
+        // 不再卡在"等 stdin 输入"上耗满超时。stdout/stderr 仍 pipe 来收集输出。
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stdout = "";
+      let stderr = "";
+      let truncated = false;
+      const timeoutTimer = setTimeout(() => {
+        console.warn(LOG_PREFIX, "run_shell 超时，kill 进程树:", command);
+        killTree(child);
+      }, SHELL_TIMEOUT_MS);
+
+      child.stdout?.on("data", (chunk: Buffer) => {
+        if (stdout.length < SHELL_MAX_OUTPUT) {
+          stdout += chunk.toString("utf8");
+          if (stdout.length > SHELL_MAX_OUTPUT) {
+            stdout = stdout.slice(0, SHELL_MAX_OUTPUT);
+            truncated = true;
+          }
+        } else {
           truncated = true;
         }
-      } else {
-        truncated = true;
-      }
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      if (stderr.length < SHELL_MAX_OUTPUT) {
-        stderr += chunk.toString("utf8");
-        if (stderr.length > SHELL_MAX_OUTPUT) {
-          stderr = stderr.slice(0, SHELL_MAX_OUTPUT);
+      });
+      child.stderr?.on("data", (chunk: Buffer) => {
+        if (stderr.length < SHELL_MAX_OUTPUT) {
+          stderr += chunk.toString("utf8");
+          if (stderr.length > SHELL_MAX_OUTPUT) {
+            stderr = stderr.slice(0, SHELL_MAX_OUTPUT);
+            truncated = true;
+          }
+        } else {
           truncated = true;
         }
-      } else {
-        truncated = true;
-      }
-    });
-    child.on("error", (err) => {
-      clearTimeout(timeoutTimer);
+      });
+      child.on("error", (err) => {
+        clearTimeout(timeoutTimer);
+        resolve({
+          exitCode: -1,
+          stdout,
+          stderr: stderr + "\n[spawn error] " + err.message + (ranViaSandbox ? " [sandbox]" : ""),
+          truncated,
+          ranViaSandbox,
+        });
+      });
+      child.on("close", (code) => {
+        clearTimeout(timeoutTimer);
+        resolve({ exitCode: code, stdout, stderr, truncated, ranViaSandbox });
+      });
+    })().catch((err) => {
+      // async wrapper 异常兜底（理论上不会走到，wrapWithSandbox 内部已 try/catch）
+      const msg = err instanceof Error ? err.message : String(err);
       resolve({
         exitCode: -1,
-        stdout,
-        stderr: stderr + "\n[spawn error] " + err.message,
-        truncated,
+        stdout: "",
+        stderr: "[runShellOnce internal error] " + msg,
+        truncated: false,
+        ranViaSandbox: false,
       });
-    });
-    child.on("close", (code) => {
-      clearTimeout(timeoutTimer);
-      resolve({ exitCode: code, stdout, stderr, truncated });
     });
   });
 }
 
-async function executeRunShell(args: Record<string, unknown>): Promise<string> {
+async function executeRunShell(args: Record<string, unknown>, context?: import("./tool-context").ToolContext): Promise<string> {
   const cmd = String(args.command || "").trim();
   // 容错：模型常把 args 当字符串传（如 "--version"），normalizeArgs 会自动拆成 argv 数组
   const cmdArgs = normalizeArgs(args.args);
@@ -260,8 +310,11 @@ async function executeRunShell(args: Record<string, unknown>): Promise<string> {
   // 系统侧 shell policy 分类（不信任模型 purpose）
   const { classifyShellPolicy } = require("./shell-execution-policy");
   const policy = classifyShellPolicy(cmd, cmdArgs);
+  const level = context?.permissionMode === "allow_all" ? "full" : getCurrentLevel();
+  logger.info(LogTag.BuiltinTools, `[run_shell] entry: command=${cmd} args=${JSON.stringify(cmdArgs)} cwd=${cwd || "(undefined)"} policy=${policy} level=${level}`);
 
   if (policy === "blocked") {
+    logger.info(LogTag.BuiltinTools, `[run_shell] rejected: policy=blocked command=${cmd}`);
     return JSON.stringify({
       command: cmd, args: cmdArgs, cwd,
       exitCode: -1, stdout: "", stderr: "[拒绝] 该命令被系统禁止执行",
@@ -270,17 +323,69 @@ async function executeRunShell(args: Record<string, unknown>): Promise<string> {
   }
 
   if (policy === "workspace_mutation") {
+    // full 档位：不走沙箱，直接 spawn（用户已选择完全信任）
+    if (level === "full") {
+      logger.info(LogTag.BuiltinTools, `[run_shell] workspace_mutation → full level, direct spawn (no sandbox)`);
+      const result = await runShellOnce(cmd, cmdArgs, cwd);
+      logger.info(LogTag.BuiltinTools, `[run_shell] [full] done: exitCode=${result.exitCode} stdout.len=${result.stdout.length} stderr.len=${result.stderr.length}`);
+      return JSON.stringify({
+        command: cmd,
+        args: cmdArgs,
+        cwd,
+        exitCode: result.exitCode,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        timedOut: false,
+        truncated: result.truncated,
+        policy: "workspace_mutation",
+        sandboxed: false,
+      });
+    }
+
+    // scoped / per-action 档位：沙箱可用时放行进沙箱
+    // （核心价值：pip/npm install 这种"未知但无害"命令能在笼子里跑）
+    // 注意：workspace_mutation 不接受 fallback —— runShellOnce 内部 wrap 失败会 fallback 到直接 spawn，
+    // 这违背 workspace_mutation 的安全语义。所以这里检查 ranViaSandbox：若 fallback 了则视为拒绝。
+    if (!isSandboxReady()) {
+      logger.info(LogTag.BuiltinTools, `[run_shell] workspace_mutation → sandbox not ready (level=${level}), rejected`);
+      return JSON.stringify({
+        command: cmd, args: cmdArgs, cwd,
+        exitCode: -1, stdout: "",
+        stderr: "[拒绝] 该命令可能修改工作区，请使用专用工具：代码修改用 apply_patch/write_file，验证用 run_verification",
+        timedOut: false, passed: false, policy, truncated: false,
+      });
+    }
+    logger.info(LogTag.BuiltinTools, `[run_shell] workspace_mutation → sandbox path (level=${level}), calling runShellOnce(useSandbox=true)`);
+    const result = await runShellOnce(cmd, cmdArgs, cwd, undefined, true);
+    // 沙箱 wrap 失败导致 fallback 到直接 spawn → 拒绝（不能让 workspace_mutation 越过沙箱直接跑）
+    if (!result.ranViaSandbox) {
+      logger.warn(LogTag.BuiltinTools, `[run_shell] workspace_mutation → sandbox wrap failed (fell back to direct spawn), rejected. stderr=${result.stderr.slice(0, 200)}`);
+      return JSON.stringify({
+        command: cmd, args: cmdArgs, cwd,
+        exitCode: -1, stdout: result.stdout,
+        stderr: result.stderr + "\n[拒绝] 沙箱不可用，该命令可能修改工作区，已终止",
+        timedOut: false, passed: false, policy, truncated: result.truncated,
+      });
+    }
+    logger.info(LogTag.BuiltinTools, `[run_shell] [sandbox ${level}] done: exitCode=${result.exitCode} stdout.len=${result.stdout.length} stderr.len=${result.stderr.length}`);
     return JSON.stringify({
-      command: cmd, args: cmdArgs, cwd,
-      exitCode: -1, stdout: "",
-      stderr: "[拒绝] 该命令可能修改工作区，请使用专用工具：代码修改用 apply_patch/write_file，验证用 run_verification",
-      timedOut: false, passed: false, policy, truncated: false,
+      command: cmd,
+      args: cmdArgs,
+      cwd,
+      exitCode: result.exitCode,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      timedOut: false,
+      truncated: result.truncated,
+      policy: "workspace_mutation",
+      sandboxed: true,
     });
   }
 
-  console.log(LOG_PREFIX, "run_shell:", cmd, JSON.stringify(cmdArgs), cwd ? "cwd=" + cwd : "");
+  // read_only policy：安全读命令，直接 spawn（不经过沙箱）
+  logger.info(LogTag.BuiltinTools, `[run_shell] read_only policy, direct spawn (level=${level})`);
   const result = await runShellOnce(cmd, cmdArgs, cwd);
-  console.log(LOG_PREFIX, "run_shell 完成 exitCode=" + result.exitCode + " stdout.len=" + result.stdout.length + " stderr.len=" + result.stderr.length);
+  logger.info(LogTag.BuiltinTools, `[run_shell] [read_only] done: exitCode=${result.exitCode} stdout.len=${result.stdout.length} stderr.len=${result.stderr.length} sandboxed=${result.ranViaSandbox}`);
 
   // 结构化返回（保留 ShellResult 字段，供证据收集器解析）
   return JSON.stringify({
@@ -293,6 +398,7 @@ async function executeRunShell(args: Record<string, unknown>): Promise<string> {
     timedOut: false,  // runShellOnce 超时时通过 kill 处理，此处为正常返回
     truncated: result.truncated,
     policy: "read_only",
+    sandboxed: result.ranViaSandbox,
   });
 }
 
@@ -315,6 +421,7 @@ toolRegistry.register({
     "参数：command (可执行文件名或绝对路径)，args (字符串数组)，cwd (可选工作目录)。",
   enabled: true,
   risk: "shell",
+  modes: ["code", "work"],
   effectKind: "unknown" as const,
   inputSchema: {
     type: "object",
@@ -348,6 +455,7 @@ toolRegistry.register({
     "参数：verificationType（验证类型：typecheck/test/build/lint），cwd（可选工作目录）。",
   enabled: true,
   risk: "shell",
+  modes: ["code", "work"],
   effectKind: "verification" as const,
   ledgerPolicy: "bypass" as const,
   completionEvidence: [{ kind: "tool_succeeded" }],
@@ -663,6 +771,7 @@ toolRegistry.register({
     "args (字符串数组)，env (键值对，环境变量)，cwd (可选工作目录)。",
   enabled: true,
   risk: "fs-write",
+  modes: ["code", "work"],
   effectKind: "mutation" as const,
   verificationPolicy: "artifact" as const,
   inputSchema: {
@@ -698,7 +807,7 @@ let amapKeyGetter: (() => string) | null = null;
 let weatherEnabledGetter: (() => boolean) | null = null;
 
 /** 天气卡片数据回调：工具拿到结构化数据后调这个，由桥层发 Custom 事件给渲染端。 */
-let weatherCardCallback: ((card: WeatherCardData) => void) | null = null;
+let weatherCardCallback: ((card: WeatherCardData, context?: ToolContext) => void) | null = null;
 
 /** 天气卡片结构化数据（发给渲染端渲染 WeatherCard 用）。
  *  字段与 renderer 侧 weather-types.ts 中的 WeatherData 保持一致。
@@ -733,7 +842,7 @@ export function setWeatherConfig(
   cityGetter: () => string,
   sourceGetter: () => string,
   amapKeyFn: () => string,
-  cardCb?: (card: WeatherCardData) => void,
+  cardCb?: (card: WeatherCardData, context?: ToolContext) => void,
   enabledGetter?: () => boolean,
 ): void {
   weatherCityGetter = cityGetter;
@@ -767,7 +876,7 @@ async function omResolveCity(city: string): Promise<OMCity | null> {
 }
 
 /** Open-Meteo 实时天气查询（免费免 key）。 */
-async function omFetchWeather(city: string): Promise<string> {
+async function omFetchWeather(city: string, context?: ToolContext): Promise<string> {
   const loc = await omResolveCity(city);
   if (!loc) {
     return `[错误] 找不到城市"${city}"，请确认城市名（支持中文/拼音）。`;
@@ -836,7 +945,7 @@ async function omFetchWeather(city: string): Promise<string> {
         windSpeed: c.wind_speed_10m,
         precipitation: c.precipitation,
         pressure: Math.round(c.surface_pressure),
-      });
+      }, context);
     }
 
     return JSON.stringify(weatherData);
@@ -896,7 +1005,7 @@ async function amapResolveAdcode(city: string, key: string): Promise<AmapDistric
 }
 
 /** 高德实时天气查询。 */
-async function amapFetchWeather(city: string, key: string): Promise<string> {
+async function amapFetchWeather(city: string, key: string, context?: ToolContext): Promise<string> {
   const district = await amapResolveAdcode(city, key);
   if (!district) {
     return `[错误] 找不到城市"${city}"，请确认城市名（支持中文，如"无锡"）。`;
@@ -941,7 +1050,7 @@ async function amapFetchWeather(city: string, key: string): Promise<string> {
         windDirection: w.winddirection,
         windPower: w.windpower,
         reporttime: w.reporttime,
-      });
+      }, context);
     }
 
     return JSON.stringify(weatherData);
@@ -953,7 +1062,7 @@ async function amapFetchWeather(city: string, key: string): Promise<string> {
   }
 }
 
-async function executeWeather(args: Record<string, unknown>): Promise<string> {
+async function executeWeather(args: Record<string, unknown>, context?: ToolContext): Promise<string> {
   if (weatherEnabledGetter && !weatherEnabledGetter()) {
     return "[错误] 天气查询功能未启用，请在设置里开启";
   }
@@ -983,14 +1092,14 @@ async function executeWeather(args: Record<string, unknown>): Promise<string> {
 
   // 按天气源分支
   if (source === "open-meteo") {
-    return omFetchWeather(city);
+    return omFetchWeather(city, context);
   }
   if (source === "amap") {
     const amapKey = amapKeyGetter?.() ?? "";
     if (!amapKey) {
       return "[错误] 还没有配置高德天气 Key。请在 设置 → 插件 → 天气查询 填入高德 Key，或切换天气源为 Open-Meteo（免配置）。";
     }
-    return amapFetchWeather(city, amapKey);
+    return amapFetchWeather(city, amapKey, context);
   }
 
   // 未知天气源
@@ -1013,6 +1122,7 @@ toolRegistry.register({
     "参数：city（可选，城市名中文或拼音；不传则用用户设置的默认城市）。",
   enabled: true,
   risk: "network",
+  modes: ["work"],
   effectKind: "read" as const,
   verificationPolicy: "none" as const,
   inputSchema: {
@@ -1330,368 +1440,6 @@ toolRegistry.register({
     { kind: "tool_succeeded" },
   ],
   execute: executeWebSearch,
-});
-
-// ── 工具：todo_write ──────────────────────────────────────
-// 任务拆解可视化工具。让昔涟能像 Claude Code 一样把复杂任务拆成步骤展示给用户。
-// 每次调用整体覆盖当前清单（不是增量）。store 持久化 + 通知主进程转发 CUSTOM 事件。
-
-import {
-  setTodos,
-  getTodos,
-  clearTodos,
-  resolveTodoMode,
-  getCurrentTodos,
-  type TodoItem,
-} from "./todo-store";
-
-toolRegistry.register({
-  id: "todo_write",
-  name: "任务清单",
-  description:
-    "更新当前任务清单（todo list）。用于把复杂任务拆解成可执行步骤，让用户看到进度。\n" +
-    "【任务规划优先】收到多步任务时，应先调本工具列出步骤，再开始执行（包括在调 ask_user_choice 之前先列清单）。\n\n" +
-    "何时用：\n" +
-    "- 用户给的任务有 2 步以上（'帮我查 X 然后整理成报告'）\n" +
-    "- 用户要求'规划一下''拆解一下''分步骤完成'\n" +
-    "- 你自己判断这个任务需要多轮工具调用才能完成\n\n" +
-    "不要用于：\n" +
-    "- 简单问答（一句话能答完）\n" +
-    "- 纯闲聊\n" +
-    "- 已经在 todo 里的步骤更新（直接整体覆盖即可）\n\n" +
-    "用法：每次调用用完整列表覆盖（不是增量）。status 用 pending/in_progress/completed。\n" +
-    "开始做某一步时把它标 in_progress，做完标 completed。\n" +
-    "完成所有步骤后调一次空列表清空，表示任务结束。",
-  enabled: true,
-  risk: "safe",
-  effectKind: "external_side_effect" as const,
-  inputSchema: {
-    type: "object",
-    properties: {
-      todos: {
-        type: "array",
-        description: "任务列表。完整覆盖当前清单。空数组表示清空（任务结束）。",
-        items: {
-          type: "object",
-          properties: {
-            id:       { type: "string", description: "任务唯一标识，如 '1' '2' '3'" },
-            content:  { type: "string", description: "任务描述" },
-            status:   { type: "string", description: "状态：pending(待办) / in_progress(进行中) / completed(已完成)" },
-            priority: { type: "string", description: "可选优先级：high/medium/low" },
-          },
-        },
-      },
-    },
-    required: ["todos"],
-  },
-  needsContext: true,
-  execute: async (args, ctx) => {
-    const items = (args.todos || []) as TodoItem[];
-    const mode = resolveTodoMode(ctx?.mode);
-
-    if (!mode) {
-      return "[todo_write] 当前模式不维护任务清单，跳过更新";
-    }
-
-    // 空列表 = 清空（任务结束）
-    if (items.length === 0) {
-      clearTodos(mode);
-      return "[todo_write] 已清空任务清单（任务结束）";
-    }
-
-    const state = setTodos(mode, items);
-
-    // 返回给 LLM 的简短摘要，不返回全部内容（避免 token 浪费）
-    const counts = items.reduce((acc, t) => {
-      acc[t.status] = (acc[t.status] || 0) + 1;
-      return acc;
-    }, {} as Record<string, number>);
-
-    return "[todo_write] 已更新「" + mode + "」任务清单：共 " + items.length + " 项，" +
-      "进行中 " + (counts.in_progress || 0) + " / " +
-      "已完成 " + (counts.completed || 0) + " / " +
-      "待办 " + (counts.pending || 0) +
-      "。updatedAt=" + state.updatedAt;
-  },
-});
-
-// 暴露给 index.ts 在 startup 调用，避免 tree-shake 掉
-export { loadTodos, onTodosChange, getCurrentTodos } from "./todo-store";
-
-// ── 工具：ask_user_choice（歧义消解器）─────────────────────
-// 当用户需求模糊（"美观""好看""专业"）时，弹卡片让用户从选项中选择。
-// 阻塞工具执行，等用户选完返回选中的 value 给 LLM。
-// 通用设计：question + options 结构不绑死 Excel，PPT/Word/图片生成都能用。
-
-import { requestUserChoice, type ChoiceOption } from "../user-choice";
-import { runSubAgent, setDelegateSettings } from "./sub-agent";
-// 显式注册内置子代理 Profile（不依赖模块加载副作用）
-import { registerBuiltInSubAgentProfiles } from "./subagents/init";
-import { parseSubAgentResult } from "./subagents/result-parser";
-registerBuiltInSubAgentProfiles();
-
-export { setDelegateSettings };
-// 把重任务委托给独立 FC 循环执行，子代理有自己的 conversation（用完即弃）。
-// 执行完只返回结构化摘要给主 agent，不被重工具的过程数据（skill 正文、XML 文件等）污染。
-toolRegistry.register({
-  id: "delegate_task",
-  name: "委托子任务",
-  description:
-    "把一个需要多步工具调用的子任务委托给子代理独立执行。子代理有自己的上下文（不占用主对话空间），" +
-    "执行完返回结构化摘要（状态 + 摘要 + 产出文件 + 关键数据）。\n\n" +
-    "何时用：\n" +
-    "- 任务需要 ≥2 步工具调用且中间结果不需要用户确认\n" +
-    "- 涉及大量中间数据（如读取 skill 文档 + 生成文件），不想让中间内容占用主对话上下文\n" +
-    "- 例：「用 xlsx skill 生成带公式的 Excel」→ 子代理内部读 create.md + format.md + 写 XML，主对话只看到最终摘要\n\n" +
-    "不要用于：\n" +
-    "- 单步操作（直接调对应工具即可）\n" +
-    "- 需要跟用户交互的任务（子代理不能弹卡片）\n" +
-    "- 简单表格生成（直接用 write_excel）\n\n" +
-    "参数：task（子任务的完整描述，子代理会独立理解并执行）。" ,
-  enabled: true,
-  risk: "safe",
-  hideInPlanMode: true,  // 子代理走旧 FC Loop，避免在 Plan 步骤里降级
-  deprecated: true,      // 新运行使用 delegate_document，旧入口仅保留兼容
-  inputSchema: {
-    type: "object",
-    properties: {
-      task: { type: "string", description: "子任务的完整描述。要足够详细让子代理能独立执行，如「读取 test20.txt 的商品价格，查汇率换算成人民币，用 write_excel 生成深色风格 Excel 存到桌面 test 文件夹」" },
-    },
-    required: ["task"],
-  },
-  execute: async (args) => {
-    const task = String(args.task || "");
-    if (!task) return "[错误] task 不能为空";
-
-    console.log(LOG_PREFIX, "delegate_task:", task.slice(0, 100));
-    const result = await runSubAgent(task);
-
-    if (result.status === "success") {
-      let output = `[delegate_task] 子代理执行成功：${result.summary}`;
-      if (result.artifacts && result.artifacts.length > 0) {
-        output += `\n产出文件：${result.artifacts.join(", ")}`;
-      }
-      if (result.key_facts) {
-        output += `\n关键数据：${JSON.stringify(result.key_facts)}`;
-      }
-      return output;
-    }
-
-    let output = `[delegate_task] 子代理执行失败：${result.summary}`;
-    if (result.recoverable) {
-      output += "\n（可恢复：可尝试换方案或直接用对应工具执行）";
-    }
-    return output;
-  },
-});
-
-logger.info(LogTag.BuiltinTools, "registered: fetch_url / run_shell / install_mcp_server / weather / web_search / ask_user_choice / delegate_task");
-
-// ── 工具：ask_user_choice（歧义消解器）─────────────────────
-toolRegistry.register({
-  id: "ask_user_choice",
-  name: "询问用户选择",
-  description:
-    "当用户需求模糊（如「美观」「好看」「专业」「好看一点」）需要明确具体方向时，" +
-    "弹卡片让用户从选项中选择。工具会阻塞等待用户选择后返回结果。\n\n" +
-    "何时用：\n" +
-    "- 用户说「美观」「好看」「专业」但没给具体要求\n" +
-    "- 需要在多个方案间让用户选择\n" +
-    "- 用户的需求有多种合理解读\n\n" +
-    "不要用于：\n" +
-    "- 用户需求已经很明确（直接执行）\n" +
-    "- 用户说「你自己决定」「看着办」（按默认策略执行，不要弹窗）\n\n" +
-    "参数：question（问题文本），options（选项数组，每项含 label/value/description），" +
-    "default（可选，超时时的默认选择值）。",
-  enabled: true,
-  risk: "safe",
-  effectKind: "read" as const,
-  verificationPolicy: "none" as const,
-  inputSchema: {
-    type: "object",
-    properties: {
-      question: { type: "string", description: "要问用户的问题，如「请选择 Excel 风格」" },
-      options: {
-        type: "array",
-        description: "选项数组（2-5 个），每项含 label（显示名）/ value（返回值）/ description（说明，可选）",
-        items: {
-          type: "object",
-          properties: {
-            label: { type: "string", description: "选项显示名，如「简洁商务」" },
-            value: { type: "string", description: "选项返回值，如「simple-business」" },
-            description: { type: "string", description: "选项说明，如「表头加粗+边框+斑马纹」" },
-          },
-        },
-      },
-      default: { type: "string", description: "可选，超时（120s）时的默认选择值" },
-    },
-    required: ["question", "options"],
-  },
-  execute: async (args) => {
-    const question = String(args.question || "");
-    const options = (args.options || []) as ChoiceOption[];
-    const defaultValue = args.default ? String(args.default) : undefined;
-
-    if (!question) return "[错误] question 不能为空";
-    if (!Array.isArray(options) || options.length < 2) {
-      return "[错误] options 至少需要 2 个选项";
-    }
-
-    console.log(LOG_PREFIX, "ask_user_choice:", question, options.length + " 个选项");
-    const userChoice = await requestUserChoice(question, options, defaultValue);
-    console.log(LOG_PREFIX, "用户选择了:", userChoice);
-
-    if (!userChoice) {
-      return "[ask_user_choice] 用户未选择（超时），请按默认方案执行。";
-    }
-    // 找到用户选的选项，返回 label + value 方便 LLM 理解
-    const selected = options.find(o => o.value === userChoice);
-    if (selected) {
-      return `[ask_user_choice] 用户选择了：${selected.label}（${userChoice}）。请按此选择执行。`;
-    }
-    // 用户自定义输入（value 不在预设选项里）
-    return `[ask_user_choice] 用户自定义输入：${userChoice}。请按此要求执行。`;
-  },
-});
-
-// ── 工具：delegate_document（文档子代理入口）─────────────────────
-// 虚拟工具：对 Action Gate 是普通工具，执行时走专用子代理 Executor。
-// 旧 delegate_task 保留为 deprecated 兼容入口，新链路使用 delegate_document。
-toolRegistry.register({
-  id: "delegate_document",
-  name: "委托文档生成",
-  description:
-    "把文档生成任务委托给文档子代理。子代理独立调用 write_word 生成文档，" +
-    "验证文件存在，返回结构化结果（文件路径 + 验证状态 + 内容摘要）。\n\n" +
-    "何时用：\n" +
-    "- 用户要生成 Word 文档（报告/简报/总结等）\n" +
-    "- 需要确认文件已成功生成并验证路径\n\n" +
-    "不要用于：\n" +
-    "- 简单的单步写文件（直接用 write_word）\n" +
-    "- Excel/PDF/Markdown（后续版本支持）\n\n" +
-    "参数：objective（任务目标），filename（.docx 文件名），title（标题），" +
-    "paragraphs（段落数组），style（可选预设风格）。",
-  enabled: true,
-  risk: "safe",
-  capability: "delegate_document",
-  executionKind: "subagent",
-  subAgentProfile: "document",
-  ledgerPolicy: "bypass",
-  effectKind: "mutation" as const,
-  verificationPolicy: "artifact" as const,
-  hideInPlanMode: false,
-  soulActionLabel: "生成文档",
-  soulProjection: {
-    projector: "entity_detail",
-    source: "trusted_internal",
-    fields: {
-      title: "summary",
-      artifactName: "primaryArtifact.name",
-      artifactPath: "primaryArtifact.path",
-      artifactVerified: "primaryArtifact.verified",
-    },
-  },
-  completionEvidence: [{ kind: "tool_succeeded" }],
-  completionEvidenceVerifier: (result) => {
-    try {
-      const parsed = parseSubAgentResult(result.output);
-      return parsed.status === "succeeded"
-        && parsed.artifacts.length > 0
-        && parsed.artifacts.every(a => a.verified)
-        && parsed.artifacts.some(a => !!a.path);
-    } catch {
-      return false;
-    }
-  },
-  inputSchema: {
-    type: "object",
-    properties: {
-      objective: { type: "string", description: "任务目标描述，如「将新闻资料生成 Word 简报」" },
-      filename: { type: "string", description: "文件名，必须以 .docx 结尾，如 AI新闻简报.docx" },
-      title: { type: "string", description: "文档标题" },
-      paragraphs: {
-        type: "array",
-        description: "段落内容数组，每项是一段文本",
-        items: { type: "string" },
-      },
-      style: {
-        type: "string",
-        description: "预设风格：default(商务) / academic(学术) / clean(极简) / elegant(优雅) / formal(公文)",
-      },
-    },
-    required: ["objective", "filename", "title", "paragraphs"],
-  },
-  // 子代理虚拟工具的 execute 不会被直接调用——executionKind=subagent 时
-  // 主图 execute 节点会走专用 Executor。保留防误调用保护。
-  execute: async () => {
-    throw new Error("SUBAGENT_MUST_USE_SPECIAL_EXECUTOR");
-  },
-});
-
-// ── 工具：delegate_search（搜索子代理入口）─────────────────────
-// 虚拟工具：对 Action Gate 是工具，执行时走搜索子代理 Executor。
-// 与原子 web_search 的区别：
-//   web_search = 一次搜索，返回结果列表
-//   delegate_search = 多来源研究任务，子代理自主搜索+读取+验证+整理
-toolRegistry.register({
-  id: "delegate_search",
-  name: "委托搜索研究",
-  description:
-    "把多来源搜索研究任务委托给搜索子代理。子代理自主执行多轮搜索、读取原网页、" +
-    "验证来源、去重并整理为结构化 findings。\n\n" +
-    "何时用：\n" +
-    "- 需要从多个来源收集和对比信息\n" +
-    "- 需要读取搜索结果中的原网页获取详细内容\n" +
-    "- 需要验证来源、去重和整理精选结果\n" +
-    "- 例如：「调查最近AI框架变化，对比多个来源」\n\n" +
-    "不要用于：\n" +
-    "- 只需要一次简单搜索（直接用 web_search）\n" +
-    "- 只需要读取一个已知网址（直接用 fetch_url）\n" +
-    "- 生成文档（用 delegate_document）\n\n" +
-    "参数：objective（研究目标描述），requiresDeepReading（可选，是否需要读取原网页）。",
-  enabled: true,
-  risk: "safe",
-  capability: "delegate_search",
-  executionKind: "subagent",
-  subAgentProfile: "search",
-  ledgerPolicy: "bypass",
-  effectKind: "read" as const,
-  verificationPolicy: "none" as const,
-  hideInPlanMode: false,
-  soulActionLabel: "搜索研究",
-  soulProjection: {
-    projector: "entity_list",
-    source: "external_untrusted",
-    itemsPath: "findings",
-    fields: {
-      title: "title",
-      content: "content",
-      source: "source",
-    },
-    maxItems: 10,
-  },
-  completionEvidence: [{ kind: "tool_succeeded" }],
-  completionEvidenceVerifier: (result) => {
-    try {
-      const parsed = parseSubAgentResult(result.output);
-      return parsed.status === "succeeded"
-        && parsed.findings.length > 0
-        && parsed.findings.every(f => !!f.source);
-    } catch {
-      return false;
-    }
-  },
-  inputSchema: {
-    type: "object",
-    properties: {
-      objective: { type: "string", description: "研究目标描述，如「调查最近AI框架变化，对比多个来源」" },
-      requiresDeepReading: { type: "boolean", description: "是否需要读取原网页获取详细内容（默认 false）" },
-    },
-    required: ["objective"],
-  },
-  execute: async () => {
-    throw new Error("SUBAGENT_MUST_USE_SPECIAL_EXECUTOR");
-  },
 });
 
 toolRegistry.register(createPlayLive2DActionTool({ sendToLive2DWindow }));

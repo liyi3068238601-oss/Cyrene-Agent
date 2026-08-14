@@ -10,6 +10,7 @@ import {
   type OnRunFinishedDeps,
 } from "./build-options"
 import type { SocialAtom } from "../social-context/types"
+import type { ConversationMode } from "../../shared/chat-types"
 
 function createBuildDeps(): BuildOptionsDeps {
   return {
@@ -23,7 +24,13 @@ function createBuildDeps(): BuildOptionsDeps {
     buildEnvironmentContext: () => "ENV",
     buildSkillCatalog: () => "",
     buildAutoInjectedSkillContext: () => "",
-    skillRegistry: { getEnabled: () => [] },
+    skillRegistry: {
+      getEnabled: () => [],
+      // 三模适配层：测试 mock skill 都不声明 modes，等价于全模式通用。
+      getEnabledForMode(this: { getEnabled(): ReadonlyArray<unknown> }, _mode: import("../skills/types").SkillMode) {
+        return this.getEnabled()
+      },
+    },
     resolveSlashActivation: () => "",
     buildToneInjection: async () => "",
     sceneEmbeddingIndex: null,
@@ -35,7 +42,14 @@ function createBuildDeps(): BuildOptionsDeps {
     buildSoulSystemBasePrompt: () => "SOUL_SYSTEM_BASE",
     readStylePrompt: (styleId) => `STYLE_PROMPT:${styleId}`,
     resolveSoulSampling: () => ({}),
-    toolRegistry: { getEnabled: () => [] },
+    toolRegistry: {
+      getEnabled: () => [],
+      // 三模适配层：测试 mock 工具都不声明 modes，等价于全模式通用，
+      // 因此 getEnabledToolsForMode 直接转发到 getEnabled，单测覆写 getEnabled 即可生效。
+      getEnabledToolsForMode(this: { getEnabled(): ReadonlyArray<unknown> }, _mode: ConversationMode) {
+        return this.getEnabled()
+      },
+    },
     normalizeChatMessages: (raw) => raw as never,
     chatRequestTimeoutMs: 1000,
     loadActionGateSystemPrompt: () => "",
@@ -47,6 +61,17 @@ function createBuildDeps(): BuildOptionsDeps {
 }
 
 describe("build-options", () => {
+  it.each(["chat", "work", "learn", "code"] as const)("uses the explicit %s mode prompt", async (mode) => {
+    const deps = createBuildDeps();
+    deps.buildModePrompt = (target) => `[MODE:${target}]`;
+    const result = await buildAgentRunOptions({
+      sessionId: `${mode}-session`,
+      mode,
+      executionMode: mode === "chat" ? "chat" : "work",
+      messages: [{ role: "user", content: "你好" }],
+    }, deps);
+    expect(result.options.soulSystemBaseContent).toContain(`[MODE:${mode}]`);
+  });
   it("builds the lightweight Ask Soul prompt in the approved order with trusted identity only", async () => {
     const deps = createBuildDeps()
     deps.loadUserProfile = () => ({
@@ -103,6 +128,30 @@ describe("build-options", () => {
     expect(result.options.settings.reasoning).toEqual({ mode: "off" })
   })
 
+  it.each(["chat", "work", "code", "learn"] as const)(
+    "preserves the saved reasoning preference in %s mode",
+    async (executionMode) => {
+      const deps = createBuildDeps()
+      deps.loadModelSettings = () => ({
+        provider: "Qwen（通义千问）",
+        baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        model: "qwen3-max",
+        apiKey: "k",
+        reasoning: { mode: "on" },
+      })
+
+      const result = await buildAgentRunOptions({
+        messages: [{ role: "user", content: "你好" }],
+        style: "01_default.md",
+        executionMode,
+        mode: executionMode,
+      }, deps)
+
+      expect(result.options.settings.reasoning).toEqual({ mode: "on" })
+      expect(result.options.executionMode).toBe(executionMode === "chat" ? "chat" : "work")
+    },
+  )
+
   it("adds a concise WeChat system when the run comes from WeChat", async () => {
     const result = await buildAgentRunOptions({
       messages: [{ role: "user", content: "你好" }],
@@ -149,8 +198,10 @@ describe("build-options", () => {
       style: "01_default.md",
     }, deps)
 
-    expect(result.options.messages[0].content).toBe("[2026-07-12 20:00, Asia/Taipei]\n今天有点累")
-    expect(result.options.messages[2].content).toBe("[2026-07-13 11:00, Asia/Taipei]\n我回来啦")
+    expect(result.options.messages[0].content).toContain("<internal_context>用户发送这条消息的时间：2026-07-12 20:00")
+    expect(result.options.messages[2].content).toContain("<internal_context>用户发送这条消息的时间：2026-07-13 11:00")
+    expect(result.options.soulSystemBaseContent).toContain("## Internal Context Policy")
+    expect(result.options.toolSystemContent).toContain("## Internal Context Policy")
     expect(result.options.soulSystemBaseContent).toContain("[对话时间信息]")
     expect(result.options.soulSystemBaseContent).toContain("距离上一条有效聊天消息：约 14 小时 58 分钟")
     expect(result.options.soulSystemBaseContent.match(/距离上一条有效聊天消息/g)).toHaveLength(1)

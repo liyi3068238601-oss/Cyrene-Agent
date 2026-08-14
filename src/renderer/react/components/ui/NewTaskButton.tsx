@@ -3,16 +3,23 @@ interface NewTaskButtonProps {
   onClick?: () => void;
 }
 
-export function NewTaskButton({ label = "新建任务", onClick }: NewTaskButtonProps) {
+export function NewTaskButton({ label = "新建", onClick }: NewTaskButtonProps) {
   return (
-    <button className="cy-new-task" onClick={onClick} type="button">
-      <div className="cy-new-task-icon">
-        <svg width="20" height="20" viewBox="0 0 48 48" fill="none">
-          <path d="M24.0605 10L24.0239 38" stroke="currentColor" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
-          <path d="M10 24L38 24" stroke="currentColor" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
+    <button className="cy-side-action" onClick={onClick} type="button">
+      <span className="cy-side-action-icon">
+        <svg width="18" height="18" viewBox="0 0 48 48" fill="none">
+          <path
+            d="M24 4C34 4 43 12 43 22C43 31 35.5 39.5 25 39.5C22.5 39.5 20.5 39 18.5 38L9.5 44L11.5 34C7.5 31 5 27 5 22C5 12 14 4 24 4Z"
+            stroke="currentColor"
+            strokeWidth="4"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+          <path d="M24 16V28" stroke="currentColor" strokeWidth="4" strokeLinecap="round" />
+          <path d="M18 22H30" stroke="currentColor" strokeWidth="4" strokeLinecap="round" />
         </svg>
-      </div>
-      <span className="cy-new-task-label">{label}</span>
+      </span>
+      <span className="cy-side-action-label">{label}</span>
     </button>
   );
 }

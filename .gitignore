@@ -14,6 +14,7 @@ dist/renderer/sidebar/index.html
 dist/renderer/sticker-manager/index.html
 dist/renderer/tasks/index.html
 dist/renderer/index.html
+dist/renderer/react/index.html
 dist/renderer/live2dcubismcore.min.js
 dist/sim/
 dist/skills/
@@ -26,6 +27,8 @@ resources/bin/*.exe
 
 # OpenCode 二进制 distribution（按需本地下载，不进 git）
 resources/opencode/
+resources/mingit/
+.cache/mingit/
 
 # NOTE: dist/renderer/audio, dist/renderer/avatars, dist/renderer/models,
 # dist/renderer/stickers are intentionally NOT ignored (product assets).
@@ -52,6 +55,9 @@ tmp_*.txt
 tmp/
 tmpr-build.log
 tmprenderer-build.log
+
+# Legacy preview folder (不在代码引用，体积 ~4MB；从历史 commit 中移除并忽略)
+preview/
 
 # Playwright CLI scratch
 .playwright-cli/

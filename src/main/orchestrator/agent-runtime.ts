@@ -6,6 +6,7 @@ import type { GeneralSettings } from "../settings/general-settings";
 import type { UserProfile } from "../settings-store";
 import { loadVisionConfig } from "../settings/model-settings";
 import { getTimeoutSettings } from "../timeout-manager";
+import { resolveModelSettingsProfile } from "../settings/model-settings";
 import { normalizeChatMessages } from "../chat-api-utils";
 import { parseObserverFeeling } from "../chat-stream-utils";
 import { validateCaptionImagePath, IMAGE_CAPTION_PROMPT } from "../chat/image-caption";
@@ -26,7 +27,8 @@ import { feelingToExpression } from "../runtime-state";
 import { resolveSlashActivation } from "../skills/slash-activation";
 import type { CitaService } from "../cita";
 import type { SocialAtom, SocialExtractionInput } from "../social-context/types";
-import type { ToolDefinition } from "./tool-registry";
+import type { ToolDefinition, ToolModeOverrides } from "./tool-registry";
+import type { ConversationMode } from "../../shared/chat-types";
 import {
   buildAgentRunOptions,
   onAgentRunFinished,
@@ -36,13 +38,14 @@ import {
 } from "./build-options";
 import { type CyreneRunResult, type CyreneRunOptions } from "./cyrene-agent";
 import {
-  buildSystemPrompt,
   buildToolSystemPrompt,
   buildSoulSystemBasePrompt,
   readStylePrompt,
   resolveSoulSamplingForStyle,
   loadSoulFeelingContext,
 } from "./system-prompt-builder";
+import { buildModePrompt } from "./mode-prompt-profile";
+import { resolveRunCapabilities } from "./run-capabilities";
 import { loadStickerSettings } from "./sticker-settings";
 import type { RuntimeStateService } from "./runtime-state-service";
 import type { LlmClient } from "../services/llm/llm-client";
@@ -60,7 +63,10 @@ export interface AgentRuntimeDeps {
   loadModelSettings: () => ModelSettings;
   loadGeneralSettings: () => GeneralSettings;
   loadUserProfile: () => UserProfile;
-  toolRegistry: { getEnabledTools: () => ToolDefinition[] };
+  toolRegistry: {
+    getEnabledTools: () => ToolDefinition[];
+    getEnabledToolsForMode: (mode: ConversationMode, overrides?: ToolModeOverrides) => ToolDefinition[];
+  };
   skillRegistry: typeof skillRegistry;
   getSceneEmbeddingIndex: () => unknown;
   getStickerEmbeddingIndex: () => unknown;
@@ -128,7 +134,7 @@ export function createAgentRuntime(rawDeps: AgentRuntimeDeps): AgentRuntime {
 
   function buildBuildOptionsDeps(): BuildOptionsDeps {
     return {
-      loadModelSettings: () => rawDeps.loadModelSettings(),
+      loadModelSettings: (modelProfileId?: string) => resolveModelSettingsProfile(rawDeps.loadModelSettings(), modelProfileId),
       loadGeneralSettings: () => rawDeps.loadGeneralSettings(),
       loadUserProfile: () => rawDeps.loadUserProfile(),
       buildEnvironmentContext: ((model, profile) =>
@@ -143,9 +149,13 @@ export function createAgentRuntime(rawDeps: AgentRuntimeDeps): AgentRuntime {
         buildAutoInjectedSoulContext(skills as any, (id) =>
           rawDeps.skillRegistry.getBody(id),
         )) as BuildOptionsDeps["buildAutoInjectedSoulContext"],
-      skillRegistry: { getEnabled: () => rawDeps.skillRegistry.getEnabled() as unknown[] },
-      resolveSlashActivation: ((messages) =>
-        resolveSlashActivation(messages as any)) as BuildOptionsDeps["resolveSlashActivation"],
+      skillRegistry: {
+        getEnabled: () => rawDeps.skillRegistry.getEnabled() as unknown[],
+        getEnabledForMode: (mode, overrides) =>
+          rawDeps.skillRegistry.getEnabledForMode(mode, overrides) as unknown[],
+      },
+      resolveSlashActivation: ((messages, mode, overrides) =>
+        resolveSlashActivation(messages as any, mode, overrides)) as BuildOptionsDeps["resolveSlashActivation"],
       buildToneInjection: ((userText, messages, provider, index) =>
         buildToneInjection(userText, messages as any, provider as any, index as any)) as BuildOptionsDeps["buildToneInjection"],
       sceneEmbeddingIndex: rawDeps.getSceneEmbeddingIndex(),
@@ -154,13 +164,22 @@ export function createAgentRuntime(rawDeps: AgentRuntimeDeps): AgentRuntime {
       buildAlwaysOnContext: ((userText, messages) =>
         buildAlwaysOnContext(userText, messages as any)) as BuildOptionsDeps["buildAlwaysOnContext"],
       buildRelationshipContext,
-      buildSystemPrompt,
-      buildToolSystemPrompt: ((enabledTools, isOptimizedFirstRound) =>
-        buildToolSystemPrompt(enabledTools as ToolDefinition[], isOptimizedFirstRound)) as BuildOptionsDeps["buildToolSystemPrompt"],
+      buildModePrompt,
+      buildToolSystemPrompt: ((mode, enabledTools, isOptimizedFirstRound) =>
+        buildToolSystemPrompt(mode, enabledTools as ToolDefinition[], isOptimizedFirstRound)) as BuildOptionsDeps["buildToolSystemPrompt"],
       buildSoulSystemBasePrompt,
+      resolveRunCapabilities: ({ mode, activeSearchBackend, toolModeOverrides, skillModeOverrides }) => resolveRunCapabilities({
+        mode, activeSearchBackend, toolModeOverrides, skillModeOverrides,
+        toolRegistry: rawDeps.toolRegistry,
+        skillRegistry: rawDeps.skillRegistry,
+      }),
       readStylePrompt,
       resolveSoulSampling: resolveSoulSamplingForStyle,
-      toolRegistry: { getEnabled: () => rawDeps.toolRegistry.getEnabledTools() as unknown[] },
+      toolRegistry: {
+        getEnabled: () => rawDeps.toolRegistry.getEnabledTools() as unknown[],
+        getEnabledToolsForMode: (mode: ConversationMode, overrides?: ToolModeOverrides) =>
+          rawDeps.toolRegistry.getEnabledToolsForMode(mode, overrides) as unknown[],
+      },
       normalizeChatMessages: ((raw) =>
         normalizeChatMessages(raw as any)) as BuildOptionsDeps["normalizeChatMessages"],
       chatRequestTimeoutMs: getTimeoutSettings().chatRequestTimeout,
@@ -242,11 +261,17 @@ export function createAgentRuntime(rawDeps: AgentRuntimeDeps): AgentRuntime {
     buildSchedulerOptions: async (task) => {
       const settings = rawDeps.loadModelSettings();
       const profile = rawDeps.loadUserProfile();
+      const generalSettings = rawDeps.loadGeneralSettings();
       const messages = [{ role: "user" as const, content: task.prompt }];
+      // 定时任务默认按 work 模式过滤 skill，并尊重 skill-模式覆盖层。
+      const scheduledSkills = rawDeps.skillRegistry.getEnabledForMode(
+        "work",
+        generalSettings.skillModeOverrides,
+      );
       const systemContent = [
-        buildSystemPrompt("01_default.md"),
+        buildModePrompt("work"),
         buildEnvironmentContext({ provider: settings.provider, model: settings.model }, profile),
-        buildSkillCatalog(rawDeps.skillRegistry.getEnabled()),
+        buildSkillCatalog(scheduledSkills),
         await buildAlwaysOnContext(task.prompt, messages),
       ].join("\n\n---\n\n");
       return {
@@ -258,7 +283,8 @@ export function createAgentRuntime(rawDeps: AgentRuntimeDeps): AgentRuntime {
           contextWindowTokens: settings.contextWindowTokens,
         },
         messages: [{ role: "system" as const, content: systemContent }, ...messages],
-        timeoutMs: getTimeoutSettings().chatRequestTimeout,
+        // 定时任务也不因整轮耗时被中断；仍保留单次模型/工具自身的超时。
+        timeoutMs: 0,
       };
     },
   };

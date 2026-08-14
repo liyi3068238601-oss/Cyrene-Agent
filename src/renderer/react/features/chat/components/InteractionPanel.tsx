@@ -11,6 +11,9 @@ import {
   type PermissionInteraction,
 } from "./run-presentation";
 import "./RunExperience.css";
+import moodWarmUrl from "../../../assets/status-moods/温柔.png?url";
+import moodCompanyUrl from "../../../assets/status-moods/陪伴中.png?url";
+import moodSpoiledUrl from "../../../assets/status-moods/撒娇.png?url";
 
 function PanelShell({ children, title }: { children: ReactNode; title: string }) {
   return (
@@ -24,7 +27,6 @@ export function AskUserPanel({
   interaction,
   disabled = false,
   onAnswer,
-  onIgnore,
 }: {
   interaction: AskUserInteraction;
   disabled?: boolean;
@@ -69,8 +71,9 @@ export function AskUserPanel({
 
   return (
     <PanelShell title="昔涟正在询问">
+      <img src={moodWarmUrl} className="cy-interaction-panel__mood-bottom-left" alt="" />
       <div className="cy-interaction-panel__heading">
-        <span className="cy-interaction-panel__status">昔涟正在询问</span>
+        <span className="cy-interaction-panel__status"><img src={moodCompanyUrl} alt="" />昔涟正在询问</span>
         {questions.length > 1 && (
           <nav className="cy-interaction-panel__pager" aria-label="切换问题">
             <button type="button" aria-label="上一个问题" disabled={disabled || page === 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>‹</button>
@@ -81,36 +84,40 @@ export function AskUserPanel({
       </div>
       {interaction.intro && <p className="cy-interaction-panel__intro">{interaction.intro}</p>}
       <p className="cy-interaction-panel__question">{current.question}</p>
-      <div className="cy-interaction-panel__options" role={current.multiple ? "group" : "radiogroup"} aria-label={current.question}>
-        {current.options.map((option, index) => (
-          <button
-            type="button"
-            key={option.id}
-            className={currentDraft.optionIds.includes(option.id) ? "is-selected" : ""}
-            role={current.multiple ? "checkbox" : "radio"}
-            aria-checked={currentDraft.optionIds.includes(option.id)}
+      {current.options.length > 0 && (
+        <div className="cy-interaction-panel__options" role={current.multiple ? "group" : "radiogroup"} aria-label={current.question}>
+          {current.options.map((option, index) => (
+            <button
+              type="button"
+              key={option.id}
+              className={currentDraft.optionIds.includes(option.id) ? "is-selected" : ""}
+              role={current.multiple ? "checkbox" : "radio"}
+              aria-checked={currentDraft.optionIds.includes(option.id)}
+              disabled={disabled}
+              onClick={() => {
+                setDrafts((values) => selectAskOption(values, current, option.id));
+              }}
+            >
+              <span className="cy-interaction-panel__option-index">{index + 1}.</span>
+              <span>
+                <strong>{option.label}</strong>
+                {option.description && <small>{option.description}</small>}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+      {current.allowCustomInput !== false && (
+        <label className="cy-interaction-panel__custom-answer">
+          <span>其他回答</span>
+          <input
+            value={currentDraft.customText}
             disabled={disabled}
-            onClick={() => {
-              setDrafts((values) => selectAskOption(values, current, option.id));
-            }}
-          >
-            <span className="cy-interaction-panel__option-index">{index + 1}.</span>
-            <span>
-              <strong>{option.label}</strong>
-              {option.description && <small>{option.description}</small>}
-            </span>
-          </button>
-        ))}
-      </div>
-      <label className="cy-interaction-panel__custom-answer">
-        <span>其他回答</span>
-        <input
-          value={currentDraft.customText}
-          disabled={disabled}
-          placeholder={current.freeTextPlaceholder ?? "输入你的回答…"}
-          onChange={(event) => setDrafts((values) => updateAskCustomText(values, current.id, event.target.value))}
-        />
-      </label>
+            placeholder={current.freeTextPlaceholder ?? "输入你的回答…"}
+            onChange={(event) => setDrafts((values) => updateAskCustomText(values, current.id, event.target.value))}
+          />
+        </label>
+      )}
       {questions.length > 1 && (
         <div className="cy-interaction-panel__question-index" aria-label="问题完成情况">
           {questions.map((question, index) => {
@@ -121,7 +128,6 @@ export function AskUserPanel({
         </div>
       )}
       <div className="cy-interaction-panel__actions">
-        {interaction.responseKind === "choice" && interaction.source !== "code" && <button type="button" disabled={disabled} onClick={onIgnore}>忽略</button>}
         <button type="button" className="is-primary" disabled={disabled || !canSubmit} onClick={submit}>{questions.length > 1 ? "提交全部" : "提交"}</button>
       </div>
     </PanelShell>
@@ -139,8 +145,9 @@ export function PermissionPanel({
 }) {
   return (
     <PanelShell title="昔涟正在获取审批">
+      <img src={moodWarmUrl} className="cy-interaction-panel__mood-bottom-left" alt="" />
       <div className="cy-interaction-panel__heading">
-        <span className="cy-interaction-panel__status">昔涟正在获取审批</span>
+        <span className="cy-interaction-panel__status"><img src={moodSpoiledUrl} alt="" />昔涟正在获取审批</span>
       </div>
       <p className="cy-interaction-panel__question">{interaction.summary}</p>
       <dl className="cy-interaction-panel__metadata">
