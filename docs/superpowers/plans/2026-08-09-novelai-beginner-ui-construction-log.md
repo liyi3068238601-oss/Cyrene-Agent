@@ -86,3 +86,14 @@ RED/GREEN（Task 1 的实际实现证据）：
 | `git diff --check HEAD~1..HEAD` | 0；无空白错误。 |
 
 提交前工作区检查确认 `dist/renderer/react/index.html` 和 `dist/renderer/novelai/` 仍是未暂存的本地构建产物，未加入本提交；`.superpowers/sdd/` 下的烟测脚本、日志和隔离 profile 同样不提交。
+
+## 合并上游 Cyrene v1.0.5
+
+2026-08-14 在隔离 worktree 中将本地 `master`（上游 Cyrene v1.0.5，`fcd7b90`）合入 `liyi-Cyrene-v2`。合并以新版主程序为基础，保留功能插件运行时、插件设置入口和 NovelAI 插件；旧版已被上游替换的 Cline、Skills 设置实现没有带回。
+
+- 手工处理 6 个文本冲突：`package.json`、主进程入口、设置 facade 测试、设置页 HTML/脚本和 IPC channel 定义。
+- `package-lock.json` 的根版本同步为 `1.0.5`，依赖树按上游新版重新安装。
+- 合并提交：`41d7f56 merge: sync upstream Cyrene v1.0.5`。
+- 提交后运行 `npm.cmd test`：310 个测试文件、2219 项测试全部通过。
+- 提交后运行 `npm.cmd run build`：skills、main、preload、CLI、renderer 全部成功；renderer 转换 8647 个模块并产出 NovelAI 页面，仅保留既有的 >500 kB chunk 警告。
+- 冲突标记扫描和真实尾随空格检查通过；上游部分文件采用混合换行符，因此 Git 的原始 `diff --check` 会把 CRLF 行尾显示为提示，实际没有多余空格。
