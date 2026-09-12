@@ -161,6 +161,9 @@ export interface QqChannelConfig extends ChannelRuntimeConfig {
   accessToken?: string;
   allowedPrivateUserIds: string[];
   allowedGroupIds: string[];
+  /** SnowLuma-only deny lists. NapCat retains the existing allow lists. */
+  blockedUserIds?: string[];
+  blockedGroupIds?: string[];
   groupRequireMention: true;
   groupReplyStyle: "reply-and-mention";
   groupToolPolicy: "off";
@@ -219,6 +222,8 @@ const DEFAULT_SETTINGS: ChannelsSettings = {
     port: 6200,
     allowedPrivateUserIds: [],
     allowedGroupIds: [],
+    blockedUserIds: [],
+    blockedGroupIds: [],
     groupRequireMention: true,
     groupReplyStyle: "reply-and-mention",
     groupToolPolicy: "off",
@@ -312,6 +317,8 @@ feishu: {
       accessToken: typeof q?.accessToken === "string" ? q.accessToken : undefined,
       allowedPrivateUserIds: normalizeIds(q?.allowedPrivateUserIds),
       allowedGroupIds: normalizeIds(q?.allowedGroupIds),
+      blockedUserIds: normalizeIds(q?.blockedUserIds),
+      blockedGroupIds: normalizeIds(q?.blockedGroupIds),
       groupRequireMention: true,
       groupReplyStyle: "reply-and-mention",
       groupToolPolicy: "off",

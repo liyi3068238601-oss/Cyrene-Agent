@@ -427,6 +427,7 @@ const settingsApi = {
   channelsFeishuTestConnection: () => ipcRenderer.invoke(IPC.CHANNELS_FEISHU_TEST_CONNECTION),
   channelsFeishuTestWebhookReachable: () => ipcRenderer.invoke(IPC.CHANNELS_FEISHU_TEST_WEBHOOK_REACHABLE),
   channelsQqTestConnection: () => ipcRenderer.invoke(IPC.CHANNELS_QQ_TEST_CONNECTION),
+  channelsQqInstance: (request: import("../shared/qq-instance").QqInstanceRequest) => ipcRenderer.invoke(IPC.CHANNELS_QQ_INSTANCE, request),
   channelsQqBotTestConnection: () => ipcRenderer.invoke(IPC.CHANNELS_QQBOT_TEST_CONNECTION),
   // 消息日志
   channelsLogGet: (limit?: number) => ipcRenderer.invoke(IPC.CHANNELS_LOG_GET, limit ?? 100),

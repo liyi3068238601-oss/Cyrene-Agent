@@ -111,7 +111,7 @@ export class ChannelDispatcher {
    * 返回的出站消息仅供调用方观测和测试，不要求适配器再次发送。
    */
   async handleIncoming(msg: IncomingMessage): Promise<OutgoingMessage | null> {
-    const sessionId = makeSessionId(msg.channel, msg.chatId);
+    const sessionId = makeSessionId(msg.channel, msg.chatId, msg.accountId);
     // 读取设置会同步刷新限速器，必须发生在本轮额度消费之前。
     void this.settings;
     return this.deps.queue.run(`external:${sessionId}`, async () => {

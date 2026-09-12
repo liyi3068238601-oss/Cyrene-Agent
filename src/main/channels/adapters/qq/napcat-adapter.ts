@@ -21,6 +21,7 @@ import {
   type OneBotVersionInfo,
 } from "./onebot-types";
 import type { QqChannelConfig } from "../../settings-store";
+import { readQqInstance, getSnowLumaRuntime, setQqInstancePhase } from "../../qq-instance";
 
 const CAPABILITY: ChannelCapability = {
   text: true,
@@ -64,11 +65,13 @@ export function isQqEventAllowed(
   event: { message_type: "private" | "group"; user_id: string | number; group_id?: string | number; message: OneBotSegment[] },
   config: QqChannelConfig,
   selfId: string,
+  policy: "allowlist" | "blocklist" = "allowlist",
 ): boolean {
   const senderId = oneBotId(event.user_id);
-  if (event.message_type === "private") return config.allowedPrivateUserIds.includes(senderId);
+  if (policy === "blocklist" && config.blockedUserIds?.includes(senderId)) return false;
+  if (event.message_type === "private") return policy === "blocklist" || config.allowedPrivateUserIds.includes(senderId);
   const groupId = oneBotId(event.group_id);
-  if (!config.allowedGroupIds.includes(groupId)) return false;
+  if (policy === "blocklist" ? config.blockedGroupIds?.includes(groupId) : !config.allowedGroupIds.includes(groupId)) return false;
   return !config.groupRequireMention || event.message.some((segment) =>
     segment.type === "at" && oneBotId(segment.data.qq) === selfId,
   );
@@ -80,7 +83,7 @@ function delay(ms: number): Promise<void> {
 
 export class NapCatAdapter implements ChannelAdapter {
   readonly id = "qq" as const;
-  readonly displayName = "QQ（NapCat）";
+  get displayName(): string { return readQqInstance()?.backend === "snowluma" ? "QQ（SnowLuma）" : "QQ（NapCat）"; }
   readonly capability = CAPABILITY;
   onMessage: MessageHandler | null = null;
 
@@ -102,19 +105,23 @@ export class NapCatAdapter implements ChannelAdapter {
   private supportsStream = false;
   private listeningInfo: OneBotListeningInfo | null = null;
   private dedupe = new Map<string, number>();
+  private inFlight = 0;
 
   constructor(private readonly onStatusChanged?: () => void) {}
 
-  async start(): Promise<void> {
+  async start(manual = false): Promise<void> {
+    if (this.inFlight) throw new Error("旧 QQ 请求尚未结束，请稍后启动，避免跨账号发送");
+    if (this.server) return;
+    const instance = readQqInstance();
     const config = loadChannelsSettings().qq;
-    if (!config.enabled) {
+    if (!config.enabled || (instance && !manual && !instance.autoStart)) {
       this.setStatus({ enabled: false, phase: "offline", message: "未启用" });
       return;
     }
     this.setStatus({ enabled: true, phase: "starting", message: "正在启动 OneBot 监听" });
     await this.media.start();
     this.server = new OneBotReverseWsServer({
-      listenMode: config.listenMode,
+      listenMode: instance?.backend === "snowluma" ? "loopback" : config.listenMode,
       customHost: config.customHost,
       port: config.port,
       accessToken: config.accessToken,
@@ -123,10 +130,11 @@ export class NapCatAdapter implements ChannelAdapter {
       onClientDisconnected: () => {
         this.client = null;
         this.selfId = "";
+        if (instance) setQqInstancePhase("starting", "绑定 QQ 已断开，等待重连；请检查 SL/NapCat 的登录和 Hook 状态");
         this.setStatus({
           enabled: true,
           phase: "starting",
-          message: "监听中，等待 NapCat 重连",
+          message: `监听中，等待 ${this.displayName} 重连`,
           detail: this.statusDetail(),
         });
       },
@@ -141,13 +149,23 @@ export class NapCatAdapter implements ChannelAdapter {
     });
     try {
       this.listeningInfo = await this.server.start();
-      this.setStatus({
-        enabled: true,
-        phase: "starting",
-        message: "监听中，等待 NapCat 连接",
-        detail: this.statusDetail(),
-      });
+      if (instance?.backend === "snowluma") {
+        setQqInstancePhase("starting", "正在启动 SnowLuma");
+        await getSnowLumaRuntime().start(instance.accountId, this.listeningInfo.port, config.accessToken ?? "");
+      }
+      // The backend can complete its OneBot handshake before WebUI startup returns.
+      if (!this.selfId) {
+        if (instance) setQqInstancePhase("running", "实例已启动，等待绑定 QQ 连接");
+        this.setStatus({
+          enabled: true,
+          phase: "starting",
+          message: `监听中，等待 ${this.displayName} 连接`,
+          detail: this.statusDetail(),
+        });
+      }
     } catch (error) {
+      await this.server?.stop();
+      await getSnowLumaRuntime().stop();
       this.media.stop();
       this.server = null;
       const message = error instanceof Error ? error.message : String(error);
@@ -167,6 +185,8 @@ export class NapCatAdapter implements ChannelAdapter {
     this.supportsStream = false;
     this.listeningInfo = null;
     this.dedupe.clear();
+    await getSnowLumaRuntime().stop();
+    setQqInstancePhase("stopped", "已停止");
     this.setStatus({ enabled: false, phase: "offline", message: "已停止" });
   }
 
@@ -240,22 +260,28 @@ export class NapCatAdapter implements ChannelAdapter {
     const login = await client.call<OneBotLoginInfo>("get_login_info");
     const version = await client.call<OneBotVersionInfo>("get_version_info");
     const selfId = oneBotId(login.user_id);
+    const instance = readQqInstance();
+    if (instance && selfId !== instance.accountId) throw new Error("连接的 QQ 与实例绑定账号不一致，已拒绝接入");
     if (!selfId) throw new Error("NapCat get_login_info 未返回 user_id");
     if (headerSelfId && headerSelfId !== selfId) throw new Error("NapCat X-Self-ID 与 get_login_info 不一致");
     this.client = client;
     this.selfId = selfId;
     this.nickname = login.nickname ?? "";
     this.appVersion = version.app_version ?? "";
-    this.supportsStream = versionAtLeast(this.appVersion, ONEBOT_STREAM_MIN_VERSION);
+    this.supportsStream = instance?.backend === "snowluma"
+      ? /snowluma/i.test(version.app_name ?? "") && versionAtLeast(this.appVersion, "1.14.15")
+      : versionAtLeast(this.appVersion, ONEBOT_STREAM_MIN_VERSION);
+    if (instance) setQqInstancePhase("running", `${this.displayName} 已连接绑定账号`);
     this.setStatus({
       enabled: true,
       phase: "running",
-      message: this.supportsStream ? "NapCat 已连接" : `NapCat 已连接；媒体流需要 ${ONEBOT_STREAM_MIN_VERSION}+`,
+      message: `${this.displayName} 已连接${this.supportsStream ? "" : "；媒体流不可用"}`,
       detail: this.statusDetail(),
     });
   }
 
   private async handleEvent(event: OneBotEvent, client: OneBotActionClient): Promise<void> {
+    if (client !== this.client) return;
     if (!isOneBotMessageEvent(event) || event.post_type !== "message") return;
     if (!this.selfId || oneBotId(event.self_id) !== this.selfId || oneBotId(event.user_id) === this.selfId) return;
 
@@ -263,7 +289,8 @@ export class NapCatAdapter implements ChannelAdapter {
     const senderId = oneBotId(event.user_id);
     const chatId = event.message_type === "group" ? oneBotId(event.group_id) : senderId;
     if (!chatId) return;
-    if (!isQqEventAllowed(event, config, this.selfId)) return;
+    const instance = readQqInstance();
+    if (!isQqEventAllowed(event, config, this.selfId, instance?.backend === "snowluma" ? "blocklist" : "allowlist")) return;
 
     const dedupeKey = `${this.selfId}:${oneBotId(event.message_id)}`;
     const now = Date.now();
@@ -271,17 +298,20 @@ export class NapCatAdapter implements ChannelAdapter {
     if (this.dedupe.has(dedupeKey)) return;
     this.dedupe.set(dedupeKey, now + DEDUPE_TTL_MS);
 
+    const accountId = instance?.accountId;
     try {
+      this.inFlight++;
       const incoming = await normalizeOneBotMessage(event, {
         selfId: this.selfId,
         client,
         media: this.media,
         supportsStream: this.supportsStream,
       });
+      incoming.accountId = accountId;
       await this.onMessage?.(incoming);
     } catch (error) {
       console.warn("[NapCatAdapter] QQ 消息处理失败:", error instanceof Error ? error.message : String(error));
-    }
+    } finally { this.inFlight--; }
   }
 
   private async partToPayloads(part: OutgoingPart): Promise<OneBotSegment[][]> {

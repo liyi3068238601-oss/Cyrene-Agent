@@ -80,9 +80,10 @@ const sessionIndex = new Map<
 >();
 
 /** 计算稳定且匿名的渠道会话标识。 */
-export function makeSessionId(channel: ChannelId, chatId: string): string {
+export function makeSessionId(channel: ChannelId, chatId: string, account?: string): string {
+  // Managed accounts have separate histories; legacy installations retain their keys.
   const hash = createHash("sha256")
-    .update(`${channel}:${chatId}`)
+    .update(account ? `${channel}:${account}:${chatId}` : `${channel}:${chatId}`)
     .digest("hex")
     .slice(0, 16);
   return `channel:${channel}:${hash}`;
@@ -134,7 +135,7 @@ export function createChannelContext(
 
     recordIncomingSession(msg, context): void {
       options.migrateHistory(
-        makeSessionId(msg.channel, msg.senderId),
+        makeSessionId(msg.channel, msg.senderId, msg.accountId),
         context.sessionId,
       );
       recordSession(msg.channel, msg.senderId, context.sessionId);

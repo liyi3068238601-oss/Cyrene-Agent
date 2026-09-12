@@ -9,7 +9,9 @@
 //   - shutdownChannels()：停 adapter + inbound-server，并复位两个 flag
 //
 // 注意：startChannels 必须晚于 initRAG / initMcpManager / loadModelSettings。
-import { app, BrowserWindow } from "electron";
+import { app, BrowserWindow, shell } from "electron";
+import type { QqInstanceRequest } from "../../shared/qq-instance";
+import { readQqInstance, qqInstanceStatus, withQqInstanceOperation, createQqInstance, configureQqInstance, deleteQqInstance } from "./qq-instance";
 import { IPC } from "../../shared/ipc-channels";
 import { createIpcScope, type IpcScope } from "../application/ipc-scope";
 import {
@@ -145,6 +147,8 @@ export async function startChannels(signal?: AbortSignal): Promise<void> {
 /** app.on('before-quit') 调 */
 export async function shutdownChannels(): Promise<void> {
   await channelManager.stopAll();
+  // Manual starts may not be in the manager's startAll bookkeeping.
+  await qqAdapter?.stop();
   await stopInboundServer();
   initialized = false;
   started = false;
@@ -158,7 +162,64 @@ function registerChannelsIpc(
   const ipc = ipcOption ?? createIpcScope();
   ipc.handle(IPC.CHANNELS_GET_CONFIG, () => getPublicChannelsSettings());
 
+  ipc.handle(IPC.CHANNELS_QQ_INSTANCE, async (_e, request: QqInstanceRequest) => {
+    if (!request || typeof request.action !== "string") throw new Error("无效实例操作");
+    if (request.action === "status") return qqInstanceStatus();
+    return withQqInstanceOperation(async () => {
+      if (!qqAdapter) throw new Error("QQ adapter 未初始化");
+      let instance: ReturnType<typeof readQqInstance>;
+      try { instance = readQqInstance(); }
+      catch (error) {
+        // Allow explicit cleanup of a corrupted manifest, but never skip backend
+        // ownership checks for a valid instance when another settings window is stale.
+        if (request.action !== "delete") throw error;
+        instance = null;
+      }
+      if (instance && request.backend && request.backend !== instance.backend) throw new Error("另一 QQ 后端已占用该实例，请刷新后重试");
+      switch (request.action) {
+        case "create":
+          if (instance) throw new Error("只允许一个 QQ 实例，请先删除现有实例");
+          if (loadChannelsSettings().qq.enabled) throw new Error("请先停止现有 QQ 渠道");
+          await qqAdapter.stop();
+          await createQqInstance(request);
+          break;
+        case "configure": configureQqInstance(request.autoStart === true); break;
+        case "start":
+        case "restart": {
+          if (!instance) throw new Error("请先创建 QQ 实例");
+          await qqAdapter.stop();
+          const qq = loadChannelsSettings().qq;
+          saveChannelsSettings({ qq: { ...qq, enabled: true } });
+          await qqAdapter.start(true);
+          break;
+        }
+        case "stop":
+        case "delete": {
+          await qqAdapter.stop();
+          saveChannelsSettings({ qq: { ...loadChannelsSettings().qq, enabled: false } });
+          if (request.action === "delete") await deleteQqInstance(request.removeData === true);
+          break;
+        }
+        case "open": {
+          const url = qqInstanceStatus().webuiUrl;
+          if (!url || !/^http:\/\/127\.0\.0\.1:\d+\/$/.test(url)) throw new Error("WebUI 尚未就绪");
+          await shell.openExternal(url);
+          break;
+        }
+        default: throw new Error("不支持的 QQ 实例操作");
+      }
+      reloadDispatcherSettings();
+      broadcastChannelsStatus();
+      return qqInstanceStatus();
+    });
+  });
+
   ipc.handle(IPC.CHANNELS_SAVE_CONFIG, (_e, patch: unknown) => {
+    const incoming = patch as { qq?: Record<string, unknown> };
+    if (incoming?.qq && readQqInstance()?.backend === "snowluma") {
+      const current = loadChannelsSettings().qq;
+      incoming.qq = { ...incoming.qq, port: current.port, listenMode: "loopback", accessToken: current.accessToken };
+    }
     saveChannelsSettings(patch as Parameters<typeof saveChannelsSettings>[0]);
     reloadDispatcherSettings();
     return getPublicChannelsSettings();
@@ -168,12 +229,16 @@ function registerChannelsIpc(
 
   ipc.handle(IPC.CHANNELS_GET_STATUS, () => channelManager.getAllStatus());
 
-  ipc.handle(IPC.CHANNELS_RESTART, async () => {
+  ipc.handle(IPC.CHANNELS_RESTART, () => withQqInstanceOperation(async () => {
+    const instance = readQqInstance();
+    const qqPhase = qqAdapter?.getStatus().phase;
+    const resumeManual = instance && !instance.autoStart && (qqPhase === "running" || qqPhase === "starting");
     await channelManager.stopAll();
     await channelManager.startAll();
+    if (resumeManual) await qqAdapter?.start(true);
     broadcastChannelsStatus();
     return { ok: true };
-  });
+  }));
 
   // ── 微信 IPC (iLink 直连版) ───────────────────────────────────────────────────────
 

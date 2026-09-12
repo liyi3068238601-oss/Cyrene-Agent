@@ -68,6 +68,8 @@ describe("channels/settings-store", () => {
       accessToken: "qq-secret",
       allowedPrivateUserIds: [" 10001 ", "bad", "10001"],
       allowedGroupIds: ["20001"],
+      blockedUserIds: [" 30001 ", "bad", "30001"],
+      blockedGroupIds: ["40001"],
       groupRequireMention: true,
       groupReplyStyle: "reply-and-mention",
       groupToolPolicy: "off",
@@ -79,6 +81,8 @@ describe("channels/settings-store", () => {
     expect(loaded.qq.accessToken).toBe("qq-secret");
     expect(loaded.qq.allowedPrivateUserIds).toEqual(["10001"]);
     expect(loaded.qq.allowedGroupIds).toEqual(["20001"]);
+    expect(loaded.qq.blockedUserIds).toEqual(["30001"]);
+    expect(loaded.qq.blockedGroupIds).toEqual(["40001"]);
   });
 
   it("saveChannelsSettings + load: 私密字段加密落盘 + 解密还原", () => {

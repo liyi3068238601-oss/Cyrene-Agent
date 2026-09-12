@@ -297,6 +297,7 @@ export interface SettingsApi {
   channelsSaveConfig: (patch: unknown) => Promise<any>;
   channelsRestart: () => Promise<{ ok: boolean }>;
   channelsQqTestConnection: () => Promise<{ ok: boolean; error?: string; detail?: Record<string, unknown> }>;
+  channelsQqInstance: (request: import("../../../shared/qq-instance").QqInstanceRequest) => Promise<import("../../../shared/qq-instance").QqInstanceStatus>;
   channelsQqBotTestConnection: () => Promise<{ ok: boolean; error?: string; detail?: Record<string, unknown> }>;
   channelsLogGet: (limit?: number) => Promise<unknown[]>;
   channelsLogClear: () => Promise<{ ok: boolean }>;

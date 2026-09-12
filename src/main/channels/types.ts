@@ -60,6 +60,8 @@ export interface ChannelAttachment {
 
 /** 入站消息。adapters → dispatcher。 */
 export interface IncomingMessage {
+  /** Managed backend account namespace. Legacy adapters leave this undefined. */
+  accountId?: string;
   channel: ChannelId;
   /** 私聊或群聊。旧渠道未声明时按 private 处理。 */
   chatType?: ChannelChatType;
