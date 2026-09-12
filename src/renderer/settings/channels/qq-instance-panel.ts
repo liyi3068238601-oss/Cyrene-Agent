@@ -59,6 +59,8 @@ export function bindQqInstancePanel(onChanged: () => Promise<void>): void {
   const refresh = async () => {
     try {
       const state = await window.settings.channelsQqInstance({ action: "status" });
+      // 操作失败后轮询恢复时不能继续显示过期错误，render 优先展示 lastError。
+      lastError = "";
       render(state);
       const config = await window.settings.channelsGetConfig() as QqPublicConfig;
       if (!dirty || draftAccount !== state.instance?.accountId) {

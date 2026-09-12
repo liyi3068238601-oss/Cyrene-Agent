@@ -22,6 +22,7 @@ import {
 } from "./onebot-types";
 import type { QqChannelConfig } from "../../settings-store";
 import { readQqInstance, getSnowLumaRuntime, setQqInstancePhase } from "../../qq-instance";
+import { SNOWLUMA_VERSION } from "../../snowluma-runtime";
 
 const CAPABILITY: ChannelCapability = {
   text: true,
@@ -94,7 +95,7 @@ export class NapCatAdapter implements ChannelAdapter {
     this.setStatus({
       enabled: true,
       phase: "running",
-      message: `NapCat Stream API 不可用；请升级到 ${ONEBOT_STREAM_MIN_VERSION}+`,
+      message: `${this.displayName} Stream API 不可用；请升级到 ${this.streamMinVersion()}+`,
       detail: this.statusDetail(),
     });
   });
@@ -201,7 +202,7 @@ export class NapCatAdapter implements ChannelAdapter {
   }
 
   async testConnection(): Promise<{ ok: boolean; error?: string; detail?: Record<string, unknown> }> {
-    if (!this.client || !this.selfId) return { ok: false, error: "NapCat 尚未连接" };
+    if (!this.client || !this.selfId) return { ok: false, error: `${this.displayName} 尚未连接` };
     try {
       const status = await this.client.call<Record<string, unknown>>("get_status");
       return { ok: true, detail: { ...this.statusDetail(), protocolStatus: status } };
@@ -212,7 +213,7 @@ export class NapCatAdapter implements ChannelAdapter {
 
   async send(msg: OutgoingMessage): Promise<{ ok: boolean; error?: string }> {
     const client = this.client;
-    if (!client || !this.selfId) return { ok: false, error: "NapCat 未连接" };
+    if (!client || !this.selfId) return { ok: false, error: `${this.displayName} 未连接` };
     const payloads: OneBotSegment[][] = [];
     let lastError: string | undefined;
 
@@ -269,7 +270,7 @@ export class NapCatAdapter implements ChannelAdapter {
     this.nickname = login.nickname ?? "";
     this.appVersion = version.app_version ?? "";
     this.supportsStream = instance?.backend === "snowluma"
-      ? /snowluma/i.test(version.app_name ?? "") && versionAtLeast(this.appVersion, "1.14.15")
+      ? /snowluma/i.test(version.app_name ?? "") && versionAtLeast(this.appVersion, SNOWLUMA_VERSION)
       : versionAtLeast(this.appVersion, ONEBOT_STREAM_MIN_VERSION);
     if (instance) setQqInstancePhase("running", `${this.displayName} 已连接绑定账号`);
     this.setStatus({
@@ -356,8 +357,13 @@ export class NapCatAdapter implements ChannelAdapter {
       nickname: this.nickname || undefined,
       appVersion: this.appVersion || undefined,
       supportsStream: this.supportsStream,
-      streamMinimumVersion: ONEBOT_STREAM_MIN_VERSION,
+      streamMinimumVersion: this.streamMinVersion(),
     };
+  }
+
+  /** SnowLuma 与 NapCat 的媒体流版本门槛不同，状态上报需与 supportsStream 判断一致。 */
+  private streamMinVersion(): string {
+    return readQqInstance()?.backend === "snowluma" ? SNOWLUMA_VERSION : ONEBOT_STREAM_MIN_VERSION;
   }
 
   private setStatus(status: ChannelStatus): void {
