@@ -1162,18 +1162,103 @@
             </div>
           </div>
 
-          <div class="channels-card">
+          <div class="channels-card" id="qq-snowluma-card">
+            <div class="channels-card__header"><h2>QQ（SnowLuma）</h2></div>
+            <div class="channels-card__body">
+              <section id="qq-instance-panel" aria-label="唯一 QQ 接入实例">
+                <p class="channels-card__hint">内置安装并管理 SnowLuma，只绑定一个机器人 QQ。与 NapCat 互斥，最多一个实例。空黑名单默认放行所有私聊，群聊仍需 @；群聊共享个人记忆，私聊工具权限沿用全局渠道设置，请使用专用机器人账号。</p>
+
+                <div class="form-row">
+                  <label class="form-label" for="qq-instance-account">机器人 QQ 号</label>
+                  <input id="qq-instance-account" class="form-input form-input--wide" inputmode="numeric" placeholder="绑定后拒绝其他账号接入" />
+                </div>
+                <div class="form-row">
+                  <button type="button" class="btn-secondary" data-action="create">创建实例</button>
+                  <button type="button" class="btn-secondary" data-action="start">启动</button>
+                  <button type="button" class="btn-secondary" data-action="stop">停止</button>
+                  <button type="button" class="btn-secondary" data-action="restart">重启</button>
+                </div>
+                <label><input id="qq-instance-auto" type="checkbox" /> 随 Cyrene 启动（需 QQ 渠道已启用）</label>
+                <div class="form-row">
+                  <input id="qq-instance-url" class="form-input form-input--wide" readonly aria-label="SnowLuma WebUI 地址" placeholder="启动就绪后显示 WebUI 链接" />
+                  <button type="button" class="btn-secondary" data-action="open">打开 WebUI</button>
+                </div>
+                <p class="channels-card__hint">创建将下载官方 Windows x64 包。首次凭据保存在实例目录 snowluma/webui-initial-credentials.txt（敏感文件，改密后请删除）；请在官方 WebUI 阅读协议并完成登录。停止 SL 不会关闭 QQ，已加载 Hook 的卸载可在停止前通过 WebUI 操作。</p>
+                <details class="channels-card__hint" id="qq-sl-tutorial">
+                  <summary>使用教程与常见问题（点击展开）</summary>
+                  <ol>
+                    <li>如果 NapCat 已启用，先在下方停用并保存；输入机器人 QQ 号，点击创建实例，等待官方安装包下载和校验完成。下载失败时检查网络或代理。</li>
+                    <li>按需填写需要屏蔽的 QQ 用户或群号，点击“保存黑名单”。用户黑名单同时屏蔽其私聊和群内消息；空黑名单默认放行，群内仍必须 @ 机器人。旧版 SL 白名单不再限制接入。</li>
+                    <li>点击启动。WebUI 端口首次分配后固定复用；完整 WebSocket 地址和 Token 自动写入对应账号配置，无需每次手填。端口被占用时先释放占用，不会自动换地址。</li>
+                    <li>打开 WebUI，首次用户名为 admin，密码在下方实例目录的 snowluma/webui-initial-credentials.txt。按官方提示改密后删除该明文文件；WebUI 登录密码不是 OneBot Token。</li>
+                    <li>在官方 WebUI 阅读并确认协议，手动选择专用 QQ 进程进行 Hook。绑定账号之外的连接会被拒绝。连接建立不代表 QQ Hook 已正常捕获消息。</li>
+                    <li>无回复时检查 QQ 是否登录、Hook、连接状态、黑名单及模型配置；用另一个未被拉黑的 QQ 发消息，不要用机器人给自己发。</li>
+                    <li>停止或真正退出 Cyrene 会停止受管 SL，不会保证卸载已注入的 Hook；需要时先在 WebUI 卸载。自动启动默认关闭。QQ 客户端和外部浏览器不属于受管数据隔离范围。</li>
+                  </ol>
+                </details>
+                <div class="form-row">
+                  <label class="form-label" for="qq-instance-onebot-url">WebSocket 地址（自动配置）</label>
+                  <input id="qq-instance-onebot-url" class="form-input form-input--wide" readonly placeholder="创建后显示，无需手填" />
+                </div>
+                <div class="form-row">
+                  <label class="form-label" for="qq-instance-user-blocklist">QQ 用户黑名单</label>
+                  <textarea id="qq-instance-user-blocklist" class="form-input form-input--wide" rows="2" placeholder="每行一个，屏蔽其私聊和群内消息"></textarea>
+                </div>
+                <div class="form-row">
+                  <label class="form-label" for="qq-instance-group-blocklist">群号黑名单</label>
+                  <textarea id="qq-instance-group-blocklist" class="form-input form-input--wide" rows="2" placeholder="每行一个，屏蔽整个群"></textarea>
+                </div>
+                <div class="form-row">
+                  <button type="button" class="btn-secondary" id="qq-instance-save-blocklists">保存黑名单（不重启）</button>
+                </div>
+                <p id="qq-instance-save-feedback" class="channels-card__hint" role="status"></p>
+                <p id="qq-instance-feedback" role="status" style="white-space:pre-wrap;overflow-wrap:anywhere"></p>
+                <div class="form-row">
+                  <label><input id="qq-instance-remove-data" type="checkbox" /> 同时清除 SL 安装、登录及日志数据（保留 Cyrene 对话与记忆）</label>
+                  <button type="button" class="btn-secondary" data-action="delete">删除实例</button>
+                </div>
+              </section>
+            </div>
+          </div>
+
+          <div class="channels-card" id="qq-napcat-card">
             <div class="channels-card__header">
-              <h2>QQ（NapCat / OneBot 11）</h2>
+              <h2>QQ（NapCat）</h2>
               <span class="switch"><input id="channels-qq-enabled" type="checkbox" /><span class="switch__track"><span class="switch__thumb"></span></span></span>
             </div>
             <div class="channels-card__body">
+              <section id="qq-napcat-instance-panel" aria-label="NapCat 账号绑定">
+                <p class="channels-card__hint">NapCat 在外部安装运行，此处管理 Cyrene 的连接与账号绑定。与 SnowLuma 互斥。</p>
+                <div class="form-row">
+                  <label class="form-label" for="qq-napcat-instance-account">机器人 QQ 号</label>
+                  <input id="qq-napcat-instance-account" class="form-input form-input--wide" inputmode="numeric" placeholder="可创建账号绑定；旧非受管接入仍兼容" />
+                </div>
+                <div class="form-row">
+                  <button type="button" class="btn-secondary" data-action="create">创建账号绑定</button>
+                  <button type="button" class="btn-secondary" data-action="start">启动监听</button>
+                  <button type="button" class="btn-secondary" data-action="stop">停止监听</button>
+                  <button type="button" class="btn-secondary" data-action="delete">删除绑定</button>
+                </div>
+                <label><input id="qq-napcat-instance-auto" type="checkbox" /> 随 Cyrene 启动（需 QQ 渠道已启用）</label>
+                <p id="qq-napcat-instance-feedback" role="status" style="white-space:pre-wrap;overflow-wrap:anywhere"></p>
+              </section>
+              <details class="channels-card__hint">
+                <summary>NapCat 使用教程（点击展开）</summary>
+                <ol>
+                  <li>在外部安装并启动 NapCat，登录专用机器人 QQ。若使用账号绑定，先停用渠道，再输入该 QQ 号创建。</li>
+                  <li>设置监听模式、端口及 Token，填写好友/群白名单，启用渠道并保存。空白名单不会回复。</li>
+                  <li>在 NapCat 创建 WebSocket Client，填入下方显示的完整连接 URL 和相同 Token，再启用连接。Token 不是 WebUI 密码。</li>
+                  <li>使用另一个白名单 QQ 私聊测试；群聊需群号白名单并 @ 机器人。切换到 SnowLuma 前先停止并删除绑定。</li>
+                </ol>
+              </details>
+              <fieldset id="qq-napcat-legacy-controls" style="border:0;margin:0;padding:0;min-width:0">
               <div class="channels-status" id="channels-qq-status">
                 <span class="channels-status__dot channels-status__dot--offline"></span>
                 <span class="channels-status__text">未启用</span>
               </div>
+
               <p class="channels-card__hint">
-                Cyrene 在 Windows 监听反向 WebSocket，NapCat 作为 WebSocket Client 连接。
+                Cyrene 监听反向 WebSocket，QQ 后端作为 WebSocket Client 连接。
                 群聊仅响应白名单群中的 @；群聊共享个人记忆但强制禁用工具，请只添加可信群。
               </p>
               <div class="form-row">
@@ -1221,6 +1306,7 @@
                 <button type="button" class="btn-secondary" id="channels-qq-test">测试连接</button>
               </div>
               <div class="channels-feedback" id="channels-qq-feedback"></div>
+              </fieldset>
             </div>
           </div>
 

@@ -3,6 +3,7 @@
 // general/dom 的 proactiveDeliverySelect + shared 的 normalize/isProactiveDeliveryTargetSelectable。
 
 import { channelsState } from "./state";
+import { bindQqInstancePanel } from "./qq-instance-panel";
 import {
   channelsWechatEnabledEl, channelsFeishuEnabledEl, channelsQqEnabledEl,
   channelsRateUserEl, channelsRateChannelEl,
@@ -254,7 +255,9 @@ export async function refreshContextBindings(): Promise<void> {
   }
 }
 
+let qqInstancePanelBound = false;
 export async function loadChannelsPanel(): Promise<void> {
+  if (!qqInstancePanelBound) { qqInstancePanelBound = true; bindQqInstancePanel(loadChannelsPanel); }
   if (channelsState.initialized) {
     await refreshContextBindings();
     return;
@@ -562,9 +565,12 @@ export async function loadChannelsPanel(): Promise<void> {
     };
     if (channelsQqTokenEl?.value) qq.accessToken = channelsQqTokenEl.value;
     try {
+      const instance = await window.settings.channelsQqInstance({ action: "status" });
       await window.settings.channelsSaveConfig({ qq });
       if (qq.accessToken) hadQqToken = true;
-      await window.settings.channelsRestart();
+      if (instance.instance) {
+        await window.settings.channelsQqInstance({ action: qq.enabled ? "restart" : "stop" });
+      } else await window.settings.channelsRestart();
       const status = await window.settings.channelsGetStatus() as Record<string, { phase?: string; message?: string; detail?: Record<string, unknown> }>;
       renderQqDetail(status.qq);
       if (channelsQqTokenEl) {
@@ -572,7 +578,7 @@ export async function loadChannelsPanel(): Promise<void> {
         channelsQqTokenEl.type = "password";
         channelsQqTokenEl.placeholder = "已保存（输入新值会覆盖）";
       }
-      setQqFeedback("ok", "已启动监听；请在 NapCat 中新增 WebSocket Client，并使用上方 URL。");
+      setQqFeedback("ok", instance.instance?.backend === "snowluma" ? "配置已保存；请通过 SnowLuma WebUI 管理登录。" : "配置已保存；请在 NapCat 配置上方连接 URL。");
     } catch (error) {
       setQqFeedback("err", error instanceof Error ? error.message : String(error));
     }
