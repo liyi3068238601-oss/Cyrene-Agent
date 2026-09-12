@@ -134,6 +134,12 @@ export function createChannelContext(
     },
 
     recordIncomingSession(msg, context): void {
+      // 受管实例启用后历史键带账号；老用户升级前是无账号键，先一次性迁过来
+      // （migrateHistory 幂等：目标存在即跳过，copy 不删源）。
+      if (msg.accountId) {
+        options.migrateHistory(makeSessionId(msg.channel, msg.chatId), context.sessionId);
+        options.migrateHistory(makeSessionId(msg.channel, msg.senderId), context.sessionId);
+      }
       options.migrateHistory(
         makeSessionId(msg.channel, msg.senderId, msg.accountId),
         context.sessionId,
