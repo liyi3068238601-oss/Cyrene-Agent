@@ -214,14 +214,27 @@ function registerChannelsIpc(
     });
   });
 
-  ipc.handle(IPC.CHANNELS_SAVE_CONFIG, (_e, patch: unknown) => {
+  ipc.handle(IPC.CHANNELS_SAVE_CONFIG, async (_e, patch: unknown) => {
     const incoming = patch as { qq?: Record<string, unknown> };
+    const qqEnabledBefore = incoming?.qq && typeof incoming.qq.enabled === "boolean"
+      ? loadChannelsSettings().qq.enabled : undefined;
     if (incoming?.qq && readQqInstance()?.backend === "snowluma") {
       const current = loadChannelsSettings().qq;
       incoming.qq = { ...incoming.qq, port: current.port, listenMode: "loopback", accessToken: current.accessToken };
     }
     saveChannelsSettings(patch as Parameters<typeof saveChannelsSettings>[0]);
     reloadDispatcherSettings();
+    // 自动保存不经过实例面板：enabled 状态转换时复用手动保存的 stop/restart 生命周期，
+    // 否则运行中的 SnowLuma 会在 enabled=false 落盘后继续运行。
+    if (qqEnabledBefore !== undefined && incoming.qq && incoming.qq.enabled !== qqEnabledBefore && qqAdapter) {
+      try {
+        await qqAdapter.stop();
+        if (incoming.qq.enabled) await qqAdapter.start(true);
+      } catch (error) {
+        console.warn("[channels] QQ enabled 切换未完全生效:", error instanceof Error ? error.message : error);
+      }
+      broadcastChannelsStatus();
+    }
     return getPublicChannelsSettings();
   });
 

@@ -16,6 +16,8 @@ if (require.main === module) {
         windowsHide: true, shell: false, stdio: "ignore",
       });
       killer.on("error", () => child.kill());
+      // taskkill 启动成功但失败（如权限不足）时也要兜底，否则进程残留会占住端口。
+      killer.on("exit", code => { if (code !== 0) child.kill(); });
     } else child.kill("SIGTERM");
   };
   process.stdin.resume();

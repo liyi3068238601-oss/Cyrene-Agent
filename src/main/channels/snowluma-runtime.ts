@@ -95,6 +95,7 @@ export async function extractSnowLumaArchive(archive: string, destination: strin
 
 export class SnowLumaRuntime {
   private child: ChildProcess | null = null;
+  private stopping = false;
   webuiUrl: string | undefined;
   constructor(readonly root: string, private readonly notify: (message: string, failed?: boolean) => void) {}
 
@@ -192,7 +193,8 @@ export class SnowLumaRuntime {
       this.notify("SnowLuma 进程启动失败", true);
     });
     child.once("exit", code => {
-      if (this.child === child) { this.child = null; this.webuiUrl = undefined; this.notify(`SnowLuma 已退出 (${code ?? "signal"})`, true); }
+      // 主动停止不报失败；停止超时后 stopping 已复位，此后的退出仍按异常上报。
+      if (this.child === child && !this.stopping) { this.child = null; this.webuiUrl = undefined; this.notify(`SnowLuma 已退出 (${code ?? "signal"})`, true); }
     });
     const deadline = Date.now() + 45_000;
     while (Date.now() < deadline) {
@@ -215,11 +217,14 @@ export class SnowLumaRuntime {
     const child = this.child;
     if (!child) return;
     this.webuiUrl = undefined;
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("SnowLuma 停止超时，请检查该实例进程")), 10_000);
-      child.once("exit", () => { clearTimeout(timer); if (this.child === child) this.child = null; resolve(); });
-      child.stdin?.end();
-    });
+    this.stopping = true;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("SnowLuma 停止超时，请检查该实例进程")), 10_000);
+        child.once("exit", () => { clearTimeout(timer); if (this.child === child) this.child = null; resolve(); });
+        child.stdin?.end();
+      });
+    } finally { this.stopping = false; }
   }
 }
 async function exists(file: string): Promise<boolean> { return fs.access(file).then(() => true, () => false); }

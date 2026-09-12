@@ -53,19 +53,31 @@ export async function createQqInstance(request: QqInstanceRequest): Promise<void
   if (request.backend !== "napcat" && request.backend !== "snowluma") throw new Error("请选择 QQ 后端");
   if (loadChannelsSettings().qq.enabled) throw new Error("请先停止现有 QQ 渠道，再创建受管实例");
   phase = "installing"; message = "正在创建 QQ 实例";
-  if (request.backend === "snowluma") {
-    const root = path.join(qqInstanceRoot(), "snowluma");
-    // Kept data must never be silently assigned to another account.
-    if (fs.existsSync(path.join(root, "runtime"))) throw new Error("存在保留的 SnowLuma 数据；请先清除实例数据再创建");
-    await getSnowLumaRuntime().install();
+  const previous = loadChannelsSettings().qq;
+  let snowlumaInstalled = false;
+  try {
+    if (request.backend === "snowluma") {
+      const root = path.join(qqInstanceRoot(), "snowluma");
+      // Kept data must never be silently assigned to another account.
+      if (fs.existsSync(path.join(root, "runtime"))) throw new Error("存在保留的 SnowLuma 数据；请先清除实例数据再创建");
+      await getSnowLumaRuntime().install();
+      snowlumaInstalled = true;
+    }
+    saveChannelsSettings({ qq: { ...previous, enabled: false,
+      listenMode: "loopback", port: await freeLoopbackPort(), accessToken: randomBytes(32).toString("hex"),
+      allowedPrivateUserIds: [], allowedGroupIds: [], groupRequireMention: true,
+      blockedUserIds: [], blockedGroupIds: [],
+    } });
+    persist({ backend: request.backend, accountId: request.accountId, autoStart: false });
+  } catch (error) {
+    // 事务式回滚：本次已安装 runtime 且后续步骤失败时，恢复设置并删除新建目录，
+    // 避免留下被前置校验拒绝、需手动清数据才能重建的状态。
+    if (snowlumaInstalled) {
+      try { saveChannelsSettings({ qq: previous }); } catch { /* 尽力回滚 */ }
+      try { fs.rmSync(path.join(qqInstanceRoot(), "snowluma", "runtime"), { recursive: true, force: true }); } catch { /* 尽力回滚 */ }
+    }
+    throw error;
   }
-  const config = loadChannelsSettings().qq;
-  saveChannelsSettings({ qq: { ...config, enabled: false,
-    listenMode: "loopback", port: await freeLoopbackPort(), accessToken: randomBytes(32).toString("hex"),
-    allowedPrivateUserIds: [], allowedGroupIds: [], groupRequireMention: true,
-    blockedUserIds: [], blockedGroupIds: [],
-  } });
-  persist({ backend: request.backend, accountId: request.accountId, autoStart: false });
   phase = "stopped"; message = request.backend === "snowluma" ? "实例已创建：未拉黑的消息默认放行，群聊仍需 @；可配置黑名单后启动" : "实例已创建，请添加白名单后启动";
 }
 export function configureQqInstance(autoStart: boolean): void {
